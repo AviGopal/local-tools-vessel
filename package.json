@@ -1,0 +1,12 @@
+{
+  "name": "local-tools-vessel",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@avigopal/ias-executor-ts": "file:../ias-executor-ts"
+  }
+}
