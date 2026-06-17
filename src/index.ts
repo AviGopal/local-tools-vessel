@@ -1,10 +1,15 @@
 /**
+ * NOTE: All resolvers in this vessel are deterministic.
+ * Health endpoint: GET /health returns service status.
  * local-tools-vessel — deterministic shell/file/git resolver vessel.
+ * Maintained by the substrate loop.
+
  *
  * Spec: openspec/changes/2026-05-23-substrate-explicit-vessels Phase 1, task 1.1.
  * Port: 8230  |  Discovery: http://127.0.0.1:8100
  * Shapes: shellResult, fileContent, fileWriteResult, fileEditResult,
  *         gitStatus, gitDiff, gitCommitResult
+ * Runtime: Bun.
  */
 
 import { ActivityExecutor, ExecutionRuntime, VesselDaemon } from "@avigopal/ias-executor-ts";
