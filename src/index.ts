@@ -114,13 +114,20 @@ const codeSearch: ResolverHandler = async (ctx) => {
   try {
     const text = await Bun.file(path).text();
     const lines = text.split("\n");
-    const re = new RegExp(pattern, flags);
+    // A SEARCH inherently means "find ALL matches". Force the global flag: the
+    // patch_with_tools LLM routinely calls this with flags:"" or flags:"m" (no
+    // "g") to inspect a file, and the old `if (!flags.includes("g")) break;`
+    // then returned only the FIRST match (match_count:1) — blinding the patcher
+    // so it could never locate edits and exhausted every attempt on real files
+    // (the systematic cause of zero verified patches → flat landing throughput).
+    // `flags` still controls i/m/s; callers wanting one hit use limit:1.
+    const gFlags = flags.includes("g") ? flags : flags + "g";
+    const re = new RegExp(pattern, gFlags);
     const matches: Array<{ line: number; col: number; capture: string; line_text: string }> = [];
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null && matches.length < limit) {
       const ln = lineNumber(text, m.index);
       matches.push({ line: ln, col: m.index - text.lastIndexOf("\n", m.index - 1), capture: m[0], line_text: lines[ln - 1] ?? "" });
-      if (!flags.includes("g")) break;
       if (m.index === re.lastIndex) re.lastIndex++;
     }
     return { shape: "codeSearchResult", path, pattern, total_lines: lines.length, match_count: matches.length, matches };
