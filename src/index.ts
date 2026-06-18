@@ -295,6 +295,30 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
 
 // ── daemon ────────────────────────────────────────────────────────────────────
 
+// code_read_lines (2026-06-18): return the EXACT current content of a line range,
+// with line numbers. The patcher previously had to RECONSTRUCT a region's content
+// from (truncated) code_search matches to build a code_replace_lines call — it got
+// multi-line regions wrong, the replacement broke typecheck, and it exhausted the
+// turn budget on complex edits. With an exact read, the flow becomes:
+// code_read_lines(start,end) -> code_replace_lines(start,end, <edited copy of that
+// exact text>). This is the capability lever for non-trivial surgical edits.
+const codeReadLines: ResolverHandler = async (ctx) => {
+  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const ptr = ((ctx.body as Record<string, unknown>)?.["impulse"] as Record<string, unknown> | undefined)?.["pointer"] as Record<string, unknown> | undefined;
+  const startLine = Number((ctx.body as Record<string, unknown>)?.start_line ?? ptr?.["start_line"] ?? 0);
+  const endLineRaw = Number((ctx.body as Record<string, unknown>)?.end_line ?? ptr?.["end_line"] ?? 0);
+  if (!path || startLine < 1 || endLineRaw < startLine) return { error: "path, start_line, end_line are required (1-indexed, end >= start)" };
+  try {
+    const src = await Bun.file(path).text();
+    const lines = src.split("\n");
+    if (startLine > lines.length) return { error: `start_line ${startLine} exceeds file length ${lines.length}` };
+    const endLine = Math.min(endLineRaw, lines.length);
+    const slice = lines.slice(startLine - 1, endLine);
+    const numbered = slice.map((l, i) => `${startLine + i}: ${l}`).join("\n");
+    return { shape: "codeReadResult", path, start_line: startLine, end_line: endLine, total_lines: lines.length, content: slice.join("\n"), numbered };
+  } catch (e) { return { error: (e as Error).message }; }
+};
+
 const resolvers = new Map<string, ResolverHandler>([
   ["shell", shell], ["bash", shell],
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
@@ -304,6 +328,7 @@ const resolvers = new Map<string, ResolverHandler>([
   ["code_find_import", codeFindImport],
   ["code_insert_after_line", codeInsertAfterLine],
   ["code_replace_lines", codeReplaceLines],
+  ["code_read_lines", codeReadLines],
   ["code_add_import", codeAddImport],
   ["code_verify_typecheck", codeVerifyTypecheck],
 ]);
@@ -320,7 +345,7 @@ await new VesselDaemon({
     "shellResult", "fileContent", "fileWriteResult", "fileEditResult",
     "gitStatus", "gitDiff", "gitCommitResult",
     "codeSearchResult", "codeFindFunctionResult", "codeFindImportResult",
-    "codeInsertResult", "codeReplaceResult", "codeAddImportResult", "codeTypecheckResult",
+    "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult",
   ],
   executor: new ActivityExecutor(runtime),
   resolvers,
