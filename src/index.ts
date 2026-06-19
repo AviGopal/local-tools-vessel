@@ -54,7 +54,11 @@ const fsRead: ResolverHandler = async (ctx) => {
 };
 
 const fsWrite: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "path"), content = str(ctx.body, "content");
+  // Read from impulse.pointer too — callers (patch_with_tools authoring a
+  // NET-NEW file) dispatch via the impulse envelope, so top-level-only reads
+  // made every such call fail with "required". Mirrors fsEdit / fsRead.
+  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const content = str(ctx.body, "impulse", "pointer", "content") ?? str(ctx.body, "content");
   if (!path || content === undefined) return { error: "path and content are required" };
   return Bun.write(path, content).then(() => ({ shape: "fileWriteResult", path, ok: true }))
     .catch(e => ({ error: (e as Error).message }));
