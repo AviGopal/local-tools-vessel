@@ -290,7 +290,14 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
   if (!cwd) return { error: "cwd is required" };
   try {
     const r = await sh(`${bunCmd} run ${script}`, cwd);
-    const tail = r.stderr.length > 4096 ? r.stderr.slice(-4096) : r.stderr;
+    // tsc (`bun run typecheck`) writes diagnostics to STDOUT, not stderr — the
+    // old code scanned only stderr, so error_count was ALWAYS 0 even on failure
+    // (the false-FAVORABLE root cause). Scan BOTH streams. exit_code is the
+    // authoritative pass/fail (tsc exits non-zero on any error); error_count +
+    // error_lines are diagnostics. ok REQUIRES a zero exit (fail-closed: a
+    // missing/failing typecheck script exits non-zero → ok=false).
+    const combined = `${r.stdout}\n${r.stderr}`;
+    const tail = combined.length > 8192 ? combined.slice(-8192) : combined;
     const errorLines = tail.split("\n").filter((l) => /error TS\d+:/.test(l)).slice(0, 20);
     return {
       shape: "codeTypecheckResult",
