@@ -30,7 +30,13 @@ function str(o: unknown, ...keys: string[]): string | undefined {
 }
 
 async function sh(cmd: string, cwd = DEFAULT_CWD) {
-  const p = Bun.spawn(["bash", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe" });
+  // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
+  // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
+  // every code-class feature_compose returned UNFAVORABLE and nothing landed.
+  // Pass an explicit env that prepends bun's dir to PATH (robust to either set).
+  const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
+  const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
+  const p = Bun.spawn(["bash", "-c", cmd], { cwd, env, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
   ]);
