@@ -81,9 +81,19 @@ const fsEdit: ResolverHandler = async (ctx) => {
     return { error: "path, old_string, and new_string are required" };
   try {
     const text = await Bun.file(path).text();
-    if (!text.includes(old_string)) return { error: "old_string not found in file", path };
-    await Bun.write(path, text.replace(old_string, new_string));
-    return { shape: "fileEditResult", path, ok: true };
+    if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, new_string)); return { shape: "fileEditResult", path, ok: true }; }
+    // NORMALIZED FALLBACK (task #18): the drafter often reproduces ambiguous unicode
+    // (em/en-dash, curly quotes, NBSP) imperfectly, so an otherwise-correct edit fails
+    // exact-match. Normalize both sides length-preservingly (char-for-char) and, if the
+    // normalized old_string occurs EXACTLY ONCE, replace the corresponding ORIGINAL slice.
+    const normU = (s: string): string => s.replace(/[\u2012\u2013\u2014\u2015\u2212]/g, "-").replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\u00a0/g, " ");
+    const nText = normU(text), nOld = normU(old_string);
+    const oi = nText.indexOf(nOld);
+    if (oi !== -1 && nOld.length > 0 && nText.indexOf(nOld, oi + 1) === -1) {
+      await Bun.write(path, text.slice(0, oi) + new_string + text.slice(oi + nOld.length));
+      return { shape: "fileEditResult", path, ok: true, normalized_match: true };
+    }
+    return { error: "old_string not found in file", path };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
