@@ -357,7 +357,10 @@ const codeReadLines: ResolverHandler = async (ctx) => {
 // Distillation to concept-db must go through class-grain concept writes with
 // provenance tags; NOT wired into any compose/decompose prompt path.
 const webSearch: ResolverHandler = async (ctx) => {
-  const query = str(ctx.body, "impulse", "pointer", "query") ?? str(ctx.body, "query");
+  const query = str(ctx.body, "impulse", "pointer", "query") ?? str(ctx.body, "query")
+    ?? str(ctx.body, "impulse", "pointer", "q") ?? str(ctx.body, "impulse", "pointer", "search_query")
+    ?? str(ctx.body, "impulse", "pointer", "search") ?? str(ctx.body, "impulse", "pointer", "text")
+    ?? str(ctx.body, "impulse", "pointer", "question") ?? str(ctx.body, "impulse", "pointer", "goal");
   if (!query) return { error: "query is required" };
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) return { error: "OPENROUTER_API_KEY not configured" };
