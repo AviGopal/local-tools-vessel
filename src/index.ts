@@ -351,6 +351,17 @@ const codeReadLines: ResolverHandler = async (ctx) => {
   } catch (e) { return { error: (e as Error).message }; }
 };
 
+// web_search (2026-07-04): webSearchResult — EXTERNAL-UNTRUSTED web snippets.
+// Mediation rules (structural): snippets only (title/url/snippet), never full
+// page bodies; every result carries provenance (url, retrieved_at, provider).
+// Distillation to concept-db must go through class-grain concept writes with
+// provenance tags; NOT wired into any compose/decompose prompt path.
+const webSearch: ResolverHandler = async (ctx) => {
+  const query = str(ctx.body, "impulse", "pointer", "query") ?? str(ctx.body, "query");
+  if (!query) return { error: "query is required" };
+  return { shape: "webSearchResult", query, results: [], retrieved_at: new Date().toISOString(), provider: "stub" };
+};
+
 const resolvers = new Map<string, ResolverHandler>([
   ["shell", shell], ["bash", shell],
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
@@ -363,6 +374,7 @@ const resolvers = new Map<string, ResolverHandler>([
   ["code_read_lines", codeReadLines],
   ["code_add_import", codeAddImport],
   ["code_verify_typecheck", codeVerifyTypecheck],
+  ["web_search", webSearch],
 ]);
 
 const runtime = new ExecutionRuntime({
@@ -377,7 +389,7 @@ await new VesselDaemon({
     "shellResult", "fileContent", "fileWriteResult", "fileEditResult",
     "gitStatus", "gitDiff", "gitCommitResult",
     "codeSearchResult", "codeFindFunctionResult", "codeFindImportResult",
-    "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult",
+    "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult", "webSearchResult",
   ],
   executor: new ActivityExecutor(runtime),
   resolvers,
