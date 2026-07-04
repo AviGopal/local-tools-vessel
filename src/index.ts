@@ -359,7 +359,33 @@ const codeReadLines: ResolverHandler = async (ctx) => {
 const webSearch: ResolverHandler = async (ctx) => {
   const query = str(ctx.body, "impulse", "pointer", "query") ?? str(ctx.body, "query");
   if (!query) return { error: "query is required" };
-  return { shape: "webSearchResult", query, results: [], retrieved_at: new Date().toISOString(), provider: "stub" };
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return { error: "OPENROUTER_API_KEY not configured" };
+  const ptr = ((ctx.body as Record<string, unknown>)?.impulse as Record<string, unknown> | undefined)?.pointer as Record<string, unknown> | undefined;
+  const maxResults = Math.min(Number((ctx.body as Record<string, unknown>)?.max_results ?? ptr?.max_results ?? 5) || 5, 10);
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: process.env.WEB_SEARCH_MODEL ?? "openai/gpt-4o-mini",
+        plugins: [{ id: "web", max_results: maxResults }],
+        messages: [{ role: "user", content: query }],
+        max_tokens: 100,
+      }),
+      signal: AbortSignal.timeout(12000),
+    });
+    const data = await res.json() as { choices?: Array<{ message?: { annotations?: Array<{ url_citation?: { title?: string; url?: string; content?: string } }> } }>; error?: { message?: string } };
+    if (data.error) return { error: `openrouter: ${data.error.message ?? "unknown"}` };
+    const anns = data.choices?.[0]?.message?.annotations ?? [];
+    let budget = 8192;
+    const results = anns.slice(0, maxResults).map((a) => {
+      const snippet = (a.url_citation?.content ?? "").replace(/<[^>]*>/g, "").slice(0, Math.max(0, Math.min(500, budget)));
+      budget -= snippet.length;
+      return { title: a.url_citation?.title ?? "", url: a.url_citation?.url ?? "", snippet };
+    });
+    return { shape: "webSearchResult", query, results, retrieved_at: new Date().toISOString(), provider: "openrouter-web-plugin" };
+  } catch (e) { return { error: (e as Error).message }; }
 };
 
 const resolvers = new Map<string, ResolverHandler>([
