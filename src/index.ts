@@ -401,6 +401,7 @@ const resolvers = new Map<string, ResolverHandler>([
   ["code_add_import", codeAddImport],
   ["code_verify_typecheck", codeVerifyTypecheck],
   ["web_search", webSearch],
+  ["webSearchResult", webSearch],
 ]);
 
 const runtime = new ExecutionRuntime({
