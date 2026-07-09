@@ -405,6 +405,15 @@ const resolvers = new Map<string, ResolverHandler>([
   ["code_verify_typecheck", codeVerifyTypecheck],
   ["web_search", webSearch],
   ["webSearchResult", webSearch],
+  // Advertised OUTPUT shapes double as pointer-type aliases so discovery-routed
+  // resolves (pointer.type = advertised shape) reach the same handlers.
+  ["shellResult", shell], ["fileContent", fsRead], ["fileWriteResult", fsWrite],
+  ["fileEditResult", fsEdit], ["gitStatus", gitStatus], ["gitDiff", gitDiff],
+  ["gitCommitResult", gitCommit], ["codeSearchResult", codeSearch],
+  ["codeFindFunctionResult", codeFindFunction], ["codeFindImportResult", codeFindImport],
+  ["codeInsertResult", codeInsertAfterLine], ["codeReplaceResult", codeReplaceLines],
+  ["codeReadResult", codeReadLines], ["codeAddImportResult", codeAddImport],
+  ["codeTypecheckResult", codeVerifyTypecheck],
 ]);
 
 const runtime = new ExecutionRuntime({
