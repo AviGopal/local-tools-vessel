@@ -48,7 +48,7 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
 const shell: ResolverHandler = async (ctx) => {
   const command = str(ctx.body, "impulse", "pointer", "command") ?? str(ctx.body, "command");
   if (!command) return { error: "command is required" };
-  return sh(command, str(ctx.body, "cwd")).then(r => ({ shape: "shellResult", ...r }))
+  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd")).then(r => ({ shape: "shellResult", ...r }))
     .catch(e => ({ error: (e as Error).message }));
 };
 
@@ -98,19 +98,19 @@ const fsEdit: ResolverHandler = async (ctx) => {
 };
 
 const gitStatus: ResolverHandler = async (ctx) =>
-  sh("git status --porcelain", str(ctx.body, "cwd")).then(r => ({ shape: "gitStatus", ...r }))
+  sh("git status --porcelain", str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd")).then(r => ({ shape: "gitStatus", ...r }))
     .catch(e => ({ error: (e as Error).message }));
 
 const gitDiff: ResolverHandler = async (ctx) => {
   const staged = (ctx.body as Record<string,unknown>)?.staged === true;
-  return sh(staged ? "git diff --staged" : "git diff", str(ctx.body, "cwd"))
+  return sh(staged ? "git diff --staged" : "git diff", str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"))
     .then(r => ({ shape: "gitDiff", ...r })).catch(e => ({ error: (e as Error).message }));
 };
 
 const gitCommit: ResolverHandler = async (ctx) => {
   const message = str(ctx.body, "message");
   if (!message) return { error: "message is required" };
-  return sh(`git commit -m ${JSON.stringify(message)}`, str(ctx.body, "cwd"))
+  return sh(`git commit -m ${JSON.stringify(message)}`, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"))
     .then(r => ({ shape: "gitCommitResult", ...r })).catch(e => ({ error: (e as Error).message }));
 };
 
@@ -300,7 +300,7 @@ const codeAddImport: ResolverHandler = async (ctx) => {
 };
 
 const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
-  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   const script = str(ctx.body, "impulse", "pointer", "script") ?? str(ctx.body, "script") ?? "typecheck";
   const bunCmd = str(ctx.body, "impulse", "pointer", "bun_cmd") ?? str(ctx.body, "bun_cmd") ?? "/root/.bun/bin/bun";
   if (!cwd) return { error: "cwd is required" };
