@@ -300,7 +300,7 @@ const codeAddImport: ResolverHandler = async (ctx) => {
 };
 
 const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
-  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   const script = str(ctx.body, "impulse", "pointer", "script") ?? str(ctx.body, "script") ?? "typecheck";
   const bunCmd = str(ctx.body, "impulse", "pointer", "bun_cmd") ?? str(ctx.body, "bun_cmd") ?? "/root/.bun/bin/bun";
   if (!cwd) return { error: "cwd is required" };
