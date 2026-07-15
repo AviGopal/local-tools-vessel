@@ -55,8 +55,14 @@ const shell: ResolverHandler = async (ctx) => {
 const fsRead: ResolverHandler = async (ctx) => {
   const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   if (!path) return { error: "path is required" };
-  return Bun.file(path).text().then(content => ({ shape: "fileContent", path, content }))
-    .catch(e => ({ error: (e as Error).message }));
+  for (let attempt = 0; ; attempt++) {
+    try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content }; }
+    catch (e) {
+      const msg = (e as Error)?.message ?? "";
+      if (attempt < 5 && /ENOENT|no such file/i.test(msg)) { await new Promise((r) => setTimeout(r, 80)); continue; }
+      return { error: msg };
+    }
+  }
 };
 
 const fsWrite: ResolverHandler = async (ctx) => {
