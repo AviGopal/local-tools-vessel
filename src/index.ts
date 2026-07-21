@@ -20,6 +20,18 @@ const VESSEL_ID = "local-tools-vessel";
 const DISCOVERY = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 const API_KEY = process.env.METABOB_API_KEY ?? "";
 const DEFAULT_CWD = process.env.WORKSPACE_ROOT ?? "/workspace";
+const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
+// Walk resolvers pass repo-relative "repos/<vessel>/..." paths; map them to the live runtime
+// tree so an edit hits the CANONICAL file, not a shadow tree created under cwd. feature_compose
+// passes absolute /vessels/... paths (already mapped) which pass through unchanged. PREFIX-keyed
+// (never existsSync) so a stray shadow stub can never shadow the canonical file. Without this,
+// every walk-routed vessel edit ENOENTs (or silently corrupts a /vessels/local-tools-vessel/repos
+// shadow tree), flooring the entire "walk edits a vessel" class.
+function mapPath(p: string | undefined): string | undefined {
+  if (!p) return p;
+  if (p.startsWith("repos/")) return `${RUNTIME_ROOT}/${p.slice("repos/".length)}`;
+  return p;
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -53,7 +65,7 @@ const shell: ResolverHandler = async (ctx) => {
 };
 
 const fsRead: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   if (!path) return { error: "path is required" };
   for (let attempt = 0; ; attempt++) {
     try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content }; }
@@ -69,7 +81,7 @@ const fsWrite: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools authoring a
   // NET-NEW file) dispatch via the impulse envelope, so top-level-only reads
   // made every such call fail with "required". Mirrors fsEdit / fsRead.
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const content = str(ctx.body, "impulse", "pointer", "content") ?? str(ctx.body, "content");
   if (!path || content === undefined) return { error: "path and content are required" };
   return Bun.write(path, content).then(() => ({ shape: "fileWriteResult", path, ok: true }))
@@ -80,7 +92,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools) dispatch via the
   // impulse envelope, so top-level-only reads (the prior bug) made every call
   // fail with "required". Mirrors code_replace_lines' fix.
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const old_string = str(ctx.body, "impulse", "pointer", "old_string") ?? str(ctx.body, "old_string");
   const new_string = str(ctx.body, "impulse", "pointer", "new_string") ?? str(ctx.body, "new_string");
   if (!path || old_string === undefined || new_string === undefined)
@@ -137,7 +149,7 @@ function lineNumber(text: string, idx: number): number {
 }
 
 const codeSearch: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const pattern = str(ctx.body, "impulse", "pointer", "pattern") ?? str(ctx.body, "pattern");
   const flags = str(ctx.body, "impulse", "pointer", "flags") ?? str(ctx.body, "flags") ?? "g";
   const limit = Number((ctx.body as Record<string, unknown>)?.limit ?? 50);
@@ -166,7 +178,7 @@ const codeSearch: ResolverHandler = async (ctx) => {
 };
 
 const codeFindFunction: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const name = str(ctx.body, "impulse", "pointer", "name") ?? str(ctx.body, "name");
   if (!path || !name) return { error: "path and name are required" };
   try {
@@ -202,7 +214,7 @@ const codeFindFunction: ResolverHandler = async (ctx) => {
 };
 
 const codeFindImport: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   if (!path || !moduleName) return { error: "path and module are required" };
   try {
@@ -224,7 +236,7 @@ const codeFindImport: ResolverHandler = async (ctx) => {
 };
 
 const codeInsertAfterLine: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const ptr = ((ctx.body as Record<string, unknown>)?.impulse as Record<string, unknown> | undefined)?.pointer as Record<string, unknown> | undefined;
   const afterLine = Number((ctx.body as Record<string, unknown>)?.after_line ?? ptr?.after_line ?? 0);
   const text = str(ctx.body, "impulse", "pointer", "text") ?? str(ctx.body, "text");
@@ -241,7 +253,7 @@ const codeInsertAfterLine: ResolverHandler = async (ctx) => {
 };
 
 const codeReplaceLines: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   // BUG FIX (2026-06-14): start_line/end_line were read ONLY from top-level
   // ctx.body, but patch_with_tools (and any impulse-envelope caller) nests args
   // under impulse.pointer — so they arrived undefined → Number(undefined)=0 →
@@ -264,7 +276,7 @@ const codeReplaceLines: ResolverHandler = async (ctx) => {
 };
 
 const codeAddImport: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   const specifier = str(ctx.body, "impulse", "pointer", "specifier") ?? str(ctx.body, "specifier");
   if (!path || !moduleName || !specifier) return { error: "path, module, and specifier are required" };
@@ -341,7 +353,7 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
 // code_read_lines(start,end) -> code_replace_lines(start,end, <edited copy of that
 // exact text>). This is the capability lever for non-trivial surgical edits.
 const codeReadLines: ResolverHandler = async (ctx) => {
-  const path = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const ptr = ((ctx.body as Record<string, unknown>)?.["impulse"] as Record<string, unknown> | undefined)?.["pointer"] as Record<string, unknown> | undefined;
   const startLine = Number((ctx.body as Record<string, unknown>)?.start_line ?? ptr?.["start_line"] ?? 0);
   const endLineRaw = Number((ctx.body as Record<string, unknown>)?.end_line ?? ptr?.["end_line"] ?? 0);
