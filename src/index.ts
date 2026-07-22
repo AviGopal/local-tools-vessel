@@ -57,6 +57,10 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
 
 // ── resolvers ─────────────────────────────────────────────────────────────────
 
+const dispatch_id: ResolverHandler = async (ctx) => {
+  return { shape: "dispatch_id", dispatch_id: ctx.body.dispatch_id };
+};
+
 const shell: ResolverHandler = async (ctx) => {
   const command = str(ctx.body, "impulse", "pointer", "command") ?? str(ctx.body, "command");
   if (!command) return { error: "command is required" };
