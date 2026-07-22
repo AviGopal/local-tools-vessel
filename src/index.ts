@@ -119,6 +119,21 @@ const fsEdit: ResolverHandler = async (ctx) => {
   } catch (e) { return { error: (e as Error).message }; }
 };
 
+const boundedShellResolver: ResolverHandler = async (ctx) => {
+  const command = str(ctx.body, "impulse", "pointer", "command") ?? str(ctx.body, "command");
+  if (!command) return { error: "command is required" };
+  const timeoutSec = Number((ctx.body as Record<string, unknown>)?.timeout ?? 10);
+  if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) return { error: "timeout must be a positive number" };
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? DEFAULT_CWD;
+  const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
+  const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
+  const p = Bun.spawn(["bash", "-c", command], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: timeoutSec * 1000 });
+  const [stdout, stderr, exit_code] = await Promise.all([
+    new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
+  ]);
+  return { shape: "boundedShellResult", stdout, stderr, exit_code };
+};
+
 const gitStatus: ResolverHandler = async (ctx) =>
   sh("git status --porcelain", str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd")).then(r => ({ shape: "gitStatus", ...r }))
     .catch(e => ({ error: (e as Error).message }));
@@ -414,8 +429,10 @@ const webSearch: ResolverHandler = async (ctx) => {
 };
 
 const resolvers = new Map<string, ResolverHandler>([
+  ["dispatch_id", dispatch_id],
   ["shell", shell], ["bash", shell],
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
+  ["bounded_shell", boundedShellResolver],
   ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit],
   ["code_search", codeSearch],
   ["code_find_function", codeFindFunction],
