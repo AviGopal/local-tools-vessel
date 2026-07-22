@@ -129,7 +129,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
-  const p = Bun.spawn(["bash", "-c", command], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(30000) });
+  const p = Bun.spawn(["bash", "-c", command], { cwd, env, stdout: "pipe", stderr: "pipe", signal: controller.signal });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
   ]);
