@@ -161,7 +161,46 @@ const fsEdit: ResolverHandler = async (ctx) => {
       await Bun.write(path, text.slice(0, oi) + new_string + text.slice(oi + nOld.length));
       return { shape: "fileEditResult", path, ok: true, normalized_match: true };
     }
-    return { error: "old_string not found in file", path };
+    // ANCHOR-MISS DIAGNOSTIC (2026-08-02). A bare "not found" tells the drafter
+    // nothing, so it retries with another invented anchor — 120 misses in 24h, and
+    // the captured args show the anchors are CONFABULATED, not stale:
+    // `process.env.LLM_ENDPOINT`, `Bearer ${METABOB_API_KEY}` and
+    // `llmCall(llmEndpoint, prompt, model` occur ZERO times in the target file,
+    // whose real line is `const llmEndpoint = llmEndpoints[0]!;`. The drafter is
+    // editing a plausible reconstruction of the file rather than the file itself.
+    // So: hand back the REAL surrounding text to re-ground the retry — the missing
+    // fact at the moment of use, not a longer prompt.
+    //
+    // Located by TOKEN SIMILARITY, not by the longest token: a longest-token search
+    // matched `METABOB_API_KEY` on an `import` line and would have pointed the
+    // drafter at the wrong place entirely. Import lines are excluded and at least
+    // two shared tokens are required, so a weak match reports nothing rather than
+    // something misleading.
+    const lines = text.split("\n");
+    const firstAnchorLine = old_string.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+    let idx = firstAnchorLine ? lines.findIndex((l) => l.includes(firstAnchorLine)) : -1;
+    if (idx === -1 && firstAnchorLine) {
+      const toks = [...new Set(firstAnchorLine.match(/[A-Za-z_$][\w$]{3,}/g) ?? [])];
+      let bestScore = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.trimStart().startsWith("import ")) continue;
+        let score = 0;
+        for (const t of toks) if (line.includes(t)) score++;
+        if (score > bestScore) { bestScore = score; idx = i; }
+      }
+      if (bestScore < 2) idx = -1;
+    }
+    const hint = idx !== -1
+      ? (() => {
+          const from = Math.max(0, idx - 2), to = Math.min(lines.length, idx + 4);
+          return ` The closest real text is lines ${from + 1}-${to} of ${lines.length}, VERBATIM:\n` +
+            lines.slice(from, to).map((l, i) => `${from + i + 1}: ${l}`).join("\n") +
+            `\nCopy old_string from THIS text exactly, including indentation.`;
+        })()
+      : ` NOTHING resembling your anchor occurs in this ${lines.length}-line file — you are editing` +
+        ` from memory, not from the file. Call fs_read on ${path} and copy an EXACT substring.`;
+    return { error: `old_string not found in file.${hint}`, path };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
