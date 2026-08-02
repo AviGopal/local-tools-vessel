@@ -58,7 +58,7 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
 // ── resolvers ─────────────────────────────────────────────────────────────────
 
 const dispatch_id: ResolverHandler = async (ctx) => {
-  return { shape: "dispatch_id", dispatch_id: ctx.body.dispatch_id };
+  return { shape: "dispatch_id", dispatch_id: str(ctx.body, "dispatch_id") ?? str(ctx.body, "impulse", "pointer", "dispatch_id") };
 };
 
 const shell: ResolverHandler = async (ctx) => {
@@ -468,6 +468,18 @@ await new VesselDaemon({
     "gitStatus", "gitDiff", "gitCommitResult",
     "codeSearchResult", "codeFindFunctionResult", "codeFindImportResult",
     "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult", "webSearchResult",
+    // TOOL-NAME aliases. patch_with_tools drives the tool names directly
+    // (code_search, code_read_lines, ...), and every one of these is already a key
+    // in the `resolvers` Map above — but they were never ADVERTISED, so discovery
+    // answered "unknown shape: code_search — no local or remote producer" and the
+    // byte-anchored edit route burned its whole turn budget on tools it could not
+    // reach. Advertising them costs nothing; they already resolve.
+    "shell", "bash", "bounded_shell",
+    "fs_read", "fs_write", "fs_edit",
+    "git_status", "git_diff", "git_commit",
+    "code_search", "code_find_function", "code_find_import",
+    "code_insert_after_line", "code_replace_lines", "code_read_lines",
+    "code_add_import", "code_verify_typecheck", "web_search",
   ],
   executor: new ActivityExecutor(runtime),
   resolvers,
