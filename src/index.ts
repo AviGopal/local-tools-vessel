@@ -88,6 +88,29 @@ const fsWrite: ResolverHandler = async (ctx) => {
   const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const content = str(ctx.body, "impulse", "pointer", "content") ?? str(ctx.body, "content");
   if (!path || content === undefined) return { error: "path and content are required" };
+  // CATASTROPHIC-TRUNCATION GUARD. fs_write is a whole-file writer exposed
+  // directly to the drafter LLM, and it writes RUNNING vessel source (callers
+  // apply against /vessels). Unguarded, a single malformed tool call replaces a
+  // 190KB resolver with a placeholder sentence: observed twice today, when
+  // feature-compose.ts (190,111 bytes) became 38 bytes reading "updated content
+  // to close substrate gap". That also destroys the file's own guards, and
+  // patch_with_tools then snapshots the CORRUPT file as its rollback baseline,
+  // so every later run "restores" the corruption — the damage is self-sustaining.
+  // Refuse only a catastrophic shrink of an already-substantial file, so
+  // net-new authoring (the documented caller above) and same-size whole-file
+  // repairs are unaffected. Corpus-checked: fs_write was called 2 times in 24h
+  // of live journal, both in the window that produced the corruption above.
+  try {
+    const existing = Bun.file(path);
+    if (await existing.exists()) {
+      const prevSize = existing.size;
+      if (prevSize > 1000 && content.length * 10 < prevSize) {
+        const detail = `fs_write refused: ${path} exists at ${prevSize} bytes and the write would truncate it to ${content.length}. A whole-file write that discards >90% of a substantial file is corruption, not authoring — use fs_edit with a verbatim anchor.`;
+        console.error(`[local-tools] ${detail}`);
+        return { error: detail, path };
+      }
+    }
+  } catch { /* existence probe is advisory — never block a legitimate write on a stat failure */ }
   return Bun.write(path, content).then(() => ({ shape: "fileWriteResult", path, ok: true }))
     .catch(e => ({ error: (e as Error).message }));
 };
