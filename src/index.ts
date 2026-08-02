@@ -101,6 +101,19 @@ const fsEdit: ResolverHandler = async (ctx) => {
   const new_string = str(ctx.body, "impulse", "pointer", "new_string") ?? str(ctx.body, "new_string");
   if (!path || old_string === undefined || new_string === undefined)
     return { error: "path, old_string, and new_string are required" };
+  // EMPTY ANCHOR IS FILE CORRUPTION, NOT AN EDIT. `"".includes("")` is true for
+  // EVERY string and `text.replace("", x)` PREPENDS x at byte 0 — so an edit op
+  // carrying an empty old_string silently injects its new_string in front of the
+  // whole file and reports ok:true. That is the byte-0 corruption signature that
+  // crash-looped development-vessel on both substrates (an unrendered
+  // `{{source_code.content}}` placeholder landed at byte 0 of its own source), and
+  // the drafter emits this malformed op ~44 times/day. The normalized fallback
+  // below already guards `nOld.length > 0`; the exact path did not.
+  // Corpus-checked before landing: ZERO callers in the fleet pass an empty
+  // old_string deliberately (no `old_string: ""` construction site exists), so
+  // this rejects only malformed ops.
+  if (old_string.length === 0)
+    return { error: "old_string must be a non-empty verbatim anchor — an empty anchor prepends to byte 0 rather than editing", path };
   try {
     const text = await Bun.file(path).text();
     if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, new_string)); return { shape: "fileEditResult", path, ok: true }; }
