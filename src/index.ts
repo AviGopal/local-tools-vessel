@@ -137,6 +137,16 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // this rejects only malformed ops.
   if (old_string.length === 0)
     return { error: "old_string must be a non-empty verbatim anchor — an empty anchor prepends to byte 0 rather than editing", path };
+  // IDENTITY EDIT IS NOT AN EDIT. `empty_diff_identity_edit` is rule #1 of the
+  // compose lesson guidance (feature-compose.ts:1527) and has had ZERO code
+  // enforcement anywhere in the fleet — it was detected only post hoc, by matching
+  // /diff is empty/i against an LLM judge's prose. Refuse it at the writer, so a
+  // no-op op cannot consume an apply slot and then be graded on a judge's wording.
+  // FP surface is provably zero: no construction site emits old_string ===
+  // new_string deliberately, and such an op writes identical bytes by definition,
+  // so refusing it changes no file contents anywhere.
+  if (old_string === new_string)
+    return { error: "old_string and new_string are identical — this op is a no-op, not an edit", path };
   try {
     const text = await Bun.file(path).text();
     if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, new_string)); return { shape: "fileEditResult", path, ok: true }; }
