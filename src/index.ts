@@ -48,7 +48,7 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
   // Pass an explicit env that prepends bun's dir to PATH (robust to either set).
   const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
   const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
-  const p = Bun.spawn(["bash", "-c", cmd], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(30000) });
+  const requestTimeoutMs = 30000; const p = Bun.spawn(["bash", "-c", cmd], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(requestTimeoutMs) });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
   ]);
