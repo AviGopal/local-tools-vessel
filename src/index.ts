@@ -27,7 +27,7 @@ const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
 // (never existsSync) so a stray shadow stub can never shadow the canonical file. Without this,
 // every walk-routed vessel edit ENOENTs (or silently corrupts a /vessels/local-tools-vessel/repos
 // shadow tree), flooring the entire "walk edits a vessel" class.
-function mapPath(p: string | undefined): string | undefined {
+export function mapPath(p: string | undefined): string | undefined {
   if (!p) return p;
   if (p.startsWith("repos/")) return `${RUNTIME_ROOT}/${p.slice("repos/".length)}`;
   // ANCHOR RELATIVE PATHS TO THE WORKSPACE, NOT THIS PROCESS'S CWD (2026-08-09).
