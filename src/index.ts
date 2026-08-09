@@ -30,6 +30,30 @@ const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
 function mapPath(p: string | undefined): string | undefined {
   if (!p) return p;
   if (p.startsWith("repos/")) return `${RUNTIME_ROOT}/${p.slice("repos/".length)}`;
+  // ANCHOR RELATIVE PATHS TO THE WORKSPACE, NOT THIS PROCESS'S CWD (2026-08-09).
+  //
+  // This vessel runs with WorkingDirectory=/vessels/local-tools-vessel, which contains
+  // this vessel and nothing else. So a bare relative path fell through unchanged and
+  // resolved inside the tool vessel's own directory — a tree that holds none of the
+  // source anyone asks about. Every such read failed ENOENT no matter how reasonable
+  // the request.
+  //
+  // The damage is not the failed read, it is what the failure teaches the caller. A
+  // walk investigating slow deletes was handed real search tools and told to ground its
+  // answer; it issued 4 reads, then 13 on retry, got ENOENT for all of them, and filled
+  // the void by inventing filenames — 'trace_store_schema.sql',
+  // 'trace_store_deletion_logic.py' (a .py in an all-TypeScript fleet) — and finally
+  // passed './find . -name "*execution*"' as a PATH. It knew it had to search and had
+  // no way to succeed. That is confabulation caused by information starvation, and the
+  // starvation was this function.
+  //
+  // sh() has always defaulted to DEFAULT_CWD, so shell commands ran in /workspace while
+  // file reads ran in /vessels/local-tools-vessel. Same vessel, same request, two
+  // different roots. This removes the asymmetry rather than adding a special case.
+  //
+  // Absolute paths are untouched, and the repos/ rewrite above still wins, so callers
+  // that already work are unaffected.
+  if (!p.startsWith("/")) return `${DEFAULT_CWD}/${p}`;
   return p;
 }
 
