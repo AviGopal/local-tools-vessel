@@ -65,6 +65,41 @@ function str(o: unknown, ...keys: string[]): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+/**
+ * Wrap a command so a timeout kills the WHOLE PIPELINE, not just the shell.
+ *
+ * THE OBSERVED FAILURE (2026-08-12). Both spawn sites bounded the command with a
+ * timeout on `Bun.spawn`, which signals only the DIRECT CHILD — bash. A command
+ * like `find / -type f | xargs grep -l <term>` has bash spawn `find` and `xargs`
+ * as separate processes; killing bash orphans them, and they keep running with no
+ * parent and no timer. Measured: a 10-second bound produced a `find /` and its
+ * `xargs grep` still alive after 5.5 HOURS, alongside three more from earlier
+ * runs. They walk the entire container including a 17 GB database directory, so
+ * they evict the store's 4 GiB block cache continuously and force it to re-read
+ * from disk — the origin of hundreds of GB of block I/O and a load average in the
+ * 40s. Every compose that drafts a filesystem scan adds another immortal one.
+ *
+ * The reader compounds it: the caller awaits stdout to EOF, and orphans holding
+ * the pipe open mean that read can never finish either.
+ *
+ * `set -m` turns on job control, so the backgrounded subshell becomes a process
+ * GROUP leader; `kill -9 -$pid` then signals the whole group, taking the pipeline
+ * with it. The watchdog is cancelled on normal completion so a fast command pays
+ * nothing, and the subshell's real exit status is preserved.
+ */
+function groupBounded(command: string, timeoutSec: number): string {
+  return [
+    "set -m",
+    `( ${command} ) &`,
+    "__cpid=$!",
+    `( sleep ${timeoutSec}; kill -9 -$__cpid 2>/dev/null ) &`,
+    "__wpid=$!",
+    "wait $__cpid; __rc=$?",
+    "kill $__wpid 2>/dev/null",
+    "exit $__rc",
+  ].join("\n");
+}
+
 async function sh(cmd: string, cwd = DEFAULT_CWD) {
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
@@ -72,7 +107,11 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
   // Pass an explicit env that prepends bun's dir to PATH (robust to either set).
   const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
   const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
-  const requestTimeoutMs = 30000; const p = Bun.spawn(["bash", "-c", cmd], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(requestTimeoutMs) });
+  // The shell watchdog fires at requestTimeoutSec and kills the process GROUP;
+  // the AbortSignal stays as a backstop a few seconds LATER, so the in-shell kill
+  // wins and gets to clean up its own pipeline first.
+  const requestTimeoutSec = 30;
+  const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
   ]);
@@ -236,7 +275,9 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? DEFAULT_CWD;
   const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
   const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
-  const p = Bun.spawn(["bash", "-c", command], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: timeoutSec * 1000 });
+  // Same reasoning as sh(): the in-shell watchdog kills the process GROUP at
+  // timeoutSec, and Bun's own timeout trails it as a backstop.
+  const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
   ]);
