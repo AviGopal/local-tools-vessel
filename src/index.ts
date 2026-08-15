@@ -110,7 +110,7 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
   // The shell watchdog fires at requestTimeoutSec and kills the process GROUP;
   // the AbortSignal stays as a backstop a few seconds LATER, so the in-shell kill
   // wins and gets to clean up its own pipeline first.
-  const requestTimeoutSec = 30;
+  const requestTimeoutSec = 300;
   const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
