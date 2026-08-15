@@ -92,7 +92,7 @@ function groupBounded(command: string, timeoutSec: number): string {
     "set -m",
     `( ${command} ) &`,
     "__cpid=$!",
-    `( sleep ${timeoutSec}; kill -9 -$__cpid 2>/dev/null ) &`,
+    `( sleep ${timeoutSec}; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 &`,
     "__wpid=$!",
     "wait $__cpid; __rc=$?",
     "kill $__wpid 2>/dev/null",
