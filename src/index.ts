@@ -100,7 +100,7 @@ function groupBounded(command: string, timeoutSec: number): string {
   ].join("\n");
 }
 
-async function sh(cmd: string, cwd = DEFAULT_CWD) {
+async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number) {
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
@@ -110,7 +110,23 @@ async function sh(cmd: string, cwd = DEFAULT_CWD) {
   // The shell watchdog fires at requestTimeoutSec and kills the process GROUP;
   // the AbortSignal stays as a backstop a few seconds LATER, so the in-shell kill
   // wins and gets to clean up its own pipeline first.
-  const requestTimeoutSec = 30;
+  // CALLER-SPECIFIABLE, because a fixed 30s made one caller structurally unable to succeed.
+  //
+  // feature_compose's verify runs install -> resolve -> `bun run typecheck` -> shape-dispatch ->
+  // `timeout 240 bun test` in ONE shell call. That pipeline budgets 240s for the test step alone,
+  // so a 30s group kill fired mid-typecheck EVERY time: the TC_EXIT marker was never echoed,
+  // tcExit came back null, and the gate graded the draft UNFAVORABLE and rolled it back. Measured
+  // on two consecutive composes (route-edit-e0cfd390, route-edit-d71ecda6) whose edits had all
+  // applied cleanly and whose patches were independently proven correct (tsc --noEmit exit 0).
+  // Every code-class compose failed verification for this reason, not for anything in the draft.
+  //
+  // Default stays 30s so ordinary shell calls are unchanged; a caller that knows its pipeline is
+  // long asks for more, bounded by MAX so a bad value cannot wedge the vessel indefinitely.
+  const MAX_TIMEOUT_SEC = 900;
+  const requested = typeof timeoutSec === "number" && Number.isFinite(timeoutSec) && timeoutSec > 0
+    ? Math.min(Math.floor(timeoutSec), MAX_TIMEOUT_SEC)
+    : 30;
+  const requestTimeoutSec = requested;
   const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
   const [stdout, stderr, exit_code] = await Promise.all([
     new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
@@ -127,7 +143,9 @@ const dispatch_id: ResolverHandler = async (ctx) => {
 const shell: ResolverHandler = async (ctx) => {
   const command = str(ctx.body, "impulse", "pointer", "command") ?? str(ctx.body, "command");
   if (!command) return { error: "command is required" };
-  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd")).then(r => ({ shape: "shellResult", ...r }))
+  const rawTimeout = (ctx.body as any)?.impulse?.pointer?.timeout_sec ?? (ctx.body as any)?.timeout_sec;
+  const timeoutSec = typeof rawTimeout === "number" ? rawTimeout : Number(rawTimeout);
+  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined).then(r => ({ shape: "shellResult", ...r }))
     .catch(e => ({ error: (e as Error).message }));
 };
 
