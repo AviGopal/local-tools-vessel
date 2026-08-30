@@ -87,13 +87,46 @@ function str(o: unknown, ...keys: string[]): string | undefined {
  * GROUP leader; `kill -9 -$pid` then signals the whole group, taking the pipeline
  * with it. The watchdog is cancelled on normal completion so a fast command pays
  * nothing, and the subshell's real exit status is preserved.
+ *
+ * SECOND OBSERVED FAILURE (2026-08-30): the group kill above does not reach a
+ * command that itself invokes GNU `timeout`. `timeout` moves itself (and
+ * whatever it starts) into a BRAND NEW process group the instant it execs —
+ * confirmed live: `timeout 240 bun test ...`, pid 1572320, had pgrp==1572320
+ * (its own pid), with its `bun` child sharing that same new group. So
+ * `kill -9 -$__cpid` — aimed at the ORIGINAL subshell's group — silently hits
+ * nothing. `wait $__cpid` then blocks for `timeout`'s own real deadline (e.g.
+ * 240s) regardless of what THIS function's caller asked for, and if that
+ * exceeds `sh()`'s outer AbortSignal backstop, Bun kills bash directly instead
+ * — orphaning `timeout` and its child to init (ppid=1), where they keep
+ * running, invisible to anything that thought a slot/lifecycle tracked them.
+ * Measured: 14 such orphaned `timeout`/`bun` pairs alive at once while a
+ * concurrency governor keyed to bash's own lifetime believed only 2 were
+ * running, because the governor released its slot the moment bash died, not
+ * when the real work finished.
+ *
+ * Fix: walk /proc for $__cpid's full descendant tree (no `ps` in this
+ * container) and kill it directly by pid, which does not depend on process
+ * GROUP membership at all — it catches a descendant regardless of which group
+ * it has moved itself into. The original group kill stays as a backstop for
+ * anything the tree-walk missed (a race, a process that already reparented).
  */
-function groupBounded(command: string, timeoutSec: number): string {
+export function groupBounded(command: string, timeoutSec: number): string {
   return [
     "set -m",
     `( ${command} ) &`,
     "__cpid=$!",
-    `( sleep ${timeoutSec}; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 &`,
+    "__killtree() {",
+    "  local __t=\"$1\"",
+    "  local __d",
+    "  for __d in /proc/[0-9]*; do",
+    "    __d=${__d#/proc/}",
+    "    if [ \"$(awk '{print $4}' \"/proc/$__d/stat\" 2>/dev/null)\" = \"$__t\" ]; then",
+    "      __killtree \"$__d\"",
+    "    fi",
+    "  done",
+    "  kill -9 \"$__t\" 2>/dev/null",
+    "}",
+    `( sleep ${timeoutSec}; __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 &`,
     "__wpid=$!",
     "wait $__cpid; __rc=$?",
     "kill $__wpid 2>/dev/null",
@@ -101,7 +134,7 @@ function groupBounded(command: string, timeoutSec: number): string {
   ].join("\n");
 }
 
-async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number) {
+export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number) {
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
