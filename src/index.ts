@@ -14,6 +14,7 @@
 
 import { ActivityExecutor, ExecutionRuntime, VesselDaemon } from "@avigopal/ias-executor-ts";
 import type { ResolverHandler } from "@avigopal/ias-executor-ts";
+import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -127,11 +128,24 @@ async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number) {
     ? Math.min(Math.floor(timeoutSec), MAX_TIMEOUT_SEC)
     : 30;
   const requestTimeoutSec = requested;
-  const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
-  const [stdout, stderr, exit_code] = await Promise.all([
-    new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
-  ]);
-  return { stdout, stderr, exit_code };
+  // Cross-process concurrency governor for the CPU-heavy test/typecheck class only
+  // (see test-exec-slots.ts). Measured 2026-08-30: this vessel had no bound on how
+  // many `bun test`/`bun run typecheck` commands could run at once, independent of
+  // and in addition to development-vessel's own compose-lane cap, and that was the
+  // dominant driver of a sustained near-throttle thermal condition (Tctl ~100C).
+  // Ordinary commands (git, ls, cat, curl) skip this entirely — only the expensive
+  // class waits for a slot, and even that wait is bounded and fails open.
+  const testClass = isTestClassCommand(cmd);
+  const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
+  try {
+    const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
+    const [stdout, stderr, exit_code] = await Promise.all([
+      new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
+    ]);
+    return { stdout, stderr, exit_code };
+  } finally {
+    if (slot) await slot.release();
+  }
 }
 
 // ── resolvers ─────────────────────────────────────────────────────────────────
@@ -295,11 +309,21 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
   // Same reasoning as sh(): the in-shell watchdog kills the process GROUP at
   // timeoutSec, and Bun's own timeout trails it as a backstop.
-  const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
-  const [stdout, stderr, exit_code] = await Promise.all([
-    new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
-  ]);
-  return { shape: "boundedShellResult", stdout, stderr, exit_code };
+  //
+  // Same test-class concurrency governor as sh() (see test-exec-slots.ts). This
+  // resolver is a SEPARATE spawn call site — a caller using it bypasses sh()'s
+  // gate entirely, so the same guard has to be applied here too, not just there.
+  const testClass = isTestClassCommand(command);
+  const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
+  try {
+    const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
+    const [stdout, stderr, exit_code] = await Promise.all([
+      new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
+    ]);
+    return { shape: "boundedShellResult", stdout, stderr, exit_code };
+  } finally {
+    if (slot) await slot.release();
+  }
 };
 
 const gitStatus: ResolverHandler = async (ctx) =>
