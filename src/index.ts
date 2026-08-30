@@ -88,27 +88,35 @@ function str(o: unknown, ...keys: string[]): string | undefined {
  * with it. The watchdog is cancelled on normal completion so a fast command pays
  * nothing, and the subshell's real exit status is preserved.
  *
- * SECOND OBSERVED FAILURE (2026-08-30): the group kill above does not reach a
- * command that itself invokes GNU `timeout`. `timeout` moves itself (and
- * whatever it starts) into a BRAND NEW process group the instant it execs —
- * confirmed live: `timeout 240 bun test ...`, pid 1572320, had pgrp==1572320
- * (its own pid), with its `bun` child sharing that same new group. So
- * `kill -9 -$__cpid` — aimed at the ORIGINAL subshell's group — silently hits
- * nothing. `wait $__cpid` then blocks for `timeout`'s own real deadline (e.g.
- * 240s) regardless of what THIS function's caller asked for, and if that
- * exceeds `sh()`'s outer AbortSignal backstop, Bun kills bash directly instead
- * — orphaning `timeout` and its child to init (ppid=1), where they keep
- * running, invisible to anything that thought a slot/lifecycle tracked them.
- * Measured: 14 such orphaned `timeout`/`bun` pairs alive at once while a
- * concurrency governor keyed to bash's own lifetime believed only 2 were
- * running, because the governor released its slot the moment bash died, not
- * when the real work finished.
+ * SECOND OBSERVED FAILURE (2026-08-30): measured 14 orphaned `timeout 240 bun
+ * test ...` processes alive at once (ppid=1, i.e. their direct parent had
+ * already died) while a concurrency governor keyed to bash's own lifetime
+ * believed only 2 were running — the governor released its slot the moment
+ * bash exited, not when the real work finished.
  *
- * Fix: walk /proc for $__cpid's full descendant tree (no `ps` in this
- * container) and kill it directly by pid, which does not depend on process
- * GROUP membership at all — it catches a descendant regardless of which group
- * it has moved itself into. The original group kill stays as a backstop for
- * anything the tree-walk missed (a race, a process that already reparented).
+ * THE EXACT ESCAPE MECHANISM IS NOT PINNED DOWN. My first theory — that GNU
+ * `timeout` moves itself into a new process group, defeating the group kill —
+ * is WRONG: `pgrp == own pid` for a backgrounded job's leader is normal `set
+ * -m` job-control behavior, not evidence of escape, and it is exactly the
+ * group `kill -9 -$__cpid` targets. Controlled repros (`timeout`+`sh -c
+ * sleep`, `timeout`+`bun -e`, `timeout`+ a single-file `bun test`) all died
+ * correctly to the group kill — none reproduced the live failure. The
+ * surviving hypothesis is something specific to a REAL multi-file `bun test`
+ * run's own internal worker-process handling (possibly a worker that does
+ * escape its group, or a child that outlives its own parent's death by
+ * enough margin to matter), but this has not been confirmed.
+ *
+ * The fix below does not depend on knowing which: walk /proc for $__cpid's
+ * full descendant tree (no `ps` in this container) and kill each pid
+ * directly, which works regardless of what process group any descendant has
+ * moved itself into, or how many levels of parent-death a survivor is
+ * removed from bash. The original group kill stays as a backstop. Proven to
+ * kill a real nested process tree end-to-end (see group-bounded.test.ts);
+ * live remeasurement after deploy showed the previously-orphaned population
+ * drop from 14+ to near-zero and Tctl come off its prior flat ~100C ceiling
+ * for the first time all session — though the first few minutes after any
+ * restart also cgroup-kills the existing population regardless of this fix,
+ * so that alone is not proof of a durable steady-state improvement.
  */
 export function groupBounded(command: string, timeoutSec: number): string {
   return [
