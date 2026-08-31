@@ -134,7 +134,7 @@ export function groupBounded(command: string, timeoutSec: number): string {
     "  done",
     "  kill -9 \"$__t\" 2>/dev/null",
     "}",
-    `( sleep ${timeoutSec}; __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 &`,
+    `( sleep ${timeoutSec}; kill -0 $__cpid && __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 &`,
     "__wpid=$!",
     "wait $__cpid; __rc=$?",
     "kill $__wpid 2>/dev/null",
