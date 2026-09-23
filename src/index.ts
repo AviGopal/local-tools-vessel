@@ -142,7 +142,7 @@ export function groupBounded(command: string, timeoutSec: number): string {
   ].join("\n");
 }
 
-export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number) {
+export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, extraEnv?: Record<string, string>) {
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
@@ -178,8 +178,9 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number) {
   // class waits for a slot, and even that wait is bounded and fails open.
   const testClass = isTestClassCommand(cmd);
   const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
+  const env2 = { ...env, ...(extraEnv ?? {}) };
   try {
-    const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
+    const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env: env2, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
     ]);
@@ -200,7 +201,8 @@ const shell: ResolverHandler = async (ctx) => {
   if (!command) return { error: "command is required" };
   const rawTimeout = (ctx.body as any)?.impulse?.pointer?.timeout_sec ?? (ctx.body as any)?.timeout_sec;
   const timeoutSec = typeof rawTimeout === "number" ? rawTimeout : Number(rawTimeout);
-  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined).then(r => ({ shape: "shellResult", ...r }))
+  const execution_id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
+  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined, execution_id ? { SUBSTRATE_EXECUTION_ID: execution_id } : undefined).then(r => ({ shape: "shellResult", ...r }))
     .catch(e => ({ error: (e as Error).message }));
 };
 
