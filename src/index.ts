@@ -382,7 +382,7 @@ const gitDiff: ResolverHandler = async (ctx) => {
 const gitCommit: ResolverHandler = async (ctx) => {
   const message = str(ctx.body, "message");
   if (!message) return { error: "message is required" };
-  return sh(`git commit -m ${JSON.stringify(message)}`, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"))
+  return sh(`git commit -m ${JSON.stringify(message)}`, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), undefined, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id")))
     .then(r => ({ shape: "gitCommitResult", ...r })).catch(e => ({ error: (e as Error).message }));
 };
 
