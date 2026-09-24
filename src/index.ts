@@ -260,7 +260,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
   const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
   const old_string = str(ctx.body, "impulse", "pointer", "old_string") ?? str(ctx.body, "old_string");
   const new_string = str(ctx.body, "impulse", "pointer", "new_string") ?? str(ctx.body, "new_string");
-  if (!path || old_string === undefined || new_string === undefined)
+  if (!path || !old_string || !new_string)
     return { error: "path, old_string, and new_string are required" };
   // EMPTY ANCHOR IS FILE CORRUPTION, NOT AN EDIT. `"".includes("")` is true for
   // EVERY string and `text.replace("", x)` PREPENDS x at byte 0 — so an edit op
