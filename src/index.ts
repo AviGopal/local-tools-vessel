@@ -202,6 +202,7 @@ const shell: ResolverHandler = async (ctx) => {
   const rawTimeout = (ctx.body as any)?.impulse?.pointer?.timeout_sec ?? (ctx.body as any)?.timeout_sec;
   const timeoutSec = typeof rawTimeout === "number" ? rawTimeout : Number(rawTimeout);
   const execution_id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
+  if (!execution_id) console.log(`[local-tools] shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
   return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined, execution_id ? { SUBSTRATE_EXECUTION_ID: execution_id } : undefined).then(r => ({ shape: "shellResult", ...r }))
     .catch(e => ({ error: (e as Error).message }));
 };
@@ -359,6 +360,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const testClass = isTestClassCommand(command);
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
   try {
+    if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
     const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env: { ...env, ...(((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) }, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
