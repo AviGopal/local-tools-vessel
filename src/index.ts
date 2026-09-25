@@ -347,7 +347,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   if (!command) return { error: "command is required" };
   const timeoutSec = Number((ctx.body as Record<string, unknown>)?.timeout ?? 10);
   if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) return { error: "timeout must be a positive number" };
-  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? DEFAULT_CWD;
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? ((): string => { const d = "/workspace/tmp/bounded-shell"; try { require("node:fs").mkdirSync(d, { recursive: true }); } catch { /* spawn will report it */ } return d; })();
   const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
   const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
   // Same reasoning as sh(): the in-shell watchdog kills the process GROUP at
