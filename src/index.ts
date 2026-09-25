@@ -359,7 +359,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const testClass = isTestClassCommand(command);
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
   try {
-    const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
+    const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env: { ...env, ...(((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) }, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
     ]);
