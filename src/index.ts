@@ -288,7 +288,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
     return { error: "old_string and new_string are identical — this op is a no-op, not an edit", path };
   try {
     const text = await Bun.file(path).text();
-    if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, new_string)); return { shape: "fileEditResult", path, ok: true }; }
+    if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, () => new_string)); return { shape: "fileEditResult", path, ok: true }; }
     // NORMALIZED FALLBACK (task #18): the drafter often reproduces ambiguous unicode
     // (em/en-dash, curly quotes, NBSP) imperfectly, so an otherwise-correct edit fails
     // exact-match. Normalize both sides length-preservingly (char-for-char) and, if the
