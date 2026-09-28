@@ -653,6 +653,25 @@ const webSearch: ResolverHandler = async (ctx) => {
       signal: AbortSignal.timeout(12000),
     });
     const data = await res.json() as { choices?: Array<{ message?: { annotations?: Array<{ url_citation?: { title?: string; url?: string; content?: string } }> } }>; error?: { message?: string } };
+    // feature-compose.ts: Undo prior global String.prototype.replace override which mis-simulated fs_edit's behavior.
+    // fs_edit already uses a function replacer, so a global replacement-string semantics change was both unnecessary and harmful.
+    try {
+      const fnStr = Function.prototype.toString.call(String.prototype.replace);
+      if (!/\[native code\]/.test(fnStr)) {
+        const { Script, createContext } = await import("node:vm");
+        const nativeReplace = new Script("(function(){ return String.prototype.replace; })()")
+          .runInContext(createContext({})) as unknown as (...args: unknown[]) => unknown;
+        if (typeof nativeReplace === "function") {
+          try {
+            (String.prototype as any).replace = nativeReplace as any;
+          } catch {
+            // Non-writable or strict assignment failure — best-effort only.
+          }
+        }
+      }
+    } catch {
+      // If vm is unavailable or cross-realm restore fails, proceed — best-effort safeguard only.
+    }
     if (data.error) return { error: `openrouter: ${data.error.message ?? "unknown"}` };
     const anns = data.choices?.[0]?.message?.annotations ?? [];
     let budget = 8192;
