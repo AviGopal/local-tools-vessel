@@ -15,6 +15,7 @@
 import { ActivityExecutor, ExecutionRuntime, VesselDaemon } from "@avigopal/ias-executor-ts";
 import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
+import { agentShellEnv } from "./agent-shell-env.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -147,8 +148,8 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
   // Pass an explicit env that prepends bun's dir to PATH (robust to either set).
-  const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
-  const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
+  // The env is an ALLOWLIST (agent-shell-env.ts): an agent-issued command must not
+  // inherit this vessel's credentials, which systemd loads from the env file.
   // The shell watchdog fires at requestTimeoutSec and kills the process GROUP;
   // the AbortSignal stays as a backstop a few seconds LATER, so the in-shell kill
   // wins and gets to clean up its own pipeline first.
@@ -178,9 +179,8 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   // class waits for a slot, and even that wait is bounded and fails open.
   const testClass = isTestClassCommand(cmd);
   const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
-  const env2 = { ...env, ...(extraEnv ?? {}) };
   try {
-    const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env: env2, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
+    const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env: agentShellEnv(process.env, extraEnv), stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
     ]);
@@ -349,8 +349,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const timeoutSec = Number((ctx.body as Record<string, unknown>)?.timeout ?? 10);
   if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) return { error: "timeout must be a positive number" };
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? ((): string => { const d = "/workspace/tmp/bounded-shell"; try { require("node:fs").mkdirSync(d, { recursive: true }); } catch { /* spawn will report it */ } return d; })();
-  const bunDir = `${process.env.HOME ?? "/root"}/.bun/bin`;
-  const env = { ...process.env, PATH: `${bunDir}:${process.env.PATH ?? ""}` };
+  // Same allowlisted env as sh() (agent-shell-env.ts): no inherited credentials.
   // Same reasoning as sh(): the in-shell watchdog kills the process GROUP at
   // timeoutSec, and Bun's own timeout trails it as a backstop.
   //
@@ -361,7 +360,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
   try {
     if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
-    const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env: { ...env, ...(((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) }, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
+    const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env: agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
     ]);
