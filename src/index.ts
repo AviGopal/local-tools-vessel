@@ -16,6 +16,8 @@ import { ActivityExecutor, ExecutionRuntime, VesselDaemon } from "@avigopal/ias-
 import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
+import { tmpdir } from "node:os";
+import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -58,6 +60,16 @@ export function mapPath(p: string | undefined): string | undefined {
   if (!p.startsWith("/")) return `${DEFAULT_CWD}/${p}`;
   return p;
 }
+
+// The in-process file tools run inside this process, which holds the fleet's
+// credentials, so they touch only paths whose fully resolved location (symlinks
+// followed) lies under a tool root (tool-roots.ts). A path outside is refused
+// before any read or write: an absolute path used to pass straight through, so
+// fs_read could return /etc/substrate/env or /proc/self/environ to the caller.
+const TOOL_ROOTS = configuredToolRoots(process.env, tmpdir());
+
+/** mapPath, then confinement: undefined when no path was given, null when refused. */
+const toolPath = (raw: string | undefined): string | undefined | null => toolPathWithin(mapPath(raw), TOOL_ROOTS);
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -208,7 +220,9 @@ const shell: ResolverHandler = async (ctx) => {
 };
 
 const fsRead: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   if (!path) return { error: "path is required" };
   for (let attempt = 0; ; attempt++) {
     try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content }; }
@@ -224,7 +238,9 @@ const fsWrite: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools authoring a
   // NET-NEW file) dispatch via the impulse envelope, so top-level-only reads
   // made every such call fail with "required". Mirrors fsEdit / fsRead.
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const content = str(ctx.body, "impulse", "pointer", "content") ?? str(ctx.body, "content");
   if (!path || content === undefined) return { error: "path and content are required" };
   // CATASTROPHIC-TRUNCATION GUARD. fs_write is a whole-file writer exposed
@@ -258,7 +274,9 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools) dispatch via the
   // impulse envelope, so top-level-only reads (the prior bug) made every call
   // fail with "required". Mirrors code_replace_lines' fix.
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const old_string = str(ctx.body, "impulse", "pointer", "old_string") ?? str(ctx.body, "old_string");
   const new_string = str(ctx.body, "impulse", "pointer", "new_string") ?? str(ctx.body, "new_string");
   if (!path || !old_string || new_string === undefined)
@@ -404,7 +422,9 @@ function lineNumber(text: string, idx: number): number {
 }
 
 const codeSearch: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const pattern = str(ctx.body, "impulse", "pointer", "pattern") ?? str(ctx.body, "pattern");
   const flags = str(ctx.body, "impulse", "pointer", "flags") ?? str(ctx.body, "flags") ?? "g";
   const limit = Number((ctx.body as Record<string, unknown>)?.limit ?? 50);
@@ -433,7 +453,9 @@ const codeSearch: ResolverHandler = async (ctx) => {
 };
 
 const codeFindFunction: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const name = str(ctx.body, "impulse", "pointer", "name") ?? str(ctx.body, "name");
   if (!path || !name) return { error: "path and name are required" };
   try {
@@ -469,7 +491,9 @@ const codeFindFunction: ResolverHandler = async (ctx) => {
 };
 
 const codeFindImport: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   if (!path || !moduleName) return { error: "path and module are required" };
   try {
@@ -491,7 +515,9 @@ const codeFindImport: ResolverHandler = async (ctx) => {
 };
 
 const codeInsertAfterLine: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const ptr = ((ctx.body as Record<string, unknown>)?.impulse as Record<string, unknown> | undefined)?.pointer as Record<string, unknown> | undefined;
   const afterLine = Number((ctx.body as Record<string, unknown>)?.after_line ?? ptr?.after_line ?? 0);
   const text = str(ctx.body, "impulse", "pointer", "text") ?? str(ctx.body, "text");
@@ -508,7 +534,9 @@ const codeInsertAfterLine: ResolverHandler = async (ctx) => {
 };
 
 const codeReplaceLines: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   // BUG FIX (2026-06-14): start_line/end_line were read ONLY from top-level
   // ctx.body, but patch_with_tools (and any impulse-envelope caller) nests args
   // under impulse.pointer — so they arrived undefined → Number(undefined)=0 →
@@ -531,7 +559,9 @@ const codeReplaceLines: ResolverHandler = async (ctx) => {
 };
 
 const codeAddImport: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   const specifier = str(ctx.body, "impulse", "pointer", "specifier") ?? str(ctx.body, "specifier");
   if (!path || !moduleName || !specifier) return { error: "path, module, and specifier are required" };
@@ -608,7 +638,9 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
 // code_read_lines(start,end) -> code_replace_lines(start,end, <edited copy of that
 // exact text>). This is the capability lever for non-trivial surgical edits.
 const codeReadLines: ResolverHandler = async (ctx) => {
-  const path = mapPath(str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path"));
+  const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
+  const path = toolPath(rawPath);
+  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
   const ptr = ((ctx.body as Record<string, unknown>)?.["impulse"] as Record<string, unknown> | undefined)?.["pointer"] as Record<string, unknown> | undefined;
   const startLine = Number((ctx.body as Record<string, unknown>)?.start_line ?? ptr?.["start_line"] ?? 0);
   const endLineRaw = Number((ctx.body as Record<string, unknown>)?.end_line ?? ptr?.["end_line"] ?? 0);
