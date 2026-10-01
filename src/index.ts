@@ -33,7 +33,14 @@ const RUNTIME_ROOT = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
 // shadow tree), flooring the entire "walk edits a vessel" class.
 export function mapPath(p: string | undefined): string | undefined {
   if (!p) return p;
-  if (p.startsWith("repos/")) return `${RUNTIME_ROOT}/${p.slice("repos/".length)}`;
+  if (p.startsWith("repos/")) {
+    const target = `${RUNTIME_ROOT}/${p.slice("repos/".length)}`;
+    // Enforce tool-root confinement here too: callers that use mapPath directly
+    // (skipping toolPath/toolPathWithin) must still be contained.
+    const confined = toolPathWithin(target, TOOL_ROOTS);
+    if (confined === null) throw new Error(OUTSIDE_ROOTS_ERROR);
+    return confined ?? target;
+  }
   // ANCHOR RELATIVE PATHS TO THE WORKSPACE, NOT THIS PROCESS'S CWD (2026-08-09).
   //
   // This vessel runs with WorkingDirectory=/vessels/local-tools-vessel, which contains
@@ -57,8 +64,15 @@ export function mapPath(p: string | undefined): string | undefined {
   //
   // Absolute paths are untouched, and the repos/ rewrite above still wins, so callers
   // that already work are unaffected.
-  if (!p.startsWith("/")) return `${DEFAULT_CWD}/${p}`;
-  return p;
+  if (!p.startsWith("/")) {
+    const target = `${DEFAULT_CWD}/${p}`;
+    const confined = toolPathWithin(target, TOOL_ROOTS);
+    if (confined === null) throw new Error(OUTSIDE_ROOTS_ERROR);
+    return confined ?? target;
+  }
+  const confined = toolPathWithin(p, TOOL_ROOTS);
+  if (confined === null) throw new Error(OUTSIDE_ROOTS_ERROR);
+  return confined ?? p;
 }
 
 // The in-process file tools run inside this process, which holds the fleet's
