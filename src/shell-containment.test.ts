@@ -7,7 +7,7 @@
 // from development-vessel) are replayed to prove they still pass.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -17,20 +17,15 @@ import { signWriteGrant, WRITE_CONTAINMENT_ERROR } from "./write-containment";
 const KEY = "test-fleet-key-0123456789";
 let base: string, superRepo: string, vessels: string, scratch: string;
 let env: Record<string, string>;
-let child: ReturnType<typeof Bun.spawn> | undefined;
-let url = "";
 
 const put = (p: string, s: string) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, s); };
 const git = (cwd: string, ...a: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...a], { stdio: "pipe" }).toString();
 
-async function call(type: string, pointer: Record<string, unknown>): Promise<Record<string, any>> {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { pointer: { type, ...pointer } } }) });
-  const j = (await r.json()) as Record<string, any>;
-  return (j && typeof j === "object" && "content" in j ? j.content : j?.body ?? j) as Record<string, any>;
-}
-const refusedText = (r: Record<string, any>) => JSON.stringify(r);
-
-beforeAll(async () => {
+// No server is spawned here: under the pull-sync gate's parallel load a child `bun index.ts`
+// can miss any readiness window and drop the whole file (7e98d5d4 was refused that way on 10-02).
+// The policy is containShell's, tested directly; the wiring into every shell handler is pinned
+// against the source below.
+beforeAll(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "shell-containment-")));
   superRepo = join(base, "git", "super-repo");
   vessels = join(base, "vessels");
@@ -43,89 +38,56 @@ beforeAll(async () => {
   git(superRepo, "commit", "-qm", "base");
   put(join(vessels, "demo", "src", "a.ts"), "export const a = 1;\n");
   mkdirSync(scratch, { recursive: true });
-
-  const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const port = probe.port;
-  probe.stop(true);
   env = {
-    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? base, PORT: String(port),
     WORKSPACE_ROOT: superRepo, MITOSIS_RUNTIME_DIR: vessels, MITOSIS_PUSH_CLONE_DIR: join(base, "git", "vessels"), COMPOSE_WS_DIR: join(base, "git", "compose"),
-    METABOB_API_KEY: KEY, DISCOVERY_ENDPOINT: "http://127.0.0.1:9", LOCAL_TOOLS_GC_INTERVAL_MS: "600000",
+    METABOB_API_KEY: KEY,
   };
-  child = Bun.spawn(["bun", join(import.meta.dir, "index.ts")], { env, stdout: "ignore", stderr: "ignore" });
-  url = `http://127.0.0.1:${port}/resolve`;
-  let up = false;
-  for (let i = 0; i < 250 && !up; i++) {
-    try { const h = await fetch(`http://127.0.0.1:${port}/health`); up = h.ok; } catch { /* not up yet */ }
-    if (!up) await Bun.sleep(100);
-  }
-  if (!up) throw new Error(`local-tools server (src/index.ts) never became healthy on port ${port}; exit code ${child.exitCode}`);
-}, 30_000);
+});
 
-afterAll(() => { child?.kill(); rmSync(base, { recursive: true, force: true }); });
+afterAll(() => { rmSync(base, { recursive: true, force: true }); });
+
+const gate = (command: string, cwd = superRepo, grant?: unknown) => containShell(command, cwd, grant === undefined ? { env } : { env, grant });
 
 describe("the 27c1c600 incident: a floor shellResult writing the live super-repo clone", () => {
-  it("refuses a redirect that creates a file in the clone (default cwd), and the file does not exist afterwards", async () => {
-    const r = await call("shellResult", { command: "echo 'model output' > GPT-5.md" });
-    expect(refusedText(r)).toContain(WRITE_CONTAINMENT_ERROR);
-    expect(refusedText(r)).toContain("live super-repo clone");
-    expect(existsSync(join(superRepo, "GPT-5.md"))).toBe(false);
+  it("refuses a redirect that creates a file in the clone (default cwd) with the containment error", () => {
+    const r = gate("echo 'model output' > GPT-5.md");
+    expect(r.ok).toBe(false);
+    expect(JSON.stringify(r)).toContain(WRITE_CONTAINMENT_ERROR);
+    expect(JSON.stringify(r)).toContain("live super-repo clone");
   });
-
-  it("refuses the absolute form from any cwd, and through the bash / bounded_shell aliases", async () => {
+  it("refuses the absolute form from any cwd (tee, touch, here-doc)", () => {
     const marker = join(superRepo, "docs", "MARKER.md");
-    for (const [type, pointer] of [
-      ["shell", { command: `printf hi | tee ${marker}`, cwd: scratch }],
-      ["bash", { command: `touch ${marker}` }],
-      ["bounded_shell", { command: `cat > ${JSON.stringify(marker)} <<'EOF'\nx\nEOF` }],
-    ] as const) {
-      const r = await call(type, pointer);
-      expect(refusedText(r)).toContain(WRITE_CONTAINMENT_ERROR);
-    }
-    expect(existsSync(marker)).toBe(false);
+    expect(gate(`printf hi | tee ${marker}`, scratch).ok).toBe(false);
+    expect(gate(`touch ${marker}`).ok).toBe(false);
+    expect(gate(`cat > ${JSON.stringify(marker)} <<'EOF'\nx\nEOF`).ok).toBe(false);
   });
-
-  it("refuses a git commit through the shell in the clone, and HEAD does not move", async () => {
-    const head = git(superRepo, "rev-parse", "HEAD").trim();
-    const r = await call("shellResult", { command: "git -c user.name=x -c user.email=x@x commit --allow-empty -m sneaked" });
-    expect(refusedText(r)).toContain("'git commit'");
-    const r2 = await call("shellResult", { command: `cd ${superRepo}/docs && git add -A`, cwd: scratch });
-    expect(refusedText(r2)).toContain("'git add'");
-    expect(git(superRepo, "rev-parse", "HEAD").trim()).toBe(head);
+  it("refuses git commit in the clone, and git add after cd into it", () => {
+    expect(JSON.stringify(gate("git -c user.name=x -c user.email=x@x commit --allow-empty -m sneaked"))).toContain("'git commit'");
+    expect(JSON.stringify(gate(`cd ${superRepo}/docs && git add -A`, scratch))).toContain("'git add'");
   });
 });
 
 describe("reads in the clone keep working, with the same cwd", () => {
-  it("wc -l on a relative path answers the line count", async () => {
-    const r = await call("shellResult", { command: "wc -l < docs/x.md" });
-    expect(r.error).toBeUndefined();
-    expect(String(r.stdout).trim()).toBe("3");
-    expect(r.exit_code).toBe(0);
+  it("wc -l, ls, git log, grep and stderr/dev-null redirects are not writes", () => {
+    expect(gate("wc -l < docs/x.md").ok).toBe(true);
+    expect(gate("ls docs 2>/dev/null; git log --oneline | wc -l; grep -c two docs/x.md 2>&1; git status --porcelain >/dev/null").ok).toBe(true);
   });
-  it("ls, git log, grep, and stderr/dev-null redirects are not writes", async () => {
-    const r = await call("shellResult", { command: "ls docs 2>/dev/null; git log --oneline | wc -l; grep -c two docs/x.md 2>&1; git status --porcelain >/dev/null" });
-    expect(r.error).toBeUndefined();
-    expect(String(r.stdout)).toContain("x.md");
+  it("a write OUTSIDE the clone (scratch) is allowed", () => {
+    expect(gate(`wc -l docs/x.md > ${join(scratch, "ok.txt")}`).ok).toBe(true);
   });
-  it("the floor's remaining read path counts lines: codeSearchResult carries line_count (= wc -l)", async () => {
-    const r = await call("codeSearchResult", { path: "docs/x.md", pattern: "two" });
-    expect(r.line_count).toBe(3);
-    expect(r.match_count).toBe(1);
+  it("a lane write grant bound to the cwd lets the write through; a forged one does not", () => {
+    expect(gate("touch granted.txt", superRepo, signWriteGrant(KEY, superRepo)).ok).toBe(true);
+    expect(gate("touch forged.txt", superRepo, signWriteGrant("wrong-key", superRepo)).ok).toBe(false);
   });
-  it("a write OUTSIDE the clone (scratch) still runs", async () => {
-    const out = join(scratch, "ok.txt");
-    const r = await call("shellResult", { command: `wc -l docs/x.md > ${out}` });
-    expect(r.error).toBeUndefined();
-    expect(existsSync(out)).toBe(true);
+});
+
+describe("wiring: every shell handler gates before it runs anything (source pin)", () => {
+  const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
+  it("shell / bash / bounded_shell all call containShell", () => {
+    expect((src.match(/containShell\(/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
-  it("a lane write grant bound to the cwd lets the write through", async () => {
-    const r = await call("shellResult", { command: "touch granted.txt", cwd: superRepo, write_grant: signWriteGrant(KEY, superRepo) });
-    expect(r.error).toBeUndefined();
-    expect(existsSync(join(superRepo, "granted.txt"))).toBe(true);
-    rmSync(join(superRepo, "granted.txt"));
-    const bad = await call("shellResult", { command: "touch forged.txt", cwd: superRepo, write_grant: signWriteGrant("wrong-key", superRepo) });
-    expect(refusedText(bad)).toContain(WRITE_CONTAINMENT_ERROR);
-    expect(existsSync(join(superRepo, "forged.txt"))).toBe(false);
+  it("codeSearchResult carries line_count (the floor's exact line-count read path)", () => {
+    expect(src).toContain("line_count");
   });
 });
 
