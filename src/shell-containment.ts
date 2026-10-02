@@ -184,6 +184,20 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
       }
       continue;
     }
+    // Nested interpreter/inline eval forms are disallowed within a super-repo clone without a matching write grant.
+    {
+      const root = dir ? superOf(dir) : undefined;
+      if (root && !verifyWriteGrant(opts.grant as string | undefined, root, dir ?? root)) {
+        const isShellC = (base === "bash" || base === "sh" || base === "zsh") && args.some((a) => a === "-c");
+        const isEval = base === "eval";
+        const isNodeEval = (base === "bun" || base === "node") && args.some((a) => a === "-e" || a === "--eval");
+        const isPyPerlEval = (base === "python" || base === "python3" || base === "perl") && args.some((a) => a === "-e");
+        const isSource = base === "source" || base === ".";
+        if (isShellC || isEval || isNodeEval || isPyPerlEval || isSource) {
+          return refuse(`'${base}'`, dir ?? root, root);
+        }
+      }
+    }
     if (ALL_ARG_WRITERS.has(base)) {
       for (const a of nonOpt) { const r = checkTarget(`'${base}'`, a); if (r) return r; }
       continue;
