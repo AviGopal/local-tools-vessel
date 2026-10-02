@@ -17,7 +17,9 @@ import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
 import { tmpdir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
+import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -84,6 +86,33 @@ const TOOL_ROOTS = configuredToolRoots(process.env, tmpdir());
 
 /** mapPath, then confinement: undefined when no path was given, null when refused. */
 const toolPath = (raw: string | undefined): string | undefined | null => toolPathWithin(mapPath(raw), TOOL_ROOTS);
+
+// WRITERS ALSO PASS WRITE CONTAINMENT (write-containment.ts). Confinement above
+// answers "may this vessel touch the path at all", and the live super-repo clone
+// passes it, because reads need it: WORKSPACE_ROOT is the clone, and a relative
+// path is anchored there. So a walk's fs_edit of "scripts/substrate/
+// substrate-pull-sync.sh" wrote the live clone's working tree, and pull-sync
+// installed it (10-01, node 1). Every handler that writes a file at `path` —
+// fs_write, fs_edit, code_insert_after_line, code_replace_lines, code_add_import —
+// resolves its target here: the live super-repo clone is never written by a tool,
+// and vessel runtime/clone/compose trees only with the lane's write grant.
+// Refusals keep the structured {error} channel (HTTP 200), not a throw.
+function pointerField(ctx: { body: unknown }, key: string): unknown {
+  const b = ctx.body as Record<string, any> | undefined;
+  return b?.impulse?.pointer?.[key] ?? b?.[key];
+}
+export function writePath(ctx: { body: unknown }, rawPath: string | undefined): { path: string | undefined } | { refused: string } {
+  let path: string | undefined | null;
+  try { path = toolPath(rawPath); } catch (e) { return { refused: `${(e as Error).message}: ${rawPath}` }; }
+  if (path === null) return { refused: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}` };
+  if (!path) return { path: undefined };
+  const v = containWrite(path, { env: process.env, raw: rawPath, grant: pointerField(ctx, WRITE_GRANT_FIELD) });
+  if (!v.ok) {
+    console.error(`[local-tools] ${v.reason} (requested ${JSON.stringify(rawPath)})`);
+    return { refused: v.reason };
+  }
+  return { path };
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -253,8 +282,9 @@ const fsWrite: ResolverHandler = async (ctx) => {
   // NET-NEW file) dispatch via the impulse envelope, so top-level-only reads
   // made every such call fail with "required". Mirrors fsEdit / fsRead.
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const w = writePath(ctx, rawPath);
+  if ("refused" in w) return { error: w.refused, path: rawPath };
+  const path = w.path;
   const content = str(ctx.body, "impulse", "pointer", "content") ?? str(ctx.body, "content");
   if (!path || content === undefined) return { error: "path and content are required" };
   // CATASTROPHIC-TRUNCATION GUARD. fs_write is a whole-file writer exposed
@@ -289,8 +319,9 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // impulse envelope, so top-level-only reads (the prior bug) made every call
   // fail with "required". Mirrors code_replace_lines' fix.
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const w = writePath(ctx, rawPath);
+  if ("refused" in w) return { error: w.refused, path: rawPath };
+  const path = w.path;
   const old_string = str(ctx.body, "impulse", "pointer", "old_string") ?? str(ctx.body, "old_string");
   const new_string = str(ctx.body, "impulse", "pointer", "new_string") ?? str(ctx.body, "new_string");
   if (!path || !old_string || new_string === undefined)
@@ -415,7 +446,24 @@ const gitDiff: ResolverHandler = async (ctx) => {
 const gitCommit: ResolverHandler = async (ctx) => {
   const message = str(ctx.body, "message");
   if (!message) return { error: "message is required" };
-  return sh(`git commit -m ${JSON.stringify(message)}`, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), undefined, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id")))
+  // A commit is a write too, and the one pull-sync trusts most: it installs from
+  // HEAD. The default cwd is WORKSPACE_ROOT — the live super-repo clone — so the
+  // commit's directory passes the same write containment as a file write.
+  // NOT GRANTABLE: git_commit is not a lane write tool (WRITE_TOOLS), so no grant is
+  // honoured for it. In every protected zone (live clone, push clones, compose
+  // worktrees, vessel runtime) it is refused, and the refusal says that — a caller
+  // told "no grant" would go looking for one that cannot exist. Landings there are
+  // commits the lane makes itself.
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  const cv = containWrite(resolvePath(DEFAULT_CWD, cwd ?? "."), { env: process.env, raw: cwd ?? DEFAULT_CWD });
+  if (!cv.ok) {
+    const reason = cv.zone && cv.zone !== "secret"
+      ? `${WRITE_CONTAINMENT_ERROR}: git_commit is not grantable in a protected zone (${cv.zone}: ${cv.real}); commits there are made only by the lane's own landing, never through this tool`
+      : cv.reason;
+    console.error(`[local-tools] git_commit ${reason}`);
+    return { error: reason, cwd: cwd ?? DEFAULT_CWD };
+  }
+  return sh(`git commit -m ${JSON.stringify(message)}`, cwd, undefined, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id")))
     .then(r => ({ shape: "gitCommitResult", ...r })).catch(e => ({ error: (e as Error).message }));
 };
 
@@ -530,8 +578,9 @@ const codeFindImport: ResolverHandler = async (ctx) => {
 
 const codeInsertAfterLine: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const w = writePath(ctx, rawPath);
+  if ("refused" in w) return { error: w.refused, path: rawPath };
+  const path = w.path;
   const ptr = ((ctx.body as Record<string, unknown>)?.impulse as Record<string, unknown> | undefined)?.pointer as Record<string, unknown> | undefined;
   const afterLine = Number((ctx.body as Record<string, unknown>)?.after_line ?? ptr?.after_line ?? 0);
   const text = str(ctx.body, "impulse", "pointer", "text") ?? str(ctx.body, "text");
@@ -549,8 +598,9 @@ const codeInsertAfterLine: ResolverHandler = async (ctx) => {
 
 const codeReplaceLines: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const w = writePath(ctx, rawPath);
+  if ("refused" in w) return { error: w.refused, path: rawPath };
+  const path = w.path;
   // BUG FIX (2026-06-14): start_line/end_line were read ONLY from top-level
   // ctx.body, but patch_with_tools (and any impulse-envelope caller) nests args
   // under impulse.pointer — so they arrived undefined → Number(undefined)=0 →
@@ -574,8 +624,9 @@ const codeReplaceLines: ResolverHandler = async (ctx) => {
 
 const codeAddImport: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const w = writePath(ctx, rawPath);
+  if ("refused" in w) return { error: w.refused, path: rawPath };
+  const path = w.path;
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   const specifier = str(ctx.body, "impulse", "pointer", "specifier") ?? str(ctx.body, "specifier");
   if (!path || !moduleName || !specifier) return { error: "path, module, and specifier are required" };
