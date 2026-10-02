@@ -60,11 +60,15 @@ beforeAll(async () => {
   };
   child = Bun.spawn(["bun", join(import.meta.dir, "index.ts")], { env, stdout: "ignore", stderr: "ignore" });
   url = `http://127.0.0.1:${port}/resolve`;
-  for (let i = 0; i < 100; i++) {
-    try { const h = await fetch(`http://127.0.0.1:${port}/health`); if (h.ok) break; } catch { /* not up yet */ }
-    await Bun.sleep(100);
+  // A loaded gate host can take seconds to boot the server: wait up to 25s, and name
+  // a boot failure rather than letting it surface as an unnamed hook timeout.
+  let up = false;
+  for (let i = 0; i < 250 && !up; i++) {
+    try { const h = await fetch(`http://127.0.0.1:${port}/health`); up = h.ok; } catch { /* not up yet */ }
+    if (!up) await Bun.sleep(100);
   }
-});
+  if (!up) throw new Error(`local-tools server (src/index.ts) never became healthy on port ${port}; exit code ${child.exitCode}`);
+}, 30_000);
 
 afterAll(() => { child?.kill(); rmSync(base, { recursive: true, force: true }); });
 
