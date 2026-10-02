@@ -330,7 +330,7 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
     // Nested interpreter/inline eval forms are disallowed within a super-repo clone without a matching write grant.
     {
       const root = dir ? superOf(dir) : undefined;
-      if (root && !verifyWriteGrant(opts.grant as string | undefined, root, dir ?? root)) {
+      if (root && !verifyWriteGrant(opts.env.METABOB_API_KEY, root, opts.grant, opts.now)) {
         const isShellC = (base === "bash" || base === "sh" || base === "zsh") && args.some((a) => a === "-c");
         const isEval = base === "eval";
         const isNodeEval = (base === "bun" || base === "node") && args.some((a) => a === "-e" || a === "--eval");
