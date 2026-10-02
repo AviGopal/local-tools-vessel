@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
+import { containShell } from "./shell-containment.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -257,6 +258,17 @@ const shell: ResolverHandler = async (ctx) => {
   const rawTimeout = (ctx.body as any)?.impulse?.pointer?.timeout_sec ?? (ctx.body as any)?.timeout_sec;
   const timeoutSec = typeof rawTimeout === "number" ? rawTimeout : Number(rawTimeout);
   const execution_id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
+  // SHELL CONTAINMENT (shell-containment.ts). The 09-30 floor run 27c1c600 wrote
+  // /workspace/git/super-repo/GPT-5.md through this handler: cwd defaults to
+  // WORKSPACE_ROOT, the live super-repo clone, and nothing checked what the command
+  // wrote. Reads keep the same cwd; a write or mutating git command aimed at the live
+  // clone is refused unless the request carries a lane grant bound to its cwd.
+  const rawCwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  const sv = containShell(command, rawCwd ? resolvePath(rawCwd) : resolvePath(DEFAULT_CWD), { env: process.env, rawCwd: rawCwd ?? DEFAULT_CWD, grant: pointerField(ctx, WRITE_GRANT_FIELD) });
+  if (!sv.ok) {
+    console.error(`[local-tools] shell ${sv.reason} (command ${JSON.stringify(command.slice(0, 160))})`);
+    return { error: sv.reason, cwd: rawCwd ?? DEFAULT_CWD };
+  }
   if (!execution_id) console.log(`[local-tools] shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
   return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined, execution_id ? { SUBSTRATE_EXECUTION_ID: execution_id } : undefined).then(r => ({ shape: "shellResult", ...r }))
     .catch(e => ({ error: (e as Error).message }));
@@ -419,6 +431,14 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   // Same test-class concurrency governor as sh() (see test-exec-slots.ts). This
   // resolver is a SEPARATE spawn call site — a caller using it bypasses sh()'s
   // gate entirely, so the same guard has to be applied here too, not just there.
+  // Same shell containment as the `shell` handler (shell-containment.ts): a separate spawn
+  // site, so it carries its own copy of the gate.
+  const rawCwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  const sv = containShell(command, resolvePath(cwd), { env: process.env, rawCwd: rawCwd ?? cwd, grant: pointerField(ctx, WRITE_GRANT_FIELD) });
+  if (!sv.ok) {
+    console.error(`[local-tools] bounded_shell ${sv.reason} (command ${JSON.stringify(command.slice(0, 160))})`);
+    return { error: sv.reason, cwd };
+  }
   const testClass = isTestClassCommand(command);
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
   try {
@@ -510,7 +530,12 @@ const codeSearch: ResolverHandler = async (ctx) => {
       matches.push({ line: ln, col: m.index - text.lastIndexOf("\n", m.index - 1), capture: m[0], line_text: lines[ln - 1] ?? "" });
       if (m.index === re.lastIndex) re.lastIndex++;
     }
-    return { shape: "codeSearchResult", path, pattern, total_lines: lines.length, match_count: matches.length, matches };
+    // line_count is `wc -l` (newline characters). total_lines is the split length, one more
+    // than wc -l for a file ending in a newline; it stays for existing callers. goal-host's
+    // floor no longer has a shell to run `wc -l`, so this is the exact count it answers from.
+    let line_count = 0;
+    for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) line_count++;
+    return { shape: "codeSearchResult", path, pattern, total_lines: lines.length, line_count, match_count: matches.length, matches };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
