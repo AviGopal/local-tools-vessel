@@ -126,6 +126,149 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
   // The directory relative words resolve against. Null once a `cd` goes somewhere we
   // cannot evaluate (`cd "$ROOT"`): relative targets are then unknown, not the clone.
   let dir: string | null = realCwd(cwd);
+  // EARLY writer checks for unlisted commands: sort -o, find -delete/-exec, xargs writers, perl -i/-pi, and patch.
+  // These run before the legacy path-based writers and redirection checks.
+  const __checkPath = (w: string | undefined): { target: string; root: string } | null => {
+    if (!w || !literal(w)) return null;
+    const base = dir ?? realCwd(cwd);
+    const abs = isAbsolute(w) ? w : resolve(base, w);
+    let rp = abs;
+    try { rp = realpathSync(abs); } catch { /* best-effort */ }
+    const root = superOf(rp);
+    return root ? { target: rp, root } : null;
+  };
+  const __earlyRefuse = (what: string, target: string, root: string): ShellVerdict => ({
+    ok: false,
+    reason: `${WRITE_CONTAINMENT_ERROR}: shell ${what} targets ${target}, inside the live super-repo clone ${root}; the shell may read there but nothing lands in the live clone by a tool write — land a change as a commit through the lane`,
+  });
+  const __segs = segments(command);
+  for (const words of __segs) {
+    if (words.length === 0) continue;
+    const cmd0 = words[0]!;
+    const base = cmd0.slice(cmd0.lastIndexOf("/") + 1);
+
+    // patch: writes the working tree (optionally -d DIR)
+    if (base === "patch") {
+      const di = words.findIndex((w) => w === "-d");
+      if (di !== -1) {
+        const hit = __checkPath(words[di + 1]);
+        if (hit) return __earlyRefuse("'patch -d'", hit.target, hit.root);
+      } else if (dir) {
+        const s = superOf(dir);
+        if (s) return __earlyRefuse("'patch'", dir, s);
+      }
+    }
+
+    // sort -o FILE
+    if (base === "sort") {
+      for (let i = 1; i < words.length; i++) {
+        const w = words[i]!;
+        if (w === "-o") {
+          const hit = __checkPath(words[i + 1]);
+          if (hit) return __earlyRefuse("'sort -o'", hit.target, hit.root);
+          break;
+        }
+        if (w.startsWith("-o") && w.length > 2) {
+          const hit = __checkPath(w.slice(2));
+          if (hit) return __earlyRefuse("'sort -o'", hit.target, hit.root);
+          break;
+        }
+      }
+    }
+
+    // perl -i / -pi (in-place)
+    if (base === "perl") {
+      let hasI = false;
+      for (let i = 1; i < words.length; i++) {
+        const w = words[i]!;
+        if (w === "-i" || (w.startsWith("-") && /-.*i/.test(w))) { hasI = true; break; }
+      }
+      if (hasI) {
+        for (let i = 1; i < words.length; i++) {
+          const w = words[i]!;
+          if (w.startsWith("-")) continue;
+          const hit = __checkPath(w);
+          if (hit) { return __earlyRefuse("'perl -i'", hit.target, hit.root); }
+        }
+        if (dir) {
+          const s = superOf(dir);
+          if (s) return __earlyRefuse("'perl -i'", dir, s);
+        }
+      }
+    }
+
+    // find -delete or -exec/-execdir writers
+    if (base === "find") {
+      const roots: string[] = [];
+      let i = 1;
+      while (i < words.length && !words[i]!.startsWith("-")) { roots.push(words[i]!); i++; }
+      if (roots.length === 0) roots.push(".");
+      const targetsInSuper = roots.some((r) => !!__checkPath(r));
+      let destructive = false;
+      for (let j = i; j < words.length; j++) {
+        const w = words[j]!;
+        if (w === "-delete") { destructive = true; break; }
+        if (w === "-exec" || w === "-execdir") {
+          const sub = words[j + 1];
+          if (typeof sub === "string") {
+            const b = sub.slice(sub.lastIndexOf("/") + 1);
+            if (b === "rm" || b === "mv" || b === "cp") { destructive = true; break; }
+            if (b === "sed") {
+              let k = j + 2;
+              while (k < words.length && words[k] !== ";") {
+                const a = words[k]!;
+                if (a === "-i" || a.startsWith("-i")) { destructive = true; break; }
+                k++;
+              }
+              if (destructive) break;
+            }
+          }
+        }
+      }
+      if (destructive && targetsInSuper) {
+        for (const r of roots) {
+          const hit = __checkPath(r);
+          if (hit) return __earlyRefuse("'find'", hit.target, hit.root);
+        }
+      }
+    }
+
+    // xargs writers (rm/mv/cp or sed/perl with in-place)
+    if (base === "xargs") {
+      let i = 1;
+      while (i < words.length && words[i]!.startsWith("-")) {
+        const opt = words[i]!;
+        if (["-I","-E","-a","-d","-P","-n","-s","-L"].includes(opt) && i + 1 < words.length) { i += 2; continue; }
+        i++;
+      }
+      const sub = words[i];
+      if (typeof sub === "string") {
+        const b = sub.slice(sub.lastIndexOf("/") + 1);
+        let isWriter = b === "rm" || b === "mv" || b === "cp";
+        let sedI = false, perlI = false;
+        if (b === "sed" || b === "perl") {
+          for (let j = i + 1; j < words.length; j++) {
+            const a = words[j]!;
+            if (a === ";") break;
+            if (a === "{}" || a.includes("{}")) continue;
+            if (a.startsWith("-")) {
+              if (b === "sed" && (a === "-i" || a.startsWith("-i"))) sedI = true;
+              if (b === "perl" && (a === "-i" || /-.*i/.test(a))) perlI = true;
+              continue;
+            }
+            const hit = __checkPath(a);
+            if (hit && (isWriter || sedI || perlI)) return __earlyRefuse(`'xargs ${b}'`, hit.target, hit.root);
+          }
+        }
+        if (isWriter || sedI || perlI) {
+          if (dir) {
+            const s = superOf(dir);
+            if (s) return __earlyRefuse(`'xargs ${b}'`, dir, s);
+          }
+        }
+      }
+    }
+  }
   const refuse = (what: string, target: string, root: string): ShellVerdict => ({
     ok: false,
     reason: `${WRITE_CONTAINMENT_ERROR}: shell ${what} targets ${target}, inside the live super-repo clone ${root}; the shell may read there but nothing lands in the live clone by a tool write — land a change as a commit through the lane`,
