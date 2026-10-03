@@ -28,20 +28,25 @@
 //             set, the bare value otherwise; a boolean is its flag when true and nothing when false. A
 //             string arg must carry an enum or a pattern (anchored whole-value).
 //
-// EXECUTION. argv array `["bash", <realpath>, ...argv]` (never a shell string), cwd = the clone root, in a
-// new process group; env = PATH (bun's dir prepended), HOME, LANG + METABOB_API_KEY + METABOB_ENDPOINT
-// from THIS vessel's env, never from the request. On timeout the group AND every descendant found under
-// /proc are killed (GNU `timeout` moves its child into a new group, which a group kill alone misses).
-// stdout/stderr are capped at max_output_bytes each (the rest is drained and counted, not kept), and any
-// 8-character window of the key is redacted from them and from every log line.
+// EXECUTION. The current file at `path` must hash to blob_sha (the approval gate); what runs is the blob
+// itself, read from the clone's object store by hash (`git cat-file blob`, re-hashed) into a private copy
+// (a fresh mkdtemp dir 0700, file 0700, removed after the run), as argv `["bash", <copy>, ...argv]` (never
+// a shell string), cwd = the clone root, in a new process group. bash reads a script as it goes, so
+// running the path would execute whatever the file held at each read for the whole run (up to 3 h). Since
+// $0 / BASH_SOURCE name the copy, the env carries SUBSTRATE_SCRIPT_DIR = the original's real directory,
+// and a script locates its siblings through it. env = PATH (bun's dir prepended), HOME, LANG,
+// METABOB_API_KEY, METABOB_ENDPOINT from THIS vessel's env (never from the request), SUBSTRATE_SCRIPT_DIR.
+// On timeout the group AND every descendant found under /proc are killed (GNU `timeout` moves its child
+// into a new group, which a group kill alone misses). Each stream is kept to max_output_bytes plus one key
+// length, redacted (any 8-character window of the key), and only then cut to max_output_bytes.
 //
 // THE DELIBERATE BYPASS. This is the one spawn site in this vessel that is not behind containShell: an
 // approved script may write inside the live super-repo clone (run-weekly-harness.sh writes
 // validation/results/). The attested row IS the operator's grant for exactly that content; nothing a walk
-// sends can change what runs. Residual: the file is hashed, then executed by path (it must run at its real
-// path; scripts locate the repo via BASH_SOURCE), so a write landing between the two is possible. The
-// clone is write-contained against every tool, and the file is re-hashed after the run:
-// `modified_during_run` says if it changed.
+// sends can change what runs. LIMIT: only the top-level script's bytes are verified. Whatever it runs in
+// turn (run-weekly-harness.sh `bun run`s reuse-harness.ts, compare-reports.ts, ... from its directory)
+// comes from the working tree, unverified, and can change mid-run; trusting those is trusting the clone.
+// `modified_during_run` (the path file re-hashed after the run) is informational only.
 //
 // MODES. Sync (default) holds the request until the script ends, with timeout_s clamped to 900 s.
 // mode:"async" answers {run_id, status:"running"} at once and is read back with {run_id}; its timeout_s
@@ -53,8 +58,9 @@
 
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { containmentZones } from "./write-containment.js";
 
 export const SCRIPT_ALLOWLIST_SHAPE = "scriptRunnerAllowlist";
@@ -89,7 +95,7 @@ export type RefusalCode =
   | "field_not_accepted" | "script_id_required" | "credential_unavailable" | "allowlist_unreadable" | "no_local_pool_producer"
   | "not_allowlisted" | "unattested_entry" | "attestation_unverified" | "allowlist_entry_invalid" | "args_invalid" | "no_super_repo_clone"
   | "path_outside_clone" | "script_unreadable" | "blob_mismatch" | "spawn_failed"
-  | "mode_invalid" | "unknown_run" | "already_running";
+  | "mode_invalid" | "unknown_run" | "already_running" | "blob_unavailable";
 
 export interface ScriptRunDeps {
   /** The vessel env (default process.env): credentials, discovery endpoint, super-repo settings. */
@@ -286,8 +292,10 @@ export function buildArgv(schema: ArgSpec[], raw: unknown): { ok: true; argv: st
   return { ok: true, argv, args };
 }
 
-/** The child env: a minimal base plus the two injected names, from the vessel env only. */
-export function scriptRunnerEnv(base: Env): Record<string, string> {
+/** The child env: a minimal base plus the two injected names, from the vessel env only, and
+ *  SUBSTRATE_SCRIPT_DIR (the approved script's real directory: the script runs from a private copy, so
+ *  `dirname "$0"` / BASH_SOURCE name the copy; a script finds its siblings through this instead). */
+export function scriptRunnerEnv(base: Env, scriptDir?: string): Record<string, string> {
   const out: Record<string, string> = {};
   const home = base.HOME?.trim() || "/root";
   out.PATH = `${home}/.bun/bin:${base.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`;
@@ -295,6 +303,7 @@ export function scriptRunnerEnv(base: Env): Record<string, string> {
   if (base.LANG?.trim()) out.LANG = base.LANG;
   if (base.METABOB_API_KEY?.trim()) out.METABOB_API_KEY = base.METABOB_API_KEY;
   if (base.METABOB_ENDPOINT?.trim()) out.METABOB_ENDPOINT = base.METABOB_ENDPOINT;
+  if (scriptDir) out.SUBSTRATE_SCRIPT_DIR = scriptDir;
   return out;
 }
 
@@ -395,7 +404,19 @@ function sweepExpired(log: (l: string) => void): void {
 }
 
 // ── the resolver ─────────────────────────────────────────────────────────────────────────────────────
-type Prepared = { entry: AllowlistEntry; argv: string[]; args: Record<string, unknown>; root: string; real: string };
+type Prepared = { entry: AllowlistEntry; argv: string[]; args: Record<string, unknown>; root: string; real: string; blob: Uint8Array };
+
+/** The approved bytes, from the clone's OBJECT STORE by hash (never the working tree), re-hashed. */
+function readVerifiedBlob(root: string, sha: string, env: Env): { ok: true; bytes: Uint8Array } | { ok: false; why: string } {
+  let r: ReturnType<typeof Bun.spawnSync>;
+  try {
+    r = Bun.spawnSync(["git", "cat-file", "blob", sha], { cwd: root, env: { PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: env.HOME ?? "/root" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  } catch (e) { return { ok: false, why: `git cat-file could not run: ${String((e as Error)?.message ?? e)}` }; }
+  if (r.exitCode !== 0 || !r.stdout) return { ok: false, why: `${sha} is not in the clone's object store (an approved hash must be committed or fetched into the clone)` };
+  const bytes = new Uint8Array(r.stdout as Uint8Array);
+  if (gitBlobSha(bytes) !== sha) return { ok: false, why: `the object store returned bytes that do not hash to ${sha}` };
+  return { ok: true, bytes };
+}
 
 export async function runAllowlistedScript(pointer: Record<string, unknown>, deps: ScriptRunDeps = {}): Promise<Record<string, unknown>> {
   const env = deps.env ?? process.env;
@@ -448,6 +469,12 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
     before = gitBlobSha(readFileSync(contained.real));
   } catch (e) { return refuse("script_unreadable", String((e as Error)?.message ?? e)); }
   if (before !== entry.blob_sha) return refuse("blob_mismatch", `${entry.path} is ${before}, approved ${entry.blob_sha}; an operator must re-approve the changed script`);
+  // RUN THE VERIFIED BYTES. The hash check above is the APPROVAL GATE (the script as the clone has it now
+  // must be the approved one, so an approval for a script the clone dropped or changed does not run). What
+  // RUNS is the blob itself, from the object store, through a private copy: bash reads a script as it
+  // goes, so running the path would execute whatever the file holds at each read, for the whole run.
+  const blob = readVerifiedBlob(root, entry.blob_sha, env);
+  if (!blob.ok) return refuse("blob_unavailable", blob.why);
 
   // Check-and-take the per-script slot with no await in between, so two concurrent starts cannot both pass.
   const holder = inFlight.get(entry.script_id);
@@ -455,7 +482,7 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
   const runId = crypto.randomUUID();
   inFlight.set(entry.script_id, runId);
   const timeoutS = mode === "async" ? entry.timeout_s : Math.min(entry.timeout_s, MAX_TIMEOUT_S);
-  const prepared: Prepared = { entry, argv: argv.argv, args: argv.args, root, real: contained.real };
+  const prepared: Prepared = { entry, argv: argv.argv, args: argv.args, root, real: contained.real, blob: blob.bytes };
 
   if (mode === "sync") {
     try { return await execute(prepared, timeoutS, env, secrets, log, null); }
@@ -474,13 +501,35 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
 }
 
 async function execute(p: Prepared, timeoutS: number, env: Env, secrets: string[], log: (l: string) => void, runId: string | null): Promise<Record<string, unknown>> {
+  // The private copy: a fresh 0700 directory holding a 0700 file of the verified bytes, removed in
+  // `finally` after the run ends (normal exit, failure, timeout or a thrown error alike). Removal waits
+  // for exit: bash opens the file after spawn returns, so an earlier unlink would race it.
+  let copyDir: string;
+  try {
+    copyDir = mkdtempSync(join(tmpdir(), "script-runner-"));
+    chmodSync(copyDir, 0o700);
+  } catch (e) {
+    const why = redactSecrets(String((e as Error)?.message ?? e), secrets).text;
+    log(`[script-runner] REFUSED script_id=${JSON.stringify(p.entry.script_id)} reason=spawn_failed (private copy: ${why})`);
+    return { shape: SCRIPT_RUN_SHAPE, ok: false, refused: "spawn_failed", error: `spawn_failed: private copy: ${why}`, script_id: p.entry.script_id };
+  }
+  try {
+    const copy = join(copyDir, "script.sh");
+    writeFileSync(copy, p.blob, { mode: 0o700, flag: "wx" });
+    return await executeCopy(p, copy, timeoutS, env, secrets, log, runId);
+  } finally {
+    try { rmSync(copyDir, { recursive: true, force: true }); } catch (e) { log(`[script-runner] could not remove private copy ${copyDir}: ${String((e as Error)?.message ?? e)}`); }
+  }
+}
+
+async function executeCopy(p: Prepared, copy: string, timeoutS: number, env: Env, secrets: string[], log: (l: string) => void, runId: string | null): Promise<Record<string, unknown>> {
   const { entry } = p;
   const started = Date.now();
   let timedOut = false;
   let proc: ReturnType<typeof Bun.spawn>;
   try {
-    proc = Bun.spawn(["bash", p.real, ...p.argv], {
-      cwd: p.root, env: scriptRunnerEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
+    proc = Bun.spawn(["bash", copy, ...p.argv], {
+      cwd: p.root, env: scriptRunnerEnv(env, dirname(p.real)), stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
     });
   } catch (e) {
     const why = redactSecrets(String((e as Error)?.message ?? e), secrets).text;
