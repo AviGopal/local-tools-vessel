@@ -78,6 +78,8 @@ const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_STRING_MAX = 256;
 const POOL_READ_TIMEOUT_MS = 10_000;
+/** Every pool status, read so a retirement or consumption of an approval is seen. */
+const ROW_STATUSES = ["open", "retired", "consumed"] as const;
 const REDACTED = "[REDACTED]";
 const KEY_WINDOW = 8;
 
@@ -149,12 +151,14 @@ async function readAllowlistRows(env: Env): Promise<AllowlistRead> {
   const local = [...new Set(r.producers.filter((p) => p.origin === "local" && p.resolveEndpoint).map((p) => p.resolveEndpoint))];
   if (local.length === 0) return { ok: false, code: "no_local_pool_producer", why: `no local-origin poolImpulse producer (${r.producers.length} non-local ignored)` };
   const rows: PoolRow[] = [];
-  for (const url of local) {
+  // Every state an approval can be in, not only "open": a retirement must be SEEN to win over a replayed
+  // older "open" copy of the same id (development-vessel's read answers one status per request).
+  for (const url of local) for (const status of ROW_STATUSES) {
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `ApiKey ${apiKey}` } : {}) },
-        body: JSON.stringify({ impulse: { type: "poolImpulse", shape: SCRIPT_ALLOWLIST_SHAPE, status: "open" } }),
+        body: JSON.stringify({ impulse: { type: "poolImpulse", shape: SCRIPT_ALLOWLIST_SHAPE, status } }),
         signal: AbortSignal.timeout(POOL_READ_TIMEOUT_MS),
       });
       if (!res.ok) return { ok: false, code: "allowlist_unreadable", why: `pool producer ${url} answered HTTP ${res.status}` };
@@ -206,15 +210,27 @@ function attestationVerified(r: PoolRow, key: string): boolean {
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
-/** The approved entry for `scriptId`: the newest open row of the shape whose operator stamp verifies. */
+/** The approved entry for `scriptId`. Per POOL ID, the current state is the newest row whose operator stamp
+ *  verifies (any status), so a newer signed retirement displaces an older signed "open" that a rogue
+ *  producer replays; unverified rows never count, so a forged retirement displaces nothing. Among the ids
+ *  whose current state is open and names this script_id, the newest wins. */
 function pickEntry(rows: PoolRow[], scriptId: string, key: string): { ok: true; row: PoolRow } | { ok: false; code: "not_allowlisted" | "unattested_entry" | "attestation_unverified" } {
-  const mine = rows.filter((r) => r.shape === SCRIPT_ALLOWLIST_SHAPE && r.status === "open" && rowScriptId(r) === scriptId);
+  const newest = (a: PoolRow, b: PoolRow) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
+  const ofShape = rows.filter((r) => r.shape === SCRIPT_ALLOWLIST_SHAPE);
+  const current = new Map<string, PoolRow>();
+  for (const r of ofShape.filter((r) => isAttested(r) && attestationVerified(r, key)).sort(newest)) {
+    const id = String(r.id ?? "");
+    if (!current.has(id)) current.set(id, r);
+  }
+  const live = [...current.values()].filter((r) => r.status === "open" && rowScriptId(r) === scriptId).sort(newest);
+  if (live.length > 0) return { ok: true, row: live[0]! };
+  // No approval: say why, from the open rows that name this script_id.
+  const mine = ofShape.filter((r) => r.status === "open" && rowScriptId(r) === scriptId);
+  if (mine.length === 0) return { ok: false, code: "not_allowlisted" };
   const attested = mine.filter(isAttested);
-  if (attested.length === 0) return { ok: false, code: mine.length > 0 ? "unattested_entry" : "not_allowlisted" };
-  const verified = attested.filter((r) => attestationVerified(r, key));
-  if (verified.length === 0) return { ok: false, code: "attestation_unverified" };
-  verified.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
-  return { ok: true, row: verified[0]! };
+  if (attested.length === 0) return { ok: false, code: "unattested_entry" };
+  if (!attested.some((r) => attestationVerified(r, key))) return { ok: false, code: "attestation_unverified" };
+  return { ok: false, code: "not_allowlisted" }; // verified, but superseded by a newer signed state of its id
 }
 
 function parseEntry(body: unknown): { ok: true; entry: AllowlistEntry } | { ok: false; why: string } {
