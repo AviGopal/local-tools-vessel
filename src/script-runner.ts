@@ -43,6 +43,10 @@
 // clone is write-contained against every tool, and the file is re-hashed after the run:
 // `modified_during_run` says if it changed.
 //
+// MODES. Sync (default) holds the request until the script ends, with timeout_s clamped to 900 s.
+// mode:"async" answers {run_id, status:"running"} at once and is read back with {run_id}; its timeout_s
+// clamp is 3 h. Either way one script_id has at most one run in flight (see the run registry below).
+//
 // TRACE. The returned `run` record (script_id, blob_sha, args, exit_code, timed_out, duration_ms, output
 // sizes, truncation, redaction) is the step result the walk's trace carries; one `[script-runner]` log line
 // per run or refusal. No env value is ever logged or returned.
@@ -56,7 +60,12 @@ import { containmentZones } from "./write-containment.js";
 export const SCRIPT_ALLOWLIST_SHAPE = "scriptRunnerAllowlist";
 export const SCRIPT_RUN_SHAPE = "scriptRunResult";
 
+/** Sync runs hold the caller's request open, so their clamp stays at the shell's 900 s. */
 const MAX_TIMEOUT_S = 900;
+/** Async runs answer at once and are polled, so an entry may ask for up to 3 h. */
+const MAX_ASYNC_TIMEOUT_S = 3 * 60 * 60;
+/** How long a finished async result stays readable by its run_id. */
+const DEFAULT_RESULT_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_TIMEOUT_S = 300;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES = 64 * 1024;
@@ -79,7 +88,8 @@ type PoolRow = { id?: unknown; shape?: unknown; status?: unknown; updated_at?: u
 export type RefusalCode =
   | "field_not_accepted" | "script_id_required" | "credential_unavailable" | "allowlist_unreadable" | "no_local_pool_producer"
   | "not_allowlisted" | "unattested_entry" | "allowlist_entry_invalid" | "args_invalid" | "no_super_repo_clone"
-  | "path_outside_clone" | "script_unreadable" | "blob_mismatch" | "spawn_failed";
+  | "path_outside_clone" | "script_unreadable" | "blob_mismatch" | "spawn_failed"
+  | "mode_invalid" | "unknown_run" | "already_running";
 
 export interface ScriptRunDeps {
   /** The vessel env (default process.env): credentials, discovery endpoint, super-repo settings. */
@@ -196,7 +206,7 @@ function parseEntry(body: unknown): { ok: true; entry: AllowlistEntry } | { ok: 
   const num = (v: unknown, dflt: number, max: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), max) : dflt);
   return {
     ok: true,
-    entry: { script_id, path: path.trim(), blob_sha, args_schema: schema as ArgSpec[], timeout_s: num(b.timeout_s, DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S), max_output_bytes: num(b.max_output_bytes, DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES) },
+    entry: { script_id, path: path.trim(), blob_sha, args_schema: schema as ArgSpec[], timeout_s: num(b.timeout_s, DEFAULT_TIMEOUT_S, MAX_ASYNC_TIMEOUT_S), max_output_bytes: num(b.max_output_bytes, DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES) },
   };
 }
 
@@ -318,20 +328,59 @@ async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Pro
   return { bytes, total, truncated: total > keptLen };
 }
 
+// ── run registry (in memory only) ────────────────────────────────────────────────────────────────────
+// ASYNC MODE. mode:"async" validates exactly as a sync run, starts the script, and answers
+// {run_id, status:"running"} at once; {run_id} later answers running or the final result (the sync
+// shape plus run_id and status:"finished"). A finished result is kept RESULT_TTL in memory and then
+// forgotten; nothing is persisted (the walk's own step trace carries what it read). A vessel restart
+// forgets every run: its run_ids answer unknown_run and the scripts die with the process group.
+// ONE RUN PER SCRIPT_ID. A second start of a script_id with a run in flight, async or sync, is REFUSED
+// (already_running) with the in-flight run_id to poll, never queued and never joined: two copies of a
+// harness writing the same results directory would corrupt each other, and a refusal says so plainly.
+type RunRecord = { script_id: string; started_at: number; finished_at?: number; result?: Record<string, unknown> };
+const runs = new Map<string, RunRecord>();
+const inFlight = new Map<string, string>(); // script_id → run_id
+let resultTtlMs = DEFAULT_RESULT_TTL_MS;
+/** Tests only: shorten the result TTL (null restores the default). */
+export function __setScriptRunTtlMsForTests(ms: number | null): void { resultTtlMs = ms ?? DEFAULT_RESULT_TTL_MS; }
+function sweepExpired(log: (l: string) => void): void {
+  const now = Date.now();
+  for (const [id, r] of runs) {
+    if (r.finished_at !== undefined && now - r.finished_at > resultTtlMs) {
+      runs.delete(id);
+      log(`[script-runner] expired run_id=${id} script_id=${r.script_id}`);
+    }
+  }
+}
+
 // ── the resolver ─────────────────────────────────────────────────────────────────────────────────────
+type Prepared = { entry: AllowlistEntry; argv: string[]; args: Record<string, unknown>; root: string; real: string };
+
 export async function runAllowlistedScript(pointer: Record<string, unknown>, deps: ScriptRunDeps = {}): Promise<Record<string, unknown>> {
   const env = deps.env ?? process.env;
   const secrets = [env.METABOB_API_KEY ?? ""].filter((s) => s.length > 0);
   const log = (line: string) => (deps.log ?? ((l: string) => console.log(l)))(redactSecrets(line, secrets).text);
   const scriptId = typeof pointer.script_id === "string" ? pointer.script_id : undefined;
-  const refuse = (code: RefusalCode, why: string): Record<string, unknown> => {
+  const refuse = (code: RefusalCode, why: string, extra: Record<string, unknown> = {}): Record<string, unknown> => {
     const error = redactSecrets(`${code}: ${why}`, secrets).text;
     log(`[script-runner] REFUSED script_id=${JSON.stringify(scriptId ?? null)} reason=${code} (${why})`);
-    return { shape: SCRIPT_RUN_SHAPE, ok: false, refused: code, error, script_id: scriptId ?? null };
+    return { shape: SCRIPT_RUN_SHAPE, ok: false, refused: code, error, script_id: scriptId ?? null, ...extra };
   };
+  sweepExpired(log);
 
+  // A POLL: {run_id} answers the run's state. It needs no credential and starts nothing.
+  if (pointer.run_id !== undefined) {
+    const runId = typeof pointer.run_id === "string" ? pointer.run_id : "";
+    const rec = runs.get(runId);
+    if (!rec) return refuse("unknown_run", `no run ${JSON.stringify(runId.slice(0, 80))} is held here (never started, expired, or this vessel restarted)`);
+    if (!rec.result) return { shape: SCRIPT_RUN_SHAPE, status: "running", run_id: runId, script_id: rec.script_id, started_at: new Date(rec.started_at).toISOString(), elapsed_ms: Date.now() - rec.started_at };
+    return rec.result;
+  }
+
+  const mode = pointer.mode ?? "sync";
+  if (mode !== "sync" && mode !== "async") return refuse("mode_invalid", `mode must be "sync" or "async"`);
   const forbidden = FORBIDDEN_POINTER_FIELDS.filter((k) => pointer[k] !== undefined);
-  if (forbidden.length > 0) return refuse("field_not_accepted", `the caller may send only script_id and args; refused: ${forbidden.join(", ")}`);
+  if (forbidden.length > 0) return refuse("field_not_accepted", `the caller may send only script_id, args and mode; refused: ${forbidden.join(", ")}`);
   if (!scriptId) return refuse("script_id_required", "script_id is required");
   if (secrets.length === 0) return refuse("credential_unavailable", "this vessel has no METABOB_API_KEY to inject");
 
@@ -357,15 +406,45 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
   } catch (e) { return refuse("script_unreadable", String((e as Error)?.message ?? e)); }
   if (before !== entry.blob_sha) return refuse("blob_mismatch", `${entry.path} is ${before}, approved ${entry.blob_sha}; an operator must re-approve the changed script`);
 
+  // Check-and-take the per-script slot with no await in between, so two concurrent starts cannot both pass.
+  const holder = inFlight.get(entry.script_id);
+  if (holder) return refuse("already_running", `script ${entry.script_id} already has run ${holder} in flight; poll it with {run_id}`, { run_id: holder });
+  const runId = crypto.randomUUID();
+  inFlight.set(entry.script_id, runId);
+  const timeoutS = mode === "async" ? entry.timeout_s : Math.min(entry.timeout_s, MAX_TIMEOUT_S);
+  const prepared: Prepared = { entry, argv: argv.argv, args: argv.args, root, real: contained.real };
+
+  if (mode === "sync") {
+    try { return await execute(prepared, timeoutS, env, secrets, log, null); }
+    finally { inFlight.delete(entry.script_id); }
+  }
+  const startedAt = Date.now();
+  runs.set(runId, { script_id: entry.script_id, started_at: startedAt });
+  log(`[script-runner] started run_id=${runId} script_id=${entry.script_id} blob=${entry.blob_sha.slice(0, 12)} timeout_s=${timeoutS}`);
+  void execute(prepared, timeoutS, env, secrets, log, runId)
+    .catch((e) => ({ shape: SCRIPT_RUN_SHAPE, ok: false, script_id: entry.script_id, error: `script runner failed: ${(e as Error)?.name ?? "error"}` }) as Record<string, unknown>)
+    .then((result) => {
+      runs.set(runId, { script_id: entry.script_id, started_at: startedAt, finished_at: Date.now(), result: { ...result, run_id: runId, status: "finished" } });
+    })
+    .finally(() => { if (inFlight.get(entry.script_id) === runId) inFlight.delete(entry.script_id); });
+  return { shape: SCRIPT_RUN_SHAPE, status: "running", run_id: runId, script_id: entry.script_id, timeout_s: timeoutS };
+}
+
+async function execute(p: Prepared, timeoutS: number, env: Env, secrets: string[], log: (l: string) => void, runId: string | null): Promise<Record<string, unknown>> {
+  const { entry } = p;
   const started = Date.now();
   let timedOut = false;
   let proc: ReturnType<typeof Bun.spawn>;
   try {
-    proc = Bun.spawn(["bash", contained.real, ...argv.argv], {
-      cwd: root, env: scriptRunnerEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
+    proc = Bun.spawn(["bash", p.real, ...p.argv], {
+      cwd: p.root, env: scriptRunnerEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
     });
-  } catch (e) { return refuse("spawn_failed", String((e as Error)?.message ?? e)); }
-  const timer = setTimeout(() => { timedOut = true; killTree(proc.pid); }, entry.timeout_s * 1000);
+  } catch (e) {
+    const why = redactSecrets(String((e as Error)?.message ?? e), secrets).text;
+    log(`[script-runner] REFUSED script_id=${JSON.stringify(entry.script_id)} reason=spawn_failed (${why})`);
+    return { shape: SCRIPT_RUN_SHAPE, ok: false, refused: "spawn_failed", error: `spawn_failed: ${why}`, script_id: entry.script_id };
+  }
+  const timer = setTimeout(() => { timedOut = true; killTree(proc.pid); }, timeoutS * 1000);
   let out: Awaited<ReturnType<typeof drainCapped>>, err: Awaited<ReturnType<typeof drainCapped>>, exitCode: number | null;
   try {
     const exited = proc.exited.then((c) => {
@@ -384,16 +463,17 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
   }
   const duration_ms = Date.now() - started;
   let after: string | null = null;
-  try { after = gitBlobSha(readFileSync(contained.real)); } catch { /* removed during the run */ }
+  try { after = gitBlobSha(readFileSync(p.real)); } catch { /* removed during the run */ }
   const dec = new TextDecoder("utf-8", { fatal: false });
   const so = redactSecrets(dec.decode(out.bytes), secrets);
   const se = redactSecrets(dec.decode(err.bytes), secrets);
   const run = {
     script_id: entry.script_id,
     blob_sha: entry.blob_sha,
-    args: argv.args,
+    args: p.args,
     exit_code: exitCode,
     timed_out: timedOut,
+    timeout_s: timeoutS,
     duration_ms,
     stdout_bytes: out.total,
     stderr_bytes: err.total,
@@ -402,7 +482,7 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
     redacted: so.redacted || se.redacted,
     modified_during_run: after !== entry.blob_sha,
   };
-  log(`[script-runner] ran script_id=${entry.script_id} blob=${entry.blob_sha.slice(0, 12)} args=${JSON.stringify(argv.args)} exit=${exitCode} timed_out=${timedOut} duration_ms=${duration_ms} stdout=${out.total}B stderr=${err.total}B${run.stdout_truncated || run.stderr_truncated ? " truncated" : ""}${run.redacted ? " redacted" : ""}${run.modified_during_run ? " MODIFIED_DURING_RUN" : ""}`);
+  log(`[script-runner] ${runId ? `finished run_id=${runId}` : "ran"} script_id=${entry.script_id} blob=${entry.blob_sha.slice(0, 12)} args=${JSON.stringify(p.args)} exit=${exitCode} timed_out=${timedOut} duration_ms=${duration_ms} stdout=${out.total}B stderr=${err.total}B${run.stdout_truncated || run.stderr_truncated ? " truncated" : ""}${run.redacted ? " redacted" : ""}${run.modified_during_run ? " MODIFIED_DURING_RUN" : ""}`);
   return {
     shape: SCRIPT_RUN_SHAPE,
     ok: !timedOut && exitCode === 0,
