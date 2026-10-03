@@ -76,6 +76,12 @@ const FIXTURES: Record<string, string> = {
     'echo "late=$METABOB_API_KEY"',
     'echo "done-waiting"',
   ].join("\n") + "\n",
+  // Prints (1000 - $1) filler bytes, then the key, on stdout and on stderr: the key straddles a 1000-byte cap.
+  "straddle.sh": [
+    "#!/usr/bin/env bash",
+    'n=$((1000 - $1)); head -c "$n" /dev/zero | tr "\\0" "x"; printf "%s" "$METABOB_API_KEY"',
+    'head -c "$n" /dev/zero | tr "\\0" "y" >&2; printf "%s" "$METABOB_API_KEY" >&2',
+  ].join("\n") + "\n",
   "big.sh": ["#!/usr/bin/env bash", "head -c 200000 /dev/zero | tr '\\0' 'x'", 'echo "done" >&2'].join("\n") + "\n",
 };
 
@@ -598,5 +604,29 @@ describe("async mode", () => {
     } finally {
       __setScriptRunTtlMsForTests(null);
     }
+  });
+});
+
+describe("REDACT BEFORE TRUNCATE: a key straddling max_output_bytes leaks no prefix", () => {
+  it("MUST-FAIL: with the key starting 1..12 bytes before the cap, no >=4-char key prefix survives on either stream", async () => {
+    const straddle = () => row("r-straddle", entry("straddle", "straddle.sh", { max_output_bytes: 1000, args_schema: [{ name: "offset", type: "integer", min: 1, max: 60 }] }));
+    localRows = [straddle()];
+    const prefix = FAKE_KEY.slice(0, 4);
+    expect("x".repeat(10) + "[REDACTED]").not.toContain(prefix); // the probe cannot match filler or the marker
+    const leaks: string[] = [];
+    for (let offset = 1; offset <= 12; offset++) {
+      const r = await run({ script_id: "straddle", args: { offset } });
+      expect(r.ok).toBe(true);
+      const rec = r.run as Record<string, unknown>;
+      for (const [name, out] of [["stdout", String(r.stdout)], ["stderr", String(r.stderr)]] as const) {
+        if (Buffer.byteLength(out) > 1000) leaks.push(`offset ${offset} ${name}: ${Buffer.byteLength(out)} bytes, over the 1000-byte cap`);
+        if (out.includes(prefix)) leaks.push(`offset ${offset} ${name}: a key prefix survives the cut`);
+      }
+      expect(rec.stdout_truncated).toBe(true);
+      expect(rec.stdout_bytes).toBe(1000 - offset + FAKE_KEY.length);
+      // the whole key was inside the kept window, so it was seen and redacted, at every offset
+      if (rec.redacted !== true) leaks.push(`offset ${offset}: not reported as redacted`);
+    }
+    expect(leaks).toEqual([]);
   });
 });
