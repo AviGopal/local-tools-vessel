@@ -52,7 +52,7 @@
 // per run or refusal. No env value is ever logged or returned.
 
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { containmentZones } from "./write-containment.js";
@@ -87,7 +87,7 @@ type PoolRow = { id?: unknown; shape?: unknown; status?: unknown; updated_at?: u
 
 export type RefusalCode =
   | "field_not_accepted" | "script_id_required" | "credential_unavailable" | "allowlist_unreadable" | "no_local_pool_producer"
-  | "not_allowlisted" | "unattested_entry" | "allowlist_entry_invalid" | "args_invalid" | "no_super_repo_clone"
+  | "not_allowlisted" | "unattested_entry" | "attestation_unverified" | "allowlist_entry_invalid" | "args_invalid" | "no_super_repo_clone"
   | "path_outside_clone" | "script_unreadable" | "blob_mismatch" | "spawn_failed"
   | "mode_invalid" | "unknown_run" | "already_running";
 
@@ -171,13 +171,43 @@ const rowScriptId = (r: PoolRow): string | undefined => {
   return typeof id === "string" ? id : undefined;
 };
 
-/** The approved entry for `scriptId`: the newest open, attested row of the shape. */
-function pickEntry(rows: PoolRow[], scriptId: string): { ok: true; row: PoolRow } | { ok: false; code: "not_allowlisted" | "unattested_entry" } {
+/** Key-sorted JSON. TWIN: development-vessel src/resolvers/pool-impulse.ts canonicalJson; change both. */
+export function canonicalJson(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return "[" + v.map(canonicalJson).join(",") + "]";
+  const o = v as Record<string, unknown>;
+  return "{" + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + canonicalJson(o[k])).join(",") + "}";
+}
+
+/** THE ORIGIN LINK IS NOT TRUSTED. Discovery stamps ANY authenticated plain registration "local"
+ *  (discovery-vessel src/resolvers.ts localOrigin), so a producer listed as local may be a rogue one,
+ *  and attested.key_id is a public identifier anyone can copy. What proves an approval is the stamp's
+ *  signature: HMAC-SHA256 under this node's METABOB_API_KEY, computed by development-vessel's pool writer
+ *  only after identity accepted an admin credential. A peer node's writer signs with its own key; a rogue
+ *  producer has none. TWIN: development-vessel src/resolvers/pool-impulse.ts attestationSig. */
+export function attestationSig(key: string, row: { id?: unknown; shape?: unknown; status?: unknown; body?: unknown }, keyId: string | null, at: string): string {
+  return createHmac("sha256", key)
+    .update(["substrate-pool-attestation/v1", String(row.id), String(row.shape), String(row.status), canonicalJson(row.body), keyId ?? "", at].join("\n"))
+    .digest("hex");
+}
+function attestationVerified(r: PoolRow, key: string): boolean {
+  const a = r.attested as { key_id?: unknown; at?: unknown; sig?: unknown } | undefined;
+  if (!a || typeof a.sig !== "string" || !/^[0-9a-f]{64}$/.test(a.sig) || typeof a.at !== "string") return false;
+  if (a.key_id !== null && a.key_id !== undefined && typeof a.key_id !== "string") return false;
+  const want = Buffer.from(attestationSig(key, r, (a.key_id as string | null | undefined) ?? null, a.at), "hex");
+  const got = Buffer.from(a.sig, "hex");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+/** The approved entry for `scriptId`: the newest open row of the shape whose operator stamp verifies. */
+function pickEntry(rows: PoolRow[], scriptId: string, key: string): { ok: true; row: PoolRow } | { ok: false; code: "not_allowlisted" | "unattested_entry" | "attestation_unverified" } {
   const mine = rows.filter((r) => r.shape === SCRIPT_ALLOWLIST_SHAPE && r.status === "open" && rowScriptId(r) === scriptId);
   const attested = mine.filter(isAttested);
   if (attested.length === 0) return { ok: false, code: mine.length > 0 ? "unattested_entry" : "not_allowlisted" };
-  attested.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
-  return { ok: true, row: attested[0]! };
+  const verified = attested.filter((r) => attestationVerified(r, key));
+  if (verified.length === 0) return { ok: false, code: "attestation_unverified" };
+  verified.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
+  return { ok: true, row: verified[0]! };
 }
 
 function parseEntry(body: unknown): { ok: true; entry: AllowlistEntry } | { ok: false; why: string } {
@@ -386,8 +416,10 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
 
   const read = await readAllowlistRows(env).catch((e) => ({ ok: false as const, code: "allowlist_unreadable" as const, why: String((e as Error)?.message ?? e) }));
   if (!read.ok) return refuse(read.code, read.why);
-  const picked = pickEntry(read.rows, scriptId);
-  if (!picked.ok) return refuse(picked.code, picked.code === "unattested_entry" ? "the only rows for this script_id carry no operator attestation" : "no open scriptRunnerAllowlist row names this script_id");
+  const picked = pickEntry(read.rows, scriptId, secrets[0]!);
+  if (!picked.ok) return refuse(picked.code, picked.code === "unattested_entry" ? "the only rows for this script_id carry no operator attestation"
+    : picked.code === "attestation_unverified" ? "no operator stamp for this script_id carries a valid signature under this node's key (unsigned, signed by another node, or altered after signing)"
+    : "no open scriptRunnerAllowlist row names this script_id");
   const parsed = parseEntry(picked.row.body);
   if (!parsed.ok) return refuse("allowlist_entry_invalid", parsed.why);
   const entry = parsed.entry;
