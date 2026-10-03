@@ -760,3 +760,15 @@ describe("DOUBLE-FORK CONTAINMENT: an orphan the script detaches is still killed
     } finally { reap("orphan-exit.pid"); }
   }, 20_000);
 });
+
+describe("memory bound: the drain keeps at most its cap, whatever the stream sends", () => {
+  it("MUST-FAIL: 200 KB through a 1000-byte drain keeps 1000 bytes and counts 200000", async () => {
+    const drain = (scriptRunner as Record<string, unknown>)["drainCapped"] as ((s: ReadableStream<Uint8Array>, cap: number) => Promise<{ bytes: Uint8Array; total: number }>) | undefined;
+    expect(typeof drain).toBe("function");
+    const chunk = new Uint8Array(10_000).fill(120);
+    const stream = new ReadableStream<Uint8Array>({ start(c) { for (let i = 0; i < 20; i++) c.enqueue(chunk); c.close(); } });
+    const r = await drain!(stream, 1000);
+    expect(r.bytes.byteLength).toBe(1000);
+    expect(r.total).toBe(200_000);
+  });
+});
