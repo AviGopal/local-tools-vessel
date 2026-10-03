@@ -336,7 +336,7 @@ export function redactThenCap(bytes: Uint8Array, cap: number, secrets: readonly 
   return { text: new TextDecoder("utf-8", { fatal: false }).decode(enc.subarray(0, cap)), redacted: r.redacted };
 }
 
-async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<{ bytes: Uint8Array; total: number; truncated: boolean }> {
+export async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<{ bytes: Uint8Array; total: number; truncated: boolean }> {
   const kept: Uint8Array[] = [];
   let keptLen = 0;
   let total = 0;
