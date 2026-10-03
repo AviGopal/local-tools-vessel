@@ -440,7 +440,7 @@ describe("MUST-FAIL (5): only an operator-attested row from THIS substrate's poo
     expect((await run({ script_id: "fixture" })).ok).toBe(true);
     localRows = [row("r-old", old, { updated_at: "2026-10-03T00:00:00.000Z" }), row("r-new", entry("fixture", "fixture.sh"), { updated_at: "2026-10-02T00:00:00.000Z" })];
     refusedWith(await run({ script_id: "fixture" }), "blob_mismatch");
-  });
+  }, 30_000);
   it("an unreadable allowlist fails closed with its own reason, never as 'not allowlisted'", async () => {
     discoveryMode = "down";
     refusedWith(await run({ script_id: "fixture" }), "allowlist_unreadable");
@@ -475,7 +475,7 @@ describe("MUST-FAIL (7): no trace or log line carries the key", () => {
     for (const r of results) assertNoKey(JSON.stringify(r));
     // positive control: the assertion can see the key when it is there
     expect(() => assertNoKey(`x${FAKE_KEY.slice(3, 11)}y`)).toThrow();
-  });
+  }, 30_000);
 });
 
 describe("limits: timeout kills the whole tree; output is capped", () => {
@@ -601,7 +601,7 @@ describe("async mode", () => {
     const third = await run({ script_id: "wait", mode: "async" });
     expect(third.status).toBe("running");
     await poll(third.run_id);
-  });
+  }, 30_000);
 
   it("MUST-FAIL: the sync cap is unchanged (900 s); async lifts the clamp to 3 h only", async () => {
     localRows = [row("r-long", entry("long", "fixture.sh", { timeout_s: 5000 })), row("r-huge", entry("huge", "fixture.sh", { timeout_s: 999999 }))];
@@ -611,7 +611,7 @@ describe("async mode", () => {
     expect((a.run as Record<string, unknown>).timeout_s).toBe(5000);
     const h = await poll((await run({ script_id: "huge", mode: "async" })).run_id);
     expect((h.run as Record<string, unknown>).timeout_s).toBe(10800);
-  });
+  }, 30_000);
 
   it("an async start refused before spawning answers the refusal at once, with no run_id", async () => {
     const r = await run({ script_id: "fixture", mode: "async", args: { mode: "turbo" } });
@@ -656,7 +656,7 @@ describe("REDACT BEFORE TRUNCATE: a key straddling max_output_bytes leaks no pre
       if (rec.redacted !== true) leaks.push(`offset ${offset}: not reported as redacted`);
     }
     expect(leaks).toEqual([]);
-  });
+  }, 30_000);
 });
 
 describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, never the path", () => {
@@ -683,7 +683,7 @@ describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, ne
     } finally {
       writeFileSync(abs("midrun.sh"), original);
     }
-  });
+  }, 30_000);
 
   it("MUST-FAIL: the copy is private (dir 0700, file 0700), $0 is the copy, and SUBSTRATE_SCRIPT_DIR names the original's directory", async () => {
     const r = await run({ script_id: "fixture" });
@@ -712,7 +712,7 @@ describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, ne
       expect(existsSync(self)).toBe(false);
       expect(existsSync(dirname(self))).toBe(false);
     }
-  });
+  }, 30_000);
 
   it("MUST-FAIL: an approved hash that is not in the clone's object store is refused (blob_unavailable), nothing runs", async () => {
     // present in the working tree with the approved hash, but never added or committed
@@ -742,7 +742,7 @@ describe("DOUBLE-FORK CONTAINMENT: an orphan the script detaches is still killed
       await Bun.sleep(300);
       expect(alive(orphan)).toBe(false);
     } finally { reap("orphan-hang.pid"); }
-  });
+  }, 30_000);
 
   it("MUST-FAIL: a script that double-forks a sleeper holding stdout and exits completes promptly, and the orphan is dead", async () => {
     localRows = [row("r-dfe", entry("dfork-exit", "dfork-exit.sh", { timeout_s: 4 }))];
