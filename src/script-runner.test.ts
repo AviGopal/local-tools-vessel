@@ -8,9 +8,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import * as scriptRunner from "./script-runner";
 import { gitBlobSha, runAllowlistedScript, SCRIPT_ALLOWLIST_SHAPE } from "./script-runner";
@@ -43,7 +43,11 @@ const FIXTURES: Record<string, string> = {
   "fixture.sh": [
     "#!/usr/bin/env bash",
     "set -u",
-    'echo "fixture $(basename "$0")" >> "$(dirname "$0")/../../ran.log"',
+    'D="${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}"',
+    'echo "fixture fixture.sh" >> "$D/../../ran.log"',
+    'echo "SELF=$0"',
+    'echo "SDIR=${SUBSTRATE_SCRIPT_DIR:-unset}"',
+    'echo "MODES=$(stat -c %a "$0") $(stat -c %a "$(dirname "$0")")"',
     'if [ -n "${METABOB_API_KEY:-}" ]; then echo "METABOB_API_KEY=set"; else echo "METABOB_API_KEY=unset"; fi',
     'if [ -n "${METABOB_ENDPOINT:-}" ]; then echo "METABOB_ENDPOINT=set"; else echo "METABOB_ENDPOINT=unset"; fi',
     'echo "ENV_NAMES=$(env | cut -d= -f1 | sort | tr "\\n" ",")"',
@@ -62,6 +66,7 @@ const FIXTURES: Record<string, string> = {
   // Backgrounds a plain child and a GNU-timeout child (which leaves the process group), then hangs.
   "slow.sh": [
     "#!/usr/bin/env bash",
+    'echo "SELF=$0"',
     "sleep 300 &",
     'echo "child=$!"',
     "timeout 300 sleep 300 &",
@@ -72,7 +77,7 @@ const FIXTURES: Record<string, string> = {
   "wait.sh": [
     "#!/usr/bin/env bash",
     "sleep 2",
-    'echo "wait $(basename "$0")" >> "$(dirname "$0")/../../ran.log"',
+    'echo "wait wait.sh" >> "${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}/../../ran.log"',
     'echo "late=$METABOB_API_KEY"',
     'echo "done-waiting"',
   ].join("\n") + "\n",
@@ -82,6 +87,15 @@ const FIXTURES: Record<string, string> = {
     'n=$((1000 - $1)); head -c "$n" /dev/zero | tr "\\0" "x"; printf "%s" "$METABOB_API_KEY"',
     'head -c "$n" /dev/zero | tr "\\0" "y" >&2; printf "%s" "$METABOB_API_KEY" >&2',
   ].join("\n") + "\n",
+  // Prints, sleeps, prints: bash reads a script incrementally, so a line appended to the file at its
+  // path while this sleeps would be executed by a run that reads the path.
+  "midrun.sh": [
+    "#!/usr/bin/env bash",
+    'echo "phase1"',
+    "sleep 1.5",
+    'echo "phase2"',
+  ].join("\n") + "\n",
+  "fail.sh": ["#!/usr/bin/env bash", 'echo "SELF=$0"', "exit 3"].join("\n") + "\n",
   "big.sh": ["#!/usr/bin/env bash", "head -c 200000 /dev/zero | tr '\\0' 'x'", 'echo "done" >&2'].join("\n") + "\n",
 };
 
@@ -232,7 +246,7 @@ describe("MUST-FAIL (1): an allowlisted script runs with the key present and its
     expect(names).not.toContain("OTHER_SECRET");
     expect(names).not.toContain("TERM");
     expect(names).not.toContain("SUPER_REPO_DIR");
-    for (const n of names) expect(["PATH", "HOME", "LANG", "METABOB_API_KEY", "METABOB_ENDPOINT", "PWD", "SHLVL", "_", "OLDPWD"]).toContain(n);
+    for (const n of names) expect(["PATH", "HOME", "LANG", "METABOB_API_KEY", "METABOB_ENDPOINT", "SUBSTRATE_SCRIPT_DIR", "PWD", "SHLVL", "_", "OLDPWD"]).toContain(n);
     expect(ranLines()).toEqual(["fixture fixture.sh"]);
     // the run record (what the walk's step trace carries)
     const runRec = r.run as Record<string, unknown>;
@@ -283,7 +297,7 @@ describe("MUST-FAIL (3): a script whose content changed after approval is refuse
   it("blob hash mismatch → blob_mismatch, the edited script does not run", async () => {
     const original = readFileSync(abs("fixture.sh"), "utf8");
     try {
-      appendFileSync(abs("fixture.sh"), 'echo "INJECTED" >> "$(dirname "$0")/../../ran.log"\n');
+      appendFileSync(abs("fixture.sh"), 'echo "INJECTED" >> "${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}/../../ran.log"\n');
       refusedWith(await run({ script_id: "fixture" }), "blob_mismatch");
       expect(ranLines()).toEqual([]);
     } finally {
@@ -628,5 +642,73 @@ describe("REDACT BEFORE TRUNCATE: a key straddling max_output_bytes leaks no pre
       if (rec.redacted !== true) leaks.push(`offset ${offset}: not reported as redacted`);
     }
     expect(leaks).toEqual([]);
+  });
+});
+
+describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, never the path", () => {
+  const selfOf = (r: Record<string, unknown>) => String(r.stdout).match(/SELF=(.*)/)?.[1] ?? "";
+  it("MUST-FAIL: a line appended to the script's path mid-run is NOT executed; the original bytes run", async () => {
+    localRows = [row("r-midrun", entry("midrun", "midrun.sh"))];
+    const original = readFileSync(abs("midrun.sh"), "utf8");
+    try {
+      const start = await run({ script_id: "midrun", mode: "async" });
+      expect(start.status).toBe("running");
+      await Bun.sleep(500);
+      appendFileSync(abs("midrun.sh"), 'echo "INJECTED"\n');
+      let fin: Record<string, unknown> = start;
+      for (let i = 0; i < 100 && fin.status !== "finished"; i++) {
+        await Bun.sleep(100);
+        fin = await runAllowlistedScript({ type: "scriptRunResult", run_id: start.run_id }, { env: baseEnv(), log: (l) => logged.push(l) });
+      }
+      expect(fin.status).toBe("finished");
+      expect(String(fin.stdout)).toContain("phase1");
+      expect(String(fin.stdout)).toContain("phase2");
+      expect(String(fin.stdout)).not.toContain("INJECTED");
+      // informational: the file at the path did change during the run
+      expect((fin.run as Record<string, unknown>).modified_during_run).toBe(true);
+    } finally {
+      writeFileSync(abs("midrun.sh"), original);
+    }
+  });
+
+  it("MUST-FAIL: the copy is private (dir 0700, file 0700), $0 is the copy, and SUBSTRATE_SCRIPT_DIR names the original's directory", async () => {
+    const r = await run({ script_id: "fixture" });
+    expect(r.ok).toBe(true);
+    const self = selfOf(r);
+    expect(self).not.toBe(abs("fixture.sh"));
+    expect(self).not.toContain(ROOT);
+    expect(String(r.stdout)).toContain("MODES=700 700");
+    expect(String(r.stdout)).toContain(`SDIR=${realpathSync(join(ROOT, "validation", "scripts"))}`);
+  });
+
+  it("MUST-FAIL: the private copy and its directory are removed after a normal, a failed, a timed-out and an async run", async () => {
+    localRows = [row("r-fixture", entry("fixture", "fixture.sh")), row("r-fail", entry("fail", "fail.sh")), row("r-slow", entry("slow", "slow.sh", { timeout_s: 1 }))];
+    const ok = await run({ script_id: "fixture" });
+    const failed = await run({ script_id: "fail" });
+    expect(failed.exit_code).toBe(3);
+    const timedOut = await run({ script_id: "slow" });
+    expect((timedOut.run as Record<string, unknown>).timed_out).toBe(true);
+    const a = await run({ script_id: "fixture", mode: "async" });
+    let fin: Record<string, unknown> = a;
+    for (let i = 0; i < 100 && fin.status !== "finished"; i++) { await Bun.sleep(50); fin = await runAllowlistedScript({ type: "scriptRunResult", run_id: a.run_id }, { env: baseEnv(), log: (l) => logged.push(l) }); }
+    for (const r of [ok, failed, timedOut, fin]) {
+      const self = selfOf(r);
+      expect(self.length).toBeGreaterThan(0);
+      expect(self).not.toBe(abs("fixture.sh"));
+      expect(existsSync(self)).toBe(false);
+      expect(existsSync(dirname(self))).toBe(false);
+    }
+  });
+
+  it("MUST-FAIL: an approved hash that is not in the clone's object store is refused (blob_unavailable), nothing runs", async () => {
+    // present in the working tree with the approved hash, but never added or committed
+    writeFileSync(abs("fresh.sh"), '#!/usr/bin/env bash\necho "fresh" >> "${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}/../../ran.log"\n');
+    try {
+      localRows = [row("r-fresh", entry("fresh", "fresh.sh"))];
+      refusedWith(await run({ script_id: "fresh" }), "blob_unavailable");
+      expect(ranLines()).toEqual([]);
+    } finally {
+      rmSync(abs("fresh.sh"));
+    }
   });
 });
