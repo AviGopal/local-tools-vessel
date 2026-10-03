@@ -336,6 +336,17 @@ function killTree(pid: number): void {
   for (const d of [pid, ...desc]) { try { process.kill(d, "SIGKILL"); } catch { /* gone */ } }
 }
 
+/** REDACT BEFORE TRUNCATE. A cut made before redaction can split a key so that fewer than KEY_WINDOW of its
+ *  characters remain, and no window then matches them. So the stream is kept to `cap + overlap` bytes
+ *  (overlap = the longest secret's length, so a key that starts before the cap is held whole), decoded,
+ *  redacted, and only THEN cut to `cap` bytes. The cut can split "[REDACTED]" but never a key. */
+export function redactThenCap(bytes: Uint8Array, cap: number, secrets: readonly string[]): { text: string; redacted: boolean } {
+  const r = redactSecrets(new TextDecoder("utf-8", { fatal: false }).decode(bytes), secrets);
+  const enc = new TextEncoder().encode(r.text);
+  if (enc.byteLength <= cap) return r;
+  return { text: new TextDecoder("utf-8", { fatal: false }).decode(enc.subarray(0, cap)), redacted: r.redacted };
+}
+
 async function drainCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<{ bytes: Uint8Array; total: number; truncated: boolean }> {
   const kept: Uint8Array[] = [];
   let keptLen = 0;
@@ -485,9 +496,10 @@ async function execute(p: Prepared, timeoutS: number, env: Env, secrets: string[
       try { process.kill(-proc.pid, "SIGKILL"); } catch { /* group empty */ }
       return c;
     });
+    const keep = entry.max_output_bytes + Math.max(0, ...secrets.map((k) => Buffer.byteLength(k)));
     [out, err, exitCode] = await Promise.all([
-      drainCapped(proc.stdout as ReadableStream<Uint8Array>, entry.max_output_bytes),
-      drainCapped(proc.stderr as ReadableStream<Uint8Array>, entry.max_output_bytes),
+      drainCapped(proc.stdout as ReadableStream<Uint8Array>, keep),
+      drainCapped(proc.stderr as ReadableStream<Uint8Array>, keep),
       exited,
     ]);
   } finally {
@@ -496,9 +508,8 @@ async function execute(p: Prepared, timeoutS: number, env: Env, secrets: string[
   const duration_ms = Date.now() - started;
   let after: string | null = null;
   try { after = gitBlobSha(readFileSync(p.real)); } catch { /* removed during the run */ }
-  const dec = new TextDecoder("utf-8", { fatal: false });
-  const so = redactSecrets(dec.decode(out.bytes), secrets);
-  const se = redactSecrets(dec.decode(err.bytes), secrets);
+  const so = redactThenCap(out.bytes, entry.max_output_bytes, secrets);
+  const se = redactThenCap(err.bytes, entry.max_output_bytes, secrets);
   const run = {
     script_id: entry.script_id,
     blob_sha: entry.blob_sha,
@@ -509,8 +520,8 @@ async function execute(p: Prepared, timeoutS: number, env: Env, secrets: string[
     duration_ms,
     stdout_bytes: out.total,
     stderr_bytes: err.total,
-    stdout_truncated: out.truncated,
-    stderr_truncated: err.truncated,
+    stdout_truncated: out.total > entry.max_output_bytes,
+    stderr_truncated: err.total > entry.max_output_bytes,
     redacted: so.redacted || se.redacted,
     modified_during_run: after !== entry.blob_sha,
   };
