@@ -8,7 +8,7 @@
  * Spec: openspec/changes/2026-05-23-substrate-explicit-vessels Phase 1, task 1.1.
  * Port: 8230  |  Discovery: http://127.0.0.1:8100
  * Shapes: shellResult, fileContent, fileWriteResult, fileEditResult,
- *         gitStatus, gitDiff, gitCommitResult
+ *         gitStatus, gitDiff, gitCommitResult, scriptRunResult
  * Runtime: Bun.
  */
 
@@ -21,6 +21,7 @@ import { resolve as resolvePath } from "node:path";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
 import { containShell } from "./shell-containment.js";
+import { runAllowlistedScript } from "./script-runner.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -453,6 +454,16 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   }
 };
 
+// ALLOWLISTED SCRIPT RUNNER (script-runner.ts). The one resolver that runs a repo script WITH the fleet
+// credential: only a script an operator approved in an attested scriptRunnerAllowlist pool row, pinned to
+// its git blob hash; the caller sends a script_id and args validated against the approved schema, never a
+// command line, path or env. The general shell above stays credential-free.
+const scriptRun: ResolverHandler = async (ctx) => {
+  const b = ctx.body as Record<string, unknown> | undefined;
+  const pointer = ((b?.impulse as Record<string, unknown> | undefined)?.pointer ?? b ?? {}) as Record<string, unknown>;
+  return runAllowlistedScript(pointer).catch((e) => ({ error: `script runner failed: ${(e as Error)?.name ?? "error"}` }));
+};
+
 const gitStatus: ResolverHandler = async (ctx) =>
   sh("git status --porcelain", str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd")).then(r => ({ shape: "gitStatus", ...r }))
     .catch(e => ({ error: (e as Error).message }));
@@ -830,6 +841,7 @@ const resolvers = new Map<string, ResolverHandler>([
   ["codeInsertResult", codeInsertAfterLine], ["codeReplaceResult", codeReplaceLines],
   ["codeReadResult", codeReadLines], ["codeAddImportResult", codeAddImport],
   ["codeTypecheckResult", codeVerifyTypecheck],
+  ["scriptRunResult", scriptRun],
 ]);
 
 const runtime = new ExecutionRuntime({
@@ -845,6 +857,7 @@ await new VesselDaemon({
     "gitStatus", "gitDiff", "gitCommitResult",
     "codeSearchResult", "codeFindFunctionResult", "codeFindImportResult",
     "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult", "webSearchResult",
+    "scriptRunResult",
     // TOOL-NAME aliases. patch_with_tools drives the tool names directly
     // (code_search, code_read_lines, ...), and every one of these is already a key
     // in the `resolvers` Map above — but they were never ADVERTISED, so discovery
