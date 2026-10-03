@@ -173,7 +173,9 @@ function installNetwork(): void {
       expect(ptr?.type).toBe("poolImpulse");
       expect(ptr?.shape).toBe(SCRIPT_ALLOWLIST_SHAPE);
       if (producerMode === "malformed") return Response.json({ shape: "poolImpulse", body: { nope: true } });
-      const rows = u === DEV_RESOLVE ? localRows : peerRows;
+      // as development-vessel's read does: only rows of the requested status (default "open")
+      const want = typeof ptr?.status === "string" ? ptr.status : "open";
+      const rows = (u === DEV_RESOLVE ? localRows : peerRows).filter((r) => r.status === want);
       return Response.json({ shape: "poolImpulse", body: { impulses: rows, count: rows.length } });
     }
     throw new TypeError("unexpected network call in test: " + u);
@@ -304,6 +306,31 @@ describe("MUST-FAIL (2): a script id that is not allowlisted is refused", () => 
   it("a retired row is not an approval", async () => {
     localRows = [row("r-fixture", entry("fixture", "fixture.sh"), { status: "retired" })];
     refusedWith(await run({ script_id: "fixture" }), "not_allowlisted");
+  });
+  // RETIREMENT WINS. One pool id has one current state: the newest VERIFIED row for that id. A rogue
+  // producer can replay an approval's older signed "open" state; the legitimate store answers the same id
+  // as "retired", newer and also signed, and the retirement must win.
+  it("MUST-FAIL: per pool id the newest verified row decides: a newer signed retirement displaces an older signed open (a replay)", async () => {
+    localRows = [
+      row("r-fixture", entry("fixture", "fixture.sh"), { status: "open", updated_at: "2026-10-01T00:00:00.000Z" }),
+      row("r-fixture", entry("fixture", "fixture.sh"), { status: "retired", updated_at: "2026-10-02T00:00:00.000Z" }),
+    ];
+    refusedWith(await run({ script_id: "fixture" }), "not_allowlisted");
+    expect(ranLines()).toEqual([]);
+  });
+  it("an UNVERIFIED newer retirement does not displace a verified open (a forged retirement is ignored)", async () => {
+    localRows = [
+      row("r-fixture", entry("fixture", "fixture.sh"), { status: "open", updated_at: "2026-10-01T00:00:00.000Z" }),
+      row("r-fixture", entry("fixture", "fixture.sh"), { status: "retired", updated_at: "2026-10-02T00:00:00.000Z", signKey: "peer-key-xxxxxxxxxxxxxxxx" }),
+    ];
+    expect((await run({ script_id: "fixture" })).ok).toBe(true);
+  });
+  it("a newer verified open state of the same id (a re-approval after retirement) is an approval", async () => {
+    localRows = [
+      row("r-fixture", entry("fixture", "fixture.sh", { blob_sha: "0".repeat(40) }), { status: "retired", updated_at: "2026-10-01T00:00:00.000Z" }),
+      row("r-fixture", entry("fixture", "fixture.sh"), { status: "open", updated_at: "2026-10-02T00:00:00.000Z" }),
+    ];
+    expect((await run({ script_id: "fixture" })).ok).toBe(true);
   });
 });
 
