@@ -1,6 +1,7 @@
 // The allowlisted script runner (script-runner.ts): the walk names a script id and arguments, never a
 // command line; the runner executes ONLY a script an operator approved in an attested
-// scriptRunnerAllowlist pool row, pinned to the git blob hash of the approved content, with
+// scriptRunnerAllowlist pool row, pinned to a COMMIT of the clone (the script and the tree it runs from,
+// exported from the object store into a private snapshot), with
 // METABOB_API_KEY injected from this vessel's own env. Everything here runs a REAL bash on REAL fixture
 // files in a temp git repo (the stand-in for the live super-repo clone); only the pool read is stubbed,
 // at the network edge (globalThis.fetch answering discovery and development-vessel's resolve route), so
@@ -31,10 +32,16 @@ const DEV_RESOLVE = "http://127.0.0.1:59322/v2/impulses/resolve";
 const PEER_RESOLVE = "http://10.9.9.9:18090/v2/impulses/resolve";
 
 let ROOT = "";
+let HEAD_SHA = "";
+let SIDE_SHA = ""; // a commit in the store that is NOT an ancestor of origin/dev
+let SUBREPO = "";
 let OUTSIDE = "";
 const rel = (name: string) => `validation/scripts/${name}`;
 const abs = (name: string) => join(ROOT, rel(name));
-const ranLog = () => join(ROOT, "ran.log");
+// Fixtures report through validation/out, the rows' declared WRITABLE dir: in the snapshot it is a link
+// into the clone, so these files land (and stay) in the clone, as the harness's results do.
+const OUT = () => join(ROOT, "validation", "out");
+const ranLog = () => join(OUT(), "ran.log");
 const ranLines = (): string[] => (existsSync(ranLog()) ? readFileSync(ranLog(), "utf8").split("\n").filter(Boolean) : []);
 const git = (...a: string[]) => execFileSync("git", a, { cwd: ROOT, encoding: "utf8" }).trim();
 
@@ -44,10 +51,11 @@ const FIXTURES: Record<string, string> = {
     "#!/usr/bin/env bash",
     "set -u",
     'D="${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}"',
-    'echo "fixture fixture.sh" >> "$D/../../ran.log"',
+    'echo "fixture fixture.sh" >> "$D/../out/ran.log"',
+    'echo "PWD_NOW=$PWD"',
+    'echo "ROOTMODE=$(stat -c %a "$D/../..")"',
     'echo "SELF=$0"',
     'echo "SDIR=${SUBSTRATE_SCRIPT_DIR:-unset}"',
-    'echo "MODES=$(stat -c %a "$0") $(stat -c %a "$(dirname "$0")")"',
     'if [ -n "${METABOB_API_KEY:-}" ]; then echo "METABOB_API_KEY=set"; else echo "METABOB_API_KEY=unset"; fi',
     'if [ -n "${METABOB_ENDPOINT:-}" ]; then echo "METABOB_ENDPOINT=set"; else echo "METABOB_ENDPOINT=unset"; fi',
     'echo "ENV_NAMES=$(env | cut -d= -f1 | sort | tr "\\n" ",")"',
@@ -77,7 +85,7 @@ const FIXTURES: Record<string, string> = {
   "wait.sh": [
     "#!/usr/bin/env bash",
     "sleep 2",
-    'echo "wait wait.sh" >> "${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}/../../ran.log"',
+    'echo "wait wait.sh" >> "$SUBSTRATE_SCRIPT_DIR/../out/ran.log"',
     'echo "late=$METABOB_API_KEY"',
     'echo "done-waiting"',
   ].join("\n") + "\n",
@@ -101,16 +109,29 @@ const FIXTURES: Record<string, string> = {
   // dfork-exit.sh exits at once while the orphan still holds stdout (the hang-forever path).
   "dfork-hang.sh": [
     "#!/usr/bin/env bash",
-    '( setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../../orphan-hang.pid" )',
+    '( setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../out/orphan-hang.pid" )',
     "sleep 300",
   ].join("\n") + "\n",
   "dfork-exit.sh": [
     "#!/usr/bin/env bash",
-    '( setsid sleep 300 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../../orphan-exit.pid" )',
+    '( setsid sleep 300 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../out/orphan-exit.pid" )',
     'echo "parent-done"',
     "exit 0",
   ].join("\n") + "\n",
   "big.sh": ["#!/usr/bin/env bash", "head -c 200000 /dev/zero | tr '\\0' 'x'", 'echo "done" >&2'].join("\n") + "\n",
+  // THE TREE: main.sh runs a sibling in its own directory and a file from a submodule, the way
+  // run-weekly-harness.sh runs reuse-harness.ts and (through _forge-via-ias-executor.ts) ias-executor-ts/src.
+  // It sleeps first, so a test can change either file while it runs. It writes a result through the
+  // writable dir.
+  "main.sh": [
+    "#!/usr/bin/env bash",
+    'D="$SUBSTRATE_SCRIPT_DIR"',
+    'sleep "${1:-0}"',
+    'bash "$D/sib.sh"',
+    'bash "$D/../../repos/sub/src/hello.sh"',
+    'echo "result-from-main" > "$D/../out/result.txt"',
+  ].join("\n") + "\n",
+  "sib.sh": ["#!/usr/bin/env bash", 'echo "SIB=committed"'].join("\n") + "\n",
 };
 
 type Row = { id: string; shape: string; status: string; updated_at: string; body: unknown; attested?: unknown };
@@ -118,8 +139,10 @@ const ATTESTED = { by: "operator", key_id: "k-admin", at: "2026-10-03T00:00:00.0
 function entry(script_id: string, file: string, extra: Record<string, unknown> = {}) {
   return {
     script_id,
+    commit: HEAD_SHA,
     path: rel(file),
-    blob_sha: gitBlobSha(readFileSync(abs(file))),
+    export: ["validation/scripts"],
+    writable: ["validation/out"],
     args_schema: [
       { name: "mode", type: "string", enum: ["quick", "full"], flag: "--mode" },
       { name: "label", type: "string", pattern: "[a-z0-9_]{1,16}" },
@@ -200,20 +223,41 @@ let spies: Array<ReturnType<typeof spyOn>> = [];
 const run = (pointer: Record<string, unknown>, env = baseEnv()) =>
   runAllowlistedScript({ type: "scriptRunResult", ...pointer }, { env, log: (l) => logged.push(l) });
 
+const commitAll = (cwd: string, msg: string) => {
+  execFileSync("git", ["add", "-A"], { cwd });
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg], { cwd });
+};
 beforeAll(() => {
   ROOT = mkdtempSync(join(tmpdir(), "script-runner-root-"));
   OUTSIDE = mkdtempSync(join(tmpdir(), "script-runner-outside-"));
+  // the submodule's own repo
+  SUBREPO = mkdtempSync(join(tmpdir(), "script-runner-sub-"));
+  mkdirSync(join(SUBREPO, "src"), { recursive: true });
+  writeFileSync(join(SUBREPO, "src", "hello.sh"), '#!/usr/bin/env bash\necho "SUB=committed"\n');
+  execFileSync("git", ["init", "-q"], { cwd: SUBREPO });
+  commitAll(SUBREPO, "sub");
+  // the super-repo stand-in
   mkdirSync(join(ROOT, "validation", "scripts"), { recursive: true });
+  mkdirSync(OUT(), { recursive: true });
+  writeFileSync(join(OUT(), ".gitkeep"), "");
   for (const [name, text] of Object.entries(FIXTURES)) { writeFileSync(abs(name), text); chmodSync(abs(name), 0o755); }
-  writeFileSync(join(OUTSIDE, "evil.sh"), "#!/usr/bin/env bash\necho evil >> \"" + join(ROOT, "ran.log") + "\"\n");
+  writeFileSync(join(OUTSIDE, "evil.sh"), "#!/usr/bin/env bash\necho evil >> \"" + join(ROOT, "validation", "out", "ran.log") + "\"\n");
   symlinkSync(join(OUTSIDE, "evil.sh"), abs("link.sh"));
-  writeFileSync(join(ROOT, ".gitignore"), "ran.log\n");
+  writeFileSync(join(ROOT, ".gitignore"), "validation/out/*.log\nvalidation/out/*.pid\nvalidation/out/*.txt\n");
   git("init", "-q");
-  git("add", "-A");
-  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixtures"], { cwd: ROOT });
+  execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", SUBREPO, "repos/sub"], { cwd: ROOT });
+  commitAll(ROOT, "fixtures");
+  HEAD_SHA = git("rev-parse", "HEAD");
+  git("update-ref", "refs/remotes/origin/dev", HEAD_SHA);
+  // a side commit: in the object store, not on origin/dev
+  git("checkout", "-q", "-b", "side");
+  writeFileSync(join(ROOT, "side.txt"), "side\n");
+  commitAll(ROOT, "side");
+  SIDE_SHA = git("rev-parse", "HEAD");
+  git("checkout", "-q", HEAD_SHA);
 });
 afterAll(() => {
-  for (const d of [ROOT, OUTSIDE]) try { rmSync(d, { recursive: true, force: true }); } catch { /* noop */ }
+  for (const d of [ROOT, OUTSIDE, SUBREPO]) try { rmSync(d, { recursive: true, force: true }); } catch { /* noop */ }
 });
 beforeEach(() => {
   localRows = [row("r-fixture", entry("fixture", "fixture.sh")), row("r-leak", entry("leak", "leak.sh")), row("r-slow", entry("slow", "slow.sh", { timeout_s: 1 })), row("r-big", entry("big", "big.sh", { max_output_bytes: 1000 })), row("r-wait", entry("wait", "wait.sh"))];
@@ -267,7 +311,8 @@ describe("MUST-FAIL (1): an allowlisted script runs with the key present and its
     // the run record (what the walk's step trace carries)
     const runRec = r.run as Record<string, unknown>;
     expect(runRec.script_id).toBe("fixture");
-    expect(runRec.blob_sha).toBe(git("rev-parse", `HEAD:${rel("fixture.sh")}`));
+    expect(runRec.commit).toBe(HEAD_SHA);
+    expect(runRec.path).toBe(rel("fixture.sh"));
     expect(runRec.args).toEqual({ mode: "quick", label: "wk_40", count: 3, verbose: true });
     expect(runRec.exit_code).toBe(0);
     expect(typeof runRec.duration_ms).toBe("number");
@@ -298,7 +343,7 @@ describe("MUST-FAIL (2): a script id that is not allowlisted is refused", () => 
     expect(ranLines()).toEqual([]);
   });
   it("a caller cannot supply the command, path, env or cwd itself", async () => {
-    for (const k of ["command", "path", "env", "cwd", "blob_sha"]) {
+    for (const k of ["command", "path", "env", "cwd", "blob_sha", "commit", "export", "writable"]) {
       refusedWith(await run({ script_id: "fixture", [k]: k === "env" ? { METABOB_API_KEY: "x" } : "validation/scripts/leak.sh" }), "field_not_accepted");
     }
     expect(ranLines()).toEqual([]);
@@ -327,32 +372,37 @@ describe("MUST-FAIL (2): a script id that is not allowlisted is refused", () => 
   });
   it("a newer verified open state of the same id (a re-approval after retirement) is an approval", async () => {
     localRows = [
-      row("r-fixture", entry("fixture", "fixture.sh", { blob_sha: "0".repeat(40) }), { status: "retired", updated_at: "2026-10-01T00:00:00.000Z" }),
+      row("r-fixture", entry("fixture", "fixture.sh", { commit: "0".repeat(40) }), { status: "retired", updated_at: "2026-10-01T00:00:00.000Z" }),
       row("r-fixture", entry("fixture", "fixture.sh"), { status: "open", updated_at: "2026-10-02T00:00:00.000Z" }),
     ];
     expect((await run({ script_id: "fixture" })).ok).toBe(true);
   });
 });
 
-describe("MUST-FAIL (3): a script whose content changed after approval is refused", () => {
-  it("blob hash mismatch → blob_mismatch, the edited script does not run", async () => {
+describe("MUST-FAIL (3): what runs is the approved commit, never the working tree", () => {
+  // REPLACED GUARD: this used to be "an edited script is refused (blob_mismatch)". With the commit pinned,
+  // the working tree no longer matters: an edit there is simply not what runs.
+  it("a script edited in the working tree after approval: the COMMITTED version runs, the edit does not", async () => {
     const original = readFileSync(abs("fixture.sh"), "utf8");
     try {
-      appendFileSync(abs("fixture.sh"), 'echo "INJECTED" >> "${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}/../../ran.log"\n');
-      refusedWith(await run({ script_id: "fixture" }), "blob_mismatch");
-      expect(ranLines()).toEqual([]);
+      appendFileSync(abs("fixture.sh"), 'echo "INJECTED" >> "$SUBSTRATE_SCRIPT_DIR/../out/ran.log"\n');
+      const r = await run({ script_id: "fixture" });
+      expect(r.ok).toBe(true);
+      expect(ranLines()).toEqual(["fixture fixture.sh"]);
     } finally {
       writeFileSync(abs("fixture.sh"), original);
     }
-    // control: restored content runs again
-    expect((await run({ script_id: "fixture" })).ok).toBe(true);
   });
-  it("a path that escapes the clone (.., absolute, or a symlink out) is refused", async () => {
-    const evilSha = gitBlobSha(readFileSync(join(OUTSIDE, "evil.sh")));
-    for (const [id, path] of [["dotdot", "../" + OUTSIDE.split("/").pop() + "/evil.sh"], ["absolute", join(OUTSIDE, "evil.sh")], ["link", rel("link.sh")]] as const) {
-      localRows = [row(`r-${id}`, { ...entry(id, "fixture.sh"), path, blob_sha: evilSha })];
-      refusedWith(await run({ script_id: id }), "path_outside_clone");
+  it("a path that is not a plain repo path (.., absolute) is refused", async () => {
+    for (const [id, path] of [["dotdot", "../" + OUTSIDE.split("/").pop() + "/evil.sh"], ["absolute", join(OUTSIDE, "evil.sh")]] as const) {
+      localRows = [row(`r-${id}`, { ...entry(id, "fixture.sh"), path, export: [path] })];
+      refusedWith(await run({ script_id: id }), "allowlist_entry_invalid");
     }
+    expect(ranLines()).toEqual([]);
+  });
+  it("MUST-FAIL: a script that is a SYMLINK in the commit is refused (it would run whatever it points at)", async () => {
+    localRows = [row("r-link", entry("link", "link.sh"))];
+    refusedWith(await run({ script_id: "link" }), "path_not_in_commit");
     expect(ranLines()).toEqual([]);
   });
   it("no super-repo clone on this node → refused", async () => {
@@ -431,7 +481,7 @@ describe("MUST-FAIL (5): only an operator-attested row from THIS substrate's poo
   it("MUST-FAIL: a validly signed row whose body was altered afterwards (e.g. a different path or hash) is refused", async () => {
     const r = row("r-fixture", entry("fixture", "fixture.sh"));
     (r.body as Record<string, unknown>).path = rel("leak.sh");
-    (r.body as Record<string, unknown>).blob_sha = gitBlobSha(readFileSync(abs("leak.sh")));
+    (r.body as Record<string, unknown>).export = ["validation"];
     localRows = [r];
     refusedWith(await run({ script_id: "fixture" }), "attestation_unverified");
     const s2 = row("r-fixture", entry("fixture", "fixture.sh"));
@@ -443,7 +493,7 @@ describe("MUST-FAIL (5): only an operator-attested row from THIS substrate's poo
   it("an unverified newer row does not displace a verified older approval", async () => {
     localRows = [
       row("r-old", entry("fixture", "fixture.sh"), { updated_at: "2026-10-01T00:00:00.000Z" }),
-      row("r-new", entry("fixture", "fixture.sh", { blob_sha: "0".repeat(40) }), { updated_at: "2026-10-05T00:00:00.000Z", signKey: "peer-key-xxxxxxxxxxxxxxxx" }),
+      row("r-new", entry("fixture", "fixture.sh", { commit: "0".repeat(40) }), { updated_at: "2026-10-05T00:00:00.000Z", signKey: "peer-key-xxxxxxxxxxxxxxxx" }),
     ];
     expect((await run({ script_id: "fixture" })).ok).toBe(true);
   });
@@ -462,11 +512,11 @@ describe("MUST-FAIL (5): only an operator-attested row from THIS substrate's poo
     expect(ranLines()).toEqual([]);
   });
   it("two attested rows for one script_id: the newest approval wins", async () => {
-    const old = entry("fixture", "fixture.sh", { blob_sha: "0".repeat(40) });
+    const old = entry("fixture", "fixture.sh", { commit: "f".repeat(40) });
     localRows = [row("r-old", old, { updated_at: "2026-10-01T00:00:00.000Z" }), row("r-new", entry("fixture", "fixture.sh"), { updated_at: "2026-10-02T00:00:00.000Z" })];
     expect((await run({ script_id: "fixture" })).ok).toBe(true);
     localRows = [row("r-old", old, { updated_at: "2026-10-03T00:00:00.000Z" }), row("r-new", entry("fixture", "fixture.sh"), { updated_at: "2026-10-02T00:00:00.000Z" })];
-    refusedWith(await run({ script_id: "fixture" }), "blob_mismatch");
+    refusedWith(await run({ script_id: "fixture" }), "commit_unavailable");
   }, 30_000);
   it("an unreadable allowlist fails closed with its own reason, never as 'not allowlisted'", async () => {
     discoveryMode = "down";
@@ -705,21 +755,23 @@ describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, ne
       expect(String(fin.stdout)).toContain("phase1");
       expect(String(fin.stdout)).toContain("phase2");
       expect(String(fin.stdout)).not.toContain("INJECTED");
-      // informational: the file at the path did change during the run
-      expect((fin.run as Record<string, unknown>).modified_during_run).toBe(true);
+      expect(fin.run as Record<string, unknown>).not.toHaveProperty("modified_during_run");
     } finally {
       writeFileSync(abs("midrun.sh"), original);
     }
   }, 30_000);
 
-  it("MUST-FAIL: the copy is private (dir 0700, file 0700), $0 is the copy, and SUBSTRATE_SCRIPT_DIR names the original's directory", async () => {
+  it("MUST-FAIL: the snapshot is private (its root 0700), $0 and SUBSTRATE_SCRIPT_DIR are inside it, and cwd is its root", async () => {
     const r = await run({ script_id: "fixture" });
     expect(r.ok).toBe(true);
     const self = selfOf(r);
     expect(self).not.toBe(abs("fixture.sh"));
     expect(self).not.toContain(ROOT);
-    expect(String(r.stdout)).toContain("MODES=700 700");
-    expect(String(r.stdout)).toContain(`SDIR=${realpathSync(join(ROOT, "validation", "scripts"))}`);
+    const snap = dirname(dirname(dirname(self)));
+    expect(self).toBe(join(snap, "validation", "scripts", "fixture.sh"));
+    expect(String(r.stdout)).toContain("ROOTMODE=700");
+    expect(String(r.stdout)).toContain(`SDIR=${join(snap, "validation", "scripts")}`);
+    expect(String(r.stdout)).toContain(`PWD_NOW=${snap}`);
   });
 
   it("MUST-FAIL: the private copy and its directory are removed after a normal, a failed, a timed-out and an async run", async () => {
@@ -737,27 +789,23 @@ describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, ne
       expect(self.length).toBeGreaterThan(0);
       expect(self).not.toBe(abs("fixture.sh"));
       expect(existsSync(self)).toBe(false);
-      expect(existsSync(dirname(self))).toBe(false);
+      expect(existsSync(dirname(dirname(dirname(self))))).toBe(false); // the whole snapshot
     }
+    // cleanup removed the link into the clone, never what it points at
+    expect(ranLines().length).toBeGreaterThan(0);
   }, 30_000);
 
-  it("MUST-FAIL: an approved hash that is not in the clone's object store is refused (blob_unavailable), nothing runs", async () => {
-    // present in the working tree with the approved hash, but never added or committed
-    writeFileSync(abs("fresh.sh"), '#!/usr/bin/env bash\necho "fresh" >> "${SUBSTRATE_SCRIPT_DIR:-$(dirname "$0")}/../../ran.log"\n');
-    try {
-      localRows = [row("r-fresh", entry("fresh", "fresh.sh"))];
-      refusedWith(await run({ script_id: "fresh" }), "blob_unavailable");
-      expect(ranLines()).toEqual([]);
-    } finally {
-      rmSync(abs("fresh.sh"));
-    }
+  it("MUST-FAIL: an approved commit that is not in the clone's object store is refused (commit_unavailable), nothing runs", async () => {
+    localRows = [row("r-fixture", entry("fixture", "fixture.sh", { commit: "e".repeat(40) }))];
+    refusedWith(await run({ script_id: "fixture" }), "commit_unavailable");
+    expect(ranLines()).toEqual([]);
   });
 });
 
 describe("DOUBLE-FORK CONTAINMENT: an orphan the script detaches is still killed", () => {
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-  const pidFrom = (name: string) => { try { return Number(readFileSync(join(ROOT, name), "utf8").trim()); } catch { return 0; } };
-  const reap = (name: string) => { const p = pidFrom(name); if (p > 0) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } try { rmSync(join(ROOT, name)); } catch { /* none */ } };
+  const pidFrom = (name: string) => { try { return Number(readFileSync(join(OUT(), name), "utf8").trim()); } catch { return 0; } };
+  const reap = (name: string) => { const p = pidFrom(name); if (p > 0) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } try { rmSync(join(OUT(), name)); } catch { /* none */ } };
 
   it("MUST-FAIL: a script that double-forks a setsid sleeper and hangs is killed at timeout with no surviving pid", async () => {
     localRows = [row("r-dfh", entry("dfork-hang", "dfork-hang.sh", { timeout_s: 1 }))];
@@ -797,5 +845,108 @@ describe("memory bound: the drain keeps at most its cap, whatever the stream sen
     const r = await drain!(stream, 1000);
     expect(r.bytes.byteLength).toBe(1000);
     expect(r.total).toBe(200_000);
+  });
+});
+
+// ── PIN THE TREE ─────────────────────────────────────────────────────────────────────────────────────
+// The row pins a COMMIT and the subtrees the script needs (`export`, plus `export_submodules` at the
+// commit's gitlinks). The runner archives them from the object store into the private snapshot, so the
+// script AND everything it runs (siblings, submodule code) are the approved commit's, before and during
+// the run. Data dirs the script writes are declared `writable`: in the snapshot they are links into the
+// clone, so results land where they always have.
+describe("PIN THE TREE: siblings and submodule code run from the approved commit", () => {
+  const mainRow = (extra: Record<string, unknown> = {}) => row("r-main", entry("main", "main.sh", {
+    export_submodules: { "repos/sub": ["src"] },
+    args_schema: [{ name: "delay", type: "integer", min: 0, max: 5 }],
+    ...extra,
+  }));
+  const pollDone = async (run_id: unknown) => {
+    let fin: Record<string, unknown> = { status: "running" };
+    for (let i = 0; i < 150 && fin.status !== "finished"; i++) {
+      await Bun.sleep(100);
+      fin = await runAllowlistedScript({ type: "scriptRunResult", run_id }, { env: baseEnv(), log: (l) => logged.push(l) });
+    }
+    return fin;
+  };
+  const SIB = () => abs("sib.sh");
+  const HELLO = () => join(ROOT, "repos", "sub", "src", "hello.sh");
+
+  it("MUST-FAIL: a sibling and a submodule file modified in the working tree BEFORE the run: the committed versions run", async () => {
+    localRows = [mainRow()];
+    const sib = readFileSync(SIB(), "utf8"), hello = readFileSync(HELLO(), "utf8");
+    try {
+      writeFileSync(SIB(), '#!/usr/bin/env bash\necho "SIB=TAMPERED"\n');
+      writeFileSync(HELLO(), '#!/usr/bin/env bash\necho "SUB=TAMPERED"\n');
+      const r = await run({ script_id: "main" });
+      expect(r.ok).toBe(true);
+      expect(String(r.stdout)).toContain("SIB=committed");
+      expect(String(r.stdout)).toContain("SUB=committed");
+      expect(String(r.stdout)).not.toContain("TAMPERED");
+    } finally { writeFileSync(SIB(), sib); writeFileSync(HELLO(), hello); }
+  }, 30_000);
+
+  it("MUST-FAIL: a sibling and a submodule file modified DURING the run: the committed versions run", async () => {
+    localRows = [mainRow()];
+    const sib = readFileSync(SIB(), "utf8"), hello = readFileSync(HELLO(), "utf8");
+    try {
+      const start = await run({ script_id: "main", mode: "async", args: { delay: 2 } });
+      expect(start.status).toBe("running");
+      await Bun.sleep(600);
+      writeFileSync(SIB(), '#!/usr/bin/env bash\necho "SIB=TAMPERED"\n');
+      writeFileSync(HELLO(), '#!/usr/bin/env bash\necho "SUB=TAMPERED"\n');
+      const fin = await pollDone(start.run_id);
+      expect(fin.ok).toBe(true);
+      expect(String(fin.stdout)).toContain("SIB=committed");
+      expect(String(fin.stdout)).toContain("SUB=committed");
+      expect(String(fin.stdout)).not.toContain("TAMPERED");
+    } finally { writeFileSync(SIB(), sib); writeFileSync(HELLO(), hello); }
+  }, 30_000);
+
+  it("MUST-FAIL: a commit not in the object store is refused; a commit not on the approved branch is refused", async () => {
+    localRows = [mainRow({ commit: "e".repeat(40) })];
+    refusedWith(await run({ script_id: "main" }), "commit_unavailable");
+    localRows = [mainRow({ commit: SIDE_SHA })];
+    refusedWith(await run({ script_id: "main" }), "commit_not_on_branch");
+    localRows = [mainRow({ ancestor_of: "refs/remotes/origin/no-such-branch" })];
+    refusedWith(await run({ script_id: "main" }), "commit_not_on_branch");
+    expect(ranLines()).toEqual([]);
+  });
+
+  it("MUST-FAIL: a submodule whose gitlinked commit is not available in the clone is refused (submodule_unavailable)", async () => {
+    localRows = [mainRow({ export_submodules: { "repos/nosuch": ["src"] } })];
+    refusedWith(await run({ script_id: "main" }), "submodule_unavailable");
+  });
+
+  it("MUST-FAIL: a writable dir is a link into the clone: the result lands in the clone and survives the snapshot's removal", async () => {
+    try { rmSync(join(OUT(), "result.txt")); } catch { /* none */ }
+    localRows = [mainRow()];
+    const r = await run({ script_id: "main" });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(join(OUT(), "result.txt"), "utf8").trim()).toBe("result-from-main");
+    expect(existsSync(join(OUT(), ".gitkeep"))).toBe(true);
+  }, 30_000);
+
+  it("MUST-FAIL: a writable dir that overlaps code (the script's dir, or a submodule export) is an invalid entry", async () => {
+    for (const writable of [["validation/scripts"], ["validation"], ["validation/scripts/lib"], ["repos/sub"], ["repos/sub/src"], ["repos"]]) {
+      localRows = [mainRow({ writable })];
+      refusedWith(await run({ script_id: "main" }), "allowlist_entry_invalid");
+    }
+    expect(ranLines()).toEqual([]);
+  });
+
+  it("an entry must pin a commit, export the script's path, and not carry the retired blob_sha field", async () => {
+    localRows = [mainRow({ commit: undefined })];
+    refusedWith(await run({ script_id: "main" }), "allowlist_entry_invalid");
+    localRows = [mainRow({ export: ["validation/prompts"] })];
+    refusedWith(await run({ script_id: "main" }), "allowlist_entry_invalid");
+    localRows = [mainRow({ blob_sha: "a".repeat(40) })];
+    refusedWith(await run({ script_id: "main" }), "allowlist_entry_invalid");
+  });
+
+  it("MUST-FAIL: an export larger than max_export_bytes is refused before anything runs", async () => {
+    localRows = [mainRow({ max_export_bytes: 1000 })];
+    const r = await run({ script_id: "main" });
+    refusedWith(r, "export_too_large");
+    expect(ranLines()).toEqual([]);
   });
 });
