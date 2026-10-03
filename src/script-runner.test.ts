@@ -294,6 +294,14 @@ describe("MUST-FAIL (4): arguments are validated against the approved schema", (
       expect(ranLines()).toEqual([]);
     });
   }
+  it("a leading dash is refused even when the approved pattern admits '-' (option injection), unless it is an exact enum value", async () => {
+    localRows = [row("r-dash", entry("dash", "fixture.sh", { args_schema: [{ name: "tag", type: "string", pattern: "[a-z-]{1,16}" }, { name: "opt", type: "string", enum: ["-v"] }] }))];
+    for (const tag of ["-rf", "--output"]) refusedWith(await run({ script_id: "dash", args: { tag } }), "args_invalid");
+    expect(ranLines()).toEqual([]);
+    const ok = await run({ script_id: "dash", args: { tag: "a-b", opt: "-v" } });
+    expect(ok.ok).toBe(true);
+    expect(String(ok.stdout)).toMatch(/ARG1=a-b\nARG2=-v\n/);
+  });
   it("a required arg that is missing → args_invalid", async () => {
     localRows = [row("r-req", entry("req", "fixture.sh", { args_schema: [{ name: "mode", type: "string", enum: ["quick"], required: true }] }))];
     refusedWith(await run({ script_id: "req" }), "args_invalid");
