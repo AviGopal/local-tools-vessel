@@ -11,7 +11,15 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import * as scriptRunner from "./script-runner";
 import { gitBlobSha, runAllowlistedScript, SCRIPT_ALLOWLIST_SHAPE } from "./script-runner";
+// Looked up at call time so this file still loads where the async mode is absent (each async test then
+// fails on its own, not the whole file at import).
+const __setScriptRunTtlMsForTests = (ms: number | null): void => {
+  const f = (scriptRunner as Record<string, unknown>)["__setScriptRunTtlMsForTests"];
+  if (typeof f !== "function") throw new Error("__setScriptRunTtlMsForTests is not exported");
+  (f as (ms: number | null) => void)(ms);
+};
 
 // A planted credential: random, long, and distinctive, so any 8-char window of it in a log line or a
 // result is a leak, never a coincidence.
@@ -58,6 +66,14 @@ const FIXTURES: Record<string, string> = {
     "timeout 300 sleep 300 &",
     'echo "tchild=$!"',
     "wait",
+  ].join("\n") + "\n",
+  // Takes ~2 s, then records that it finished and prints the key (redaction must hold on the async path).
+  "wait.sh": [
+    "#!/usr/bin/env bash",
+    "sleep 2",
+    'echo "wait $(basename "$0")" >> "$(dirname "$0")/../../ran.log"',
+    'echo "late=$METABOB_API_KEY"',
+    'echo "done-waiting"',
   ].join("\n") + "\n",
   "big.sh": ["#!/usr/bin/env bash", "head -c 200000 /dev/zero | tr '\\0' 'x'", 'echo "done" >&2'].join("\n") + "\n",
 };
@@ -154,7 +170,7 @@ afterAll(() => {
   for (const d of [ROOT, OUTSIDE]) try { rmSync(d, { recursive: true, force: true }); } catch { /* noop */ }
 });
 beforeEach(() => {
-  localRows = [row("r-fixture", entry("fixture", "fixture.sh")), row("r-leak", entry("leak", "leak.sh")), row("r-slow", entry("slow", "slow.sh", { timeout_s: 1 })), row("r-big", entry("big", "big.sh", { max_output_bytes: 1000 }))];
+  localRows = [row("r-fixture", entry("fixture", "fixture.sh")), row("r-leak", entry("leak", "leak.sh")), row("r-slow", entry("slow", "slow.sh", { timeout_s: 1 })), row("r-big", entry("big", "big.sh", { max_output_bytes: 1000 })), row("r-wait", entry("wait", "wait.sh"))];
   peerRows = [];
   discoveryMode = "local";
   producerMode = "ok";
@@ -420,5 +436,124 @@ describe("wiring: index.ts serves and advertises scriptRunResult", () => {
   it("the daemon advertises the shape", () => {
     const shapesBlock = src.slice(src.indexOf("shapes: ["), src.indexOf("executor: new ActivityExecutor"));
     expect(shapesBlock).toContain('"scriptRunResult"');
+  });
+});
+
+// ── ASYNC MODE ──────────────────────────────────────────────────────────────────────────────────────
+// The weekly harness runs longer than the sync cap (900 s) and longer than any caller would hold a
+// request open. mode:"async" validates and starts the run, answers {run_id, status:"running"} at once,
+// and a later {run_id} read answers running or the final result (same shape as a sync run). Results
+// live in memory with a TTL; nothing is persisted. One script_id has at most one run in flight: a
+// second start (async OR sync) is REFUSED with already_running and the in-flight run_id to poll.
+describe("async mode", () => {
+  const poll = async (run_id: unknown, maxMs = 15_000) => {
+    const t0 = Date.now();
+    for (;;) {
+      const r = await runAllowlistedScript({ type: "scriptRunResult", run_id }, { env: baseEnv(), log: (l) => logged.push(l) });
+      if (r.status !== "running" || Date.now() - t0 > maxMs) return r;
+      await Bun.sleep(100);
+    }
+  };
+  const windows = (s: string, n = 8) => Array.from({ length: s.length - n + 1 }, (_, i) => s.slice(i, i + n));
+  const noKey = (text: string) => windows(FAKE_KEY).every((w) => !text.includes(w));
+
+  it("MUST-FAIL: async returns {run_id, status:'running'} before the script finishes", async () => {
+    const t0 = Date.now();
+    const r = await run({ script_id: "wait", mode: "async" });
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(r.status).toBe("running");
+    expect(typeof r.run_id).toBe("string");
+    expect(r).not.toHaveProperty("stdout");
+    expect(ranLines()).toEqual([]); // the script has not reached its end yet
+    const fin = await poll(r.run_id);
+    expect(fin.status).toBe("finished");
+    expect(ranLines()).toEqual(["wait wait.sh"]);
+  });
+
+  it("MUST-FAIL: the poll returns the final result, same shape as sync, with the key redacted everywhere", async () => {
+    const r = await run({ script_id: "wait", mode: "async" });
+    const fin = await poll(r.run_id);
+    expect(fin.ok).toBe(true);
+    expect(fin.run_id).toBe(r.run_id);
+    expect(fin.exit_code).toBe(0);
+    expect(String(fin.stdout)).toContain("late=[REDACTED]");
+    expect(String(fin.stdout)).toContain("done-waiting");
+    const rec = fin.run as Record<string, unknown>;
+    expect(rec.script_id).toBe("wait");
+    expect(rec.redacted).toBe(true);
+    expect(rec.timed_out).toBe(false);
+    expect(noKey(JSON.stringify(fin))).toBe(true);
+    expect(noKey(JSON.stringify(r))).toBe(true);
+    for (const l of logged) expect(noKey(l)).toBe(true);
+    // one log line per state change: started, then finished
+    expect(logged.filter((l) => l.includes(String(r.run_id)) && /\bstarted\b/.test(l))).toHaveLength(1);
+    expect(logged.filter((l) => l.includes(String(r.run_id)) && /\bfinished\b/.test(l))).toHaveLength(1);
+  });
+
+  it("MUST-FAIL: an async run past timeout_s is killed (whole tree) and reports timed_out:true", async () => {
+    const r = await run({ script_id: "slow", mode: "async" });
+    expect(r.status).toBe("running");
+    const fin = await poll(r.run_id);
+    expect(fin.status).toBe("finished");
+    expect(fin.ok).toBe(false);
+    expect((fin.run as Record<string, unknown>).timed_out).toBe(true);
+    const child = Number(String(fin.stdout).match(/child=(\d+)/)?.[1]);
+    const tchild = Number(String(fin.stdout).match(/tchild=(\d+)/)?.[1]);
+    await Bun.sleep(200);
+    for (const pid of [child, tchild]) { let alive = true; try { process.kill(pid, 0); } catch { alive = false; } expect(alive).toBe(false); }
+  });
+
+  it("MUST-FAIL: an unknown run_id is refused", async () => {
+    const r = await runAllowlistedScript({ type: "scriptRunResult", run_id: "no-such-run" }, { env: baseEnv(), log: (l) => logged.push(l) });
+    refusedWith(r, "unknown_run");
+  });
+
+  it("MUST-FAIL: one script_id cannot have two concurrent runs: a second start (async or sync) is refused with the in-flight run_id", async () => {
+    const first = await run({ script_id: "wait", mode: "async" });
+    const second = await run({ script_id: "wait", mode: "async" });
+    refusedWith(second, "already_running");
+    expect(second.run_id).toBe(first.run_id);
+    const sync = await run({ script_id: "wait" });
+    refusedWith(sync, "already_running");
+    expect(sync.run_id).toBe(first.run_id);
+    // another script is not blocked
+    expect((await run({ script_id: "fixture" })).ok).toBe(true);
+    await poll(first.run_id);
+    expect(ranLines().filter((l) => l.startsWith("wait"))).toHaveLength(1);
+    // once finished, a new run may start
+    const third = await run({ script_id: "wait", mode: "async" });
+    expect(third.status).toBe("running");
+    await poll(third.run_id);
+  });
+
+  it("MUST-FAIL: the sync cap is unchanged (900 s); async lifts the clamp to 3 h only", async () => {
+    localRows = [row("r-long", entry("long", "fixture.sh", { timeout_s: 5000 })), row("r-huge", entry("huge", "fixture.sh", { timeout_s: 999999 }))];
+    const s = await run({ script_id: "long" });
+    expect((s.run as Record<string, unknown>).timeout_s).toBe(900);
+    const a = await poll((await run({ script_id: "long", mode: "async" })).run_id);
+    expect((a.run as Record<string, unknown>).timeout_s).toBe(5000);
+    const h = await poll((await run({ script_id: "huge", mode: "async" })).run_id);
+    expect((h.run as Record<string, unknown>).timeout_s).toBe(10800);
+  });
+
+  it("an async start refused before spawning answers the refusal at once, with no run_id", async () => {
+    const r = await run({ script_id: "fixture", mode: "async", args: { mode: "turbo" } });
+    refusedWith(r, "args_invalid");
+    expect(r.run_id ?? null).toBeNull();
+    refusedWith(await run({ script_id: "fixture", mode: "later" }), "mode_invalid");
+  });
+
+  it("a finished result is kept for the TTL, then the run_id is unknown", async () => {
+    __setScriptRunTtlMsForTests(300);
+    try {
+      const r = await run({ script_id: "fixture", mode: "async" });
+      const fin = await poll(r.run_id);
+      expect(fin.status).toBe("finished");
+      expect((await poll(r.run_id)).status).toBe("finished"); // still there inside the TTL
+      await Bun.sleep(450);
+      refusedWith(await runAllowlistedScript({ type: "scriptRunResult", run_id: r.run_id }, { env: baseEnv(), log: (l) => logged.push(l) }), "unknown_run");
+    } finally {
+      __setScriptRunTtlMsForTests(null);
+    }
   });
 });
