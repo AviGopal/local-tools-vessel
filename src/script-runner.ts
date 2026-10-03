@@ -58,10 +58,11 @@
 
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { containmentZones } from "./write-containment.js";
+import { killTree } from "./proc-tree.js";
 
 export const SCRIPT_ALLOWLIST_SHAPE = "scriptRunnerAllowlist";
 export const SCRIPT_RUN_SHAPE = "scriptRunResult";
@@ -319,31 +320,10 @@ function containPath(root: string, p: string): { ok: true; real: string } | { ok
   return { ok: true, real };
 }
 
-// ── process-tree kill ────────────────────────────────────────────────────────────────────────────────
-function descendants(pid: number): number[] {
-  const children = new Map<number, number[]>();
-  let entries: string[] = [];
-  try { entries = readdirSync("/proc"); } catch { return []; }
-  for (const d of entries) {
-    if (!/^\d+$/.test(d)) continue;
-    try {
-      const stat = readFileSync(`/proc/${d}/stat`, "utf8");
-      const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
-      const list = children.get(ppid) ?? [];
-      list.push(Number(d));
-      children.set(ppid, list);
-    } catch { /* exited */ }
-  }
-  const out: number[] = [];
-  const stack = [pid];
-  while (stack.length) for (const c of children.get(stack.pop()!) ?? []) { out.push(c); stack.push(c); }
-  return out;
-}
-function killTree(pid: number): void {
-  const desc = descendants(pid); // collect BEFORE killing: a dead parent's children are reparented
-  try { process.kill(-pid, "SIGKILL"); } catch { /* group gone */ }
-  for (const d of [pid, ...desc]) { try { process.kill(d, "SIGKILL"); } catch { /* gone */ } }
-}
+// ── process-tree kill: proc-tree.ts; double-fork containment: script-runner-reaper.ts ─────────────────
+/** The containment parent every run goes through (a child subreaper, so double-forked orphans stay in the
+ *  tree killTree walks). One extra Bun process per run. */
+const REAPER = join(import.meta.dir, "script-runner-reaper.ts");
 
 /** REDACT BEFORE TRUNCATE. A cut made before redaction can split a key so that fewer than KEY_WINDOW of its
  *  characters remain, and no window then matches them. So the stream is kept to `cap + overlap` bytes
@@ -528,7 +508,7 @@ async function executeCopy(p: Prepared, copy: string, timeoutS: number, env: Env
   let timedOut = false;
   let proc: ReturnType<typeof Bun.spawn>;
   try {
-    proc = Bun.spawn(["bash", copy, ...p.argv], {
+    proc = Bun.spawn([process.execPath, REAPER, "bash", copy, ...p.argv], {
       cwd: p.root, env: scriptRunnerEnv(env, dirname(p.real)), stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true,
     });
   } catch (e) {
