@@ -7,6 +7,7 @@
 // the reader under test is the production one.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,11 +97,20 @@ function entry(script_id: string, file: string, extra: Record<string, unknown> =
     ...extra,
   };
 }
-function row(id: string, body: unknown, opts: { attested?: unknown; updated_at?: string; status?: string; shape?: string } = {}): Row {
-  return {
-    id, shape: opts.shape ?? SCRIPT_ALLOWLIST_SHAPE, status: opts.status ?? "open", updated_at: opts.updated_at ?? "2026-10-03T01:00:00.000Z", body,
-    ...("attested" in opts ? (opts.attested === undefined ? {} : { attested: opts.attested }) : { attested: ATTESTED }),
-  };
+// The development-vessel stamp's signature, recomputed independently of the runner (its twin is
+// pool-impulse.ts attestationSig): HMAC-SHA256(node key, v1 | id | shape | status | canonical(body) | key_id | at).
+const canon = (v: unknown): string => {
+  if (v === null || typeof v !== "object") return JSON.stringify(v ?? null);
+  if (Array.isArray(v)) return "[" + v.map(canon).join(",") + "]";
+  const o = v as Record<string, unknown>;
+  return "{" + Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + canon(o[k])).join(",") + "}";
+};
+const signRow = (key: string, r: { id: string; shape: string; status: string; body: unknown }, a: { key_id: string | null; at: string }) =>
+  createHmac("sha256", key).update(["substrate-pool-attestation/v1", r.id, r.shape, r.status, canon(r.body), a.key_id ?? "", a.at].join("\n")).digest("hex");
+function row(id: string, body: unknown, opts: { attested?: unknown; updated_at?: string; status?: string; shape?: string; signKey?: string } = {}): Row {
+  const base = { id, shape: opts.shape ?? SCRIPT_ALLOWLIST_SHAPE, status: opts.status ?? "open", updated_at: opts.updated_at ?? "2026-10-03T01:00:00.000Z", body };
+  if ("attested" in opts) return { ...base, ...(opts.attested === undefined ? {} : { attested: opts.attested }) };
+  return { ...base, attested: { ...ATTESTED, sig: signRow(opts.signKey ?? FAKE_KEY, base, ATTESTED) } };
 }
 
 // ── the network edge: discovery + development-vessel's resolve route ──────────────────────────────────
@@ -342,6 +352,39 @@ describe("MUST-FAIL (5): only an operator-attested row from THIS substrate's poo
   it("an attestation by anyone but the operator is not one", async () => {
     localRows = [row("r-fixture", entry("fixture", "fixture.sh"), { attested: { by: "node", key_id: null, at: "x" } })];
     refusedWith(await run({ script_id: "fixture" }), "unattested_entry");
+  });
+  it("MUST-FAIL: a row stamped by:'operator' but with NO signature is refused (attestation_unverified), nothing runs", async () => {
+    localRows = [row("r-fixture", entry("fixture", "fixture.sh"), { attested: ATTESTED })];
+    refusedWith(await run({ script_id: "fixture" }), "attestation_unverified");
+    expect(ranLines()).toEqual([]);
+  });
+  it("MUST-FAIL: a row attested and signed under ANOTHER node's key (a peer operator, or a forged key_id) is refused", async () => {
+    localRows = [row("r-fixture", entry("fixture", "fixture.sh"), { signKey: "a-peer-node-key-not-ours-0123456789" })];
+    refusedWith(await run({ script_id: "fixture" }), "attestation_unverified");
+    const forged = row("r-fixture", entry("fixture", "fixture.sh"));
+    (forged.attested as Record<string, unknown>).key_id = "k-some-other-admin"; // key_id is inside the signed string
+    localRows = [forged];
+    refusedWith(await run({ script_id: "fixture" }), "attestation_unverified");
+    expect(ranLines()).toEqual([]);
+  });
+  it("MUST-FAIL: a validly signed row whose body was altered afterwards (e.g. a different path or hash) is refused", async () => {
+    const r = row("r-fixture", entry("fixture", "fixture.sh"));
+    (r.body as Record<string, unknown>).path = rel("leak.sh");
+    (r.body as Record<string, unknown>).blob_sha = gitBlobSha(readFileSync(abs("leak.sh")));
+    localRows = [r];
+    refusedWith(await run({ script_id: "fixture" }), "attestation_unverified");
+    const s2 = row("r-fixture", entry("fixture", "fixture.sh"));
+    s2.status = "open "; // a status the signature did not cover
+    localRows = [s2];
+    refusedWith(await run({ script_id: "fixture" }), "not_allowlisted");
+    expect(ranLines()).toEqual([]);
+  });
+  it("an unverified newer row does not displace a verified older approval", async () => {
+    localRows = [
+      row("r-old", entry("fixture", "fixture.sh"), { updated_at: "2026-10-01T00:00:00.000Z" }),
+      row("r-new", entry("fixture", "fixture.sh", { blob_sha: "0".repeat(40) }), { updated_at: "2026-10-05T00:00:00.000Z", signKey: "peer-key-xxxxxxxxxxxxxxxx" }),
+    ];
+    expect((await run({ script_id: "fixture" })).ok).toBe(true);
   });
   it("a row of another shape is not an approval even if attested", async () => {
     localRows = [row("r-fixture", entry("fixture", "fixture.sh"), { shape: "autonomyScope" })];
