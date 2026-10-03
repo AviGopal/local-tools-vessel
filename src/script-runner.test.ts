@@ -96,6 +96,20 @@ const FIXTURES: Record<string, string> = {
     'echo "phase2"',
   ].join("\n") + "\n",
   "fail.sh": ["#!/usr/bin/env bash", 'echo "SELF=$0"', "exit 3"].join("\n") + "\n",
+  // DOUBLE FORK: a subshell starts a setsid'd sleeper (own session, own group) and exits, so the sleeper is
+  // orphaned and reparented away from the script's tree. dfork-hang.sh then hangs (timeout path);
+  // dfork-exit.sh exits at once while the orphan still holds stdout (the hang-forever path).
+  "dfork-hang.sh": [
+    "#!/usr/bin/env bash",
+    '( setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../../orphan-hang.pid" )',
+    "sleep 300",
+  ].join("\n") + "\n",
+  "dfork-exit.sh": [
+    "#!/usr/bin/env bash",
+    '( setsid sleep 300 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../../orphan-exit.pid" )',
+    'echo "parent-done"',
+    "exit 0",
+  ].join("\n") + "\n",
   "big.sh": ["#!/usr/bin/env bash", "head -c 200000 /dev/zero | tr '\\0' 'x'", 'echo "done" >&2'].join("\n") + "\n",
 };
 
@@ -711,4 +725,38 @@ describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, ne
       rmSync(abs("fresh.sh"));
     }
   });
+});
+
+describe("DOUBLE-FORK CONTAINMENT: an orphan the script detaches is still killed", () => {
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const pidFrom = (name: string) => { try { return Number(readFileSync(join(ROOT, name), "utf8").trim()); } catch { return 0; } };
+  const reap = (name: string) => { const p = pidFrom(name); if (p > 0) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } try { rmSync(join(ROOT, name)); } catch { /* none */ } };
+
+  it("MUST-FAIL: a script that double-forks a setsid sleeper and hangs is killed at timeout with no surviving pid", async () => {
+    localRows = [row("r-dfh", entry("dfork-hang", "dfork-hang.sh", { timeout_s: 1 }))];
+    try {
+      const r = await run({ script_id: "dfork-hang" });
+      expect((r.run as Record<string, unknown>).timed_out).toBe(true);
+      const orphan = pidFrom("orphan-hang.pid");
+      expect(orphan).toBeGreaterThan(0);
+      await Bun.sleep(300);
+      expect(alive(orphan)).toBe(false);
+    } finally { reap("orphan-hang.pid"); }
+  });
+
+  it("MUST-FAIL: a script that double-forks a sleeper holding stdout and exits completes promptly, and the orphan is dead", async () => {
+    localRows = [row("r-dfe", entry("dfork-exit", "dfork-exit.sh", { timeout_s: 4 }))];
+    try {
+      const t0 = Date.now();
+      const r = await Promise.race([run({ script_id: "dfork-exit" }), Bun.sleep(12_000).then(() => ({ hung: true }) as Record<string, unknown>)]);
+      expect(r.hung).toBeUndefined(); // before: the orphan held the pipe and the run never returned
+      expect(Date.now() - t0).toBeLessThan(3_000); // well before timeout_s: cleanup at the script's exit
+      expect(String(r.stdout)).toContain("parent-done");
+      expect(r.exit_code).toBe(0);
+      const orphan = pidFrom("orphan-exit.pid");
+      expect(orphan).toBeGreaterThan(0);
+      await Bun.sleep(300);
+      expect(alive(orphan)).toBe(false);
+    } finally { reap("orphan-exit.pid"); }
+  }, 20_000);
 });
