@@ -111,11 +111,15 @@ const FIXTURES: Record<string, string> = {
   "dfork-hang.sh": [
     "#!/usr/bin/env bash",
     '( setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../out/orphan-hang.pid" )',
+    'o=$(cat "$SUBSTRATE_SCRIPT_DIR/../out/orphan-hang.pid"); for i in $(seq 50); do read -r l < "/proc/$o/stat" && r=${l##*) } && set -- $r && [ "$4" = "$o" ] && break; sleep 0.05; done',
     "sleep 300",
   ].join("\n") + "\n",
   "dfork-exit.sh": [
     "#!/usr/bin/env bash",
     '( setsid sleep 300 & echo $! > "$SUBSTRATE_SCRIPT_DIR/../out/orphan-exit.pid" )',
+    // wait until the sleeper has left this process group (its own session), so the escape is certain and
+    // not a race the post-exit group kill could win by killing it before setsid() ran
+    'o=$(cat "$SUBSTRATE_SCRIPT_DIR/../out/orphan-exit.pid"); for i in $(seq 50); do read -r l < "/proc/$o/stat" && r=${l##*) } && set -- $r && [ "$4" = "$o" ] && break; sleep 0.05; done',
     'echo "parent-done"',
     "exit 0",
   ].join("\n") + "\n",
@@ -278,6 +282,17 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   for (const s of spies) s.mockRestore();
 });
+
+// RUNNING, not merely present: a killed process stays a zombie (state Z) until its parent reaps it, and
+// kill(pid, 0) still succeeds on a zombie. Where the test runner is PID 1 with no init (a bare `podman run`
+// of `bun test`), adopted orphans are never reaped, so "kill(pid,0) succeeds" would read a dead process as
+// alive. Production runs under systemd, which reaps.
+const isRunning = (pid: number): boolean => {
+  try {
+    const st = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return st.slice(st.lastIndexOf(")") + 2).split(" ")[0] !== "Z";
+  } catch { return false; }
+};
 
 const refusedWith = (r: Record<string, unknown>, code: string) => {
   expect(r.ok).toBe(false);
@@ -562,7 +577,7 @@ describe("MUST-FAIL (7): no trace or log line carries the key", () => {
 });
 
 describe("limits: timeout kills the whole tree; output is capped", () => {
-  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const alive = isRunning;
   it("a script past timeout_s is killed with every descendant, including one under GNU timeout", async () => {
     const t0 = Date.now();
     const r = await run({ script_id: "slow" });
@@ -660,7 +675,7 @@ describe("async mode", () => {
     const child = Number(String(fin.stdout).match(/child=(\d+)/)?.[1]);
     const tchild = Number(String(fin.stdout).match(/tchild=(\d+)/)?.[1]);
     await Bun.sleep(200);
-    for (const pid of [child, tchild]) { let alive = true; try { process.kill(pid, 0); } catch { alive = false; } expect(alive).toBe(false); }
+    for (const pid of [child, tchild]) expect(isRunning(pid)).toBe(false);
   });
 
   it("MUST-FAIL: an unknown run_id is refused", async () => {
@@ -809,7 +824,7 @@ describe("RUN THE VERIFIED BYTES: the approved blob runs from a private copy, ne
 });
 
 describe("DOUBLE-FORK CONTAINMENT: an orphan the script detaches is still killed", () => {
-  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const alive = isRunning;
   const pidFrom = (name: string) => { try { return Number(readFileSync(join(OUT(), name), "utf8").trim()); } catch { return 0; } };
   const reap = (name: string) => { const p = pidFrom(name); if (p > 0) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } } try { rmSync(join(OUT(), name)); } catch { /* none */ } };
 
