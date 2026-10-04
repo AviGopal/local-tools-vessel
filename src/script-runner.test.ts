@@ -34,6 +34,7 @@ const PEER_RESOLVE = "http://10.9.9.9:18090/v2/impulses/resolve";
 let ROOT = "";
 let HEAD_SHA = "";
 let SIDE_SHA = ""; // a commit in the store that is NOT an ancestor of origin/dev
+let GHOST_SHA = ""; // on origin/dev; adds a gitlink (repos/ghost) to a commit the clone does not hold
 let SUBREPO = "";
 let OUTSIDE = "";
 const rel = (name: string) => `validation/scripts/${name}`;
@@ -248,7 +249,12 @@ beforeAll(() => {
   execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", SUBREPO, "repos/sub"], { cwd: ROOT });
   commitAll(ROOT, "fixtures");
   HEAD_SHA = git("rev-parse", "HEAD");
-  git("update-ref", "refs/remotes/origin/dev", HEAD_SHA);
+  // an UNINITIALISED submodule, as a live clone may have one: the commit records a gitlink, the clone has
+  // neither its checkout nor its objects
+  git("update-index", "--add", "--cacheinfo", `160000,${"ab".repeat(20)},repos/ghost`);
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "ghost gitlink"], { cwd: ROOT });
+  GHOST_SHA = git("rev-parse", "HEAD");
+  git("update-ref", "refs/remotes/origin/dev", GHOST_SHA);
   // a side commit: in the object store, not on origin/dev
   git("checkout", "-q", "-b", "side");
   writeFileSync(join(ROOT, "side.txt"), "side\n");
@@ -915,6 +921,10 @@ describe("PIN THE TREE: siblings and submodule code run from the approved commit
   it("MUST-FAIL: a submodule whose gitlinked commit is not available in the clone is refused (submodule_unavailable)", async () => {
     localRows = [mainRow({ export_submodules: { "repos/nosuch": ["src"] } })];
     refusedWith(await run({ script_id: "main" }), "submodule_unavailable");
+    // the live-clone case: the commit has the gitlink, the clone never initialised the submodule
+    localRows = [mainRow({ commit: GHOST_SHA, export_submodules: { "repos/ghost": ["src"] } })];
+    refusedWith(await run({ script_id: "main" }), "submodule_unavailable");
+    expect(ranLines()).toEqual([]);
   });
 
   it("MUST-FAIL: a writable dir is a link into the clone: the result lands in the clone and survives the snapshot's removal", async () => {
