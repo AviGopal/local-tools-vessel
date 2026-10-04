@@ -251,7 +251,8 @@ beforeAll(() => {
   symlinkSync("fixture.sh", abs("ok-link.sh"));
   mkdirSync(join(ROOT, "validation", "links"), { recursive: true });
   symlinkSync(join(OUTSIDE, "evil.sh"), join(ROOT, "validation", "links", "link.sh"));
-  symlinkSync("../../../../../../../../etc/hostname", join(ROOT, "validation", "links", "up.sh"));
+  mkdirSync(join(ROOT, "validation", "links-rel"), { recursive: true });
+  symlinkSync("../../../../../../../../etc/hostname", join(ROOT, "validation", "links-rel", "up.sh"));
   writeFileSync(join(ROOT, ".gitignore"), "validation/out/*.log\nvalidation/out/*.pid\nvalidation/out/*.txt\n");
   git("init", "-q");
   execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", SUBREPO, "repos/sub"], { cwd: ROOT });
@@ -985,8 +986,11 @@ describe("SYMLINKS IN THE SNAPSHOT: a committed link may not point out of it", (
   // or relative with enough ..) would let `bash "$D/lib/x.sh"` run working-tree or arbitrary code and
   // defeat the pin, so the snapshot is refused. A relative link that stays inside it is harmless.
   it("MUST-FAIL: an exported subtree with a link pointing out of the snapshot (absolute or ../ escape) is refused before anything runs", async () => {
-    localRows = [row("r-fixture", entry("fixture", "fixture.sh", { export: ["validation/scripts", "validation/links"] }))];
-    refusedWith(await run({ script_id: "fixture" }), "symlink_escapes_snapshot");
+    // absolute target, and (separately, so neither case hides the other) a relative ../ escape
+    for (const dir of ["validation/links", "validation/links-rel"]) {
+      localRows = [row("r-fixture", entry("fixture", "fixture.sh", { export: ["validation/scripts", dir] }))];
+      refusedWith(await run({ script_id: "fixture" }), "symlink_escapes_snapshot");
+    }
     expect(ranLines()).toEqual([]);
   });
   it("a relative link that stays inside the snapshot is allowed (validation/scripts/ok-link.sh -> fixture.sh)", async () => {
