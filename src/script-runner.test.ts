@@ -247,7 +247,11 @@ beforeAll(() => {
   writeFileSync(join(OUT(), ".gitkeep"), "");
   for (const [name, text] of Object.entries(FIXTURES)) { writeFileSync(abs(name), text); chmodSync(abs(name), 0o755); }
   writeFileSync(join(OUTSIDE, "evil.sh"), "#!/usr/bin/env bash\necho evil >> \"" + join(ROOT, "validation", "out", "ran.log") + "\"\n");
-  symlinkSync(join(OUTSIDE, "evil.sh"), abs("link.sh"));
+  // committed symlinks: one harmless (relative, inside the tree), two that point OUT of it
+  symlinkSync("fixture.sh", abs("ok-link.sh"));
+  mkdirSync(join(ROOT, "validation", "links"), { recursive: true });
+  symlinkSync(join(OUTSIDE, "evil.sh"), join(ROOT, "validation", "links", "link.sh"));
+  symlinkSync("../../../../../../../../etc/hostname", join(ROOT, "validation", "links", "up.sh"));
   writeFileSync(join(ROOT, ".gitignore"), "validation/out/*.log\nvalidation/out/*.pid\nvalidation/out/*.txt\n");
   git("init", "-q");
   execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", SUBREPO, "repos/sub"], { cwd: ROOT });
@@ -422,7 +426,7 @@ describe("MUST-FAIL (3): what runs is the approved commit, never the working tre
     expect(ranLines()).toEqual([]);
   });
   it("MUST-FAIL: a script that is a SYMLINK in the commit is refused (it would run whatever it points at)", async () => {
-    localRows = [row("r-link", entry("link", "link.sh"))];
+    localRows = [row("r-link", { ...entry("link", "fixture.sh"), path: "validation/links/link.sh", export: ["validation/links"] })];
     refusedWith(await run({ script_id: "link" }), "path_not_in_commit");
     expect(ranLines()).toEqual([]);
   });
@@ -973,5 +977,20 @@ describe("PIN THE TREE: siblings and submodule code run from the approved commit
     const r = await run({ script_id: "main" });
     refusedWith(r, "export_too_large");
     expect(ranLines()).toEqual([]);
+  });
+});
+
+describe("SYMLINKS IN THE SNAPSHOT: a committed link may not point out of it", () => {
+  // git archive extracts a committed symlink as a symlink. One that points outside the snapshot (absolute,
+  // or relative with enough ..) would let `bash "$D/lib/x.sh"` run working-tree or arbitrary code and
+  // defeat the pin, so the snapshot is refused. A relative link that stays inside it is harmless.
+  it("MUST-FAIL: an exported subtree with a link pointing out of the snapshot (absolute or ../ escape) is refused before anything runs", async () => {
+    localRows = [row("r-fixture", entry("fixture", "fixture.sh", { export: ["validation/scripts", "validation/links"] }))];
+    refusedWith(await run({ script_id: "fixture" }), "symlink_escapes_snapshot");
+    expect(ranLines()).toEqual([]);
+  });
+  it("a relative link that stays inside the snapshot is allowed (validation/scripts/ok-link.sh -> fixture.sh)", async () => {
+    const r = await run({ script_id: "fixture" });
+    expect(r.ok).toBe(true);
   });
 });
