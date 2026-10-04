@@ -71,9 +71,9 @@
 
 import { HttpDiscoveryAdapter, FetchAdapter } from "@avigopal/ias-executor-ts/adapters";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { containmentZones } from "./write-containment.js";
 import { killTree } from "./proc-tree.js";
 
@@ -120,7 +120,8 @@ export type RefusalCode =
   | "not_allowlisted" | "unattested_entry" | "attestation_unverified" | "allowlist_entry_invalid" | "args_invalid" | "no_super_repo_clone"
   | "spawn_failed"
   | "mode_invalid" | "unknown_run" | "already_running"
-  | "commit_unavailable" | "commit_not_on_branch" | "path_not_in_commit" | "submodule_unavailable" | "export_too_large" | "export_failed";
+  | "commit_unavailable" | "commit_not_on_branch" | "path_not_in_commit" | "submodule_unavailable" | "export_too_large" | "export_failed"
+  | "symlink_escapes_snapshot";
 
 export interface ScriptRunDeps {
   /** The vessel env (default process.env): credentials, discovery endpoint, super-repo settings. */
@@ -518,6 +519,29 @@ async function archiveInto(cwd: string, rev: string, paths: string[], dest: stri
   return { ok: true, bytes: total };
 }
 
+/** Every committed symlink the archives produced must resolve INSIDE the snapshot: one pointing out (absolute,
+ *  or relative with enough "..") would run working-tree or arbitrary code when the script follows it.
+ *  Checked lexically, link by link (a chain is caught at its outward link), before the writable links
+ *  (which point into the clone by design) are added. Returns the first offending link, or null. */
+function outwardSymlink(tree: string): string | null {
+  const stack = [tree];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let names: string[];
+    try { names = readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      const at = join(dir, n);
+      let st: ReturnType<typeof lstatSync>;
+      try { st = lstatSync(at); } catch { continue; }
+      if (st.isSymbolicLink()) {
+        const to = resolvePath(dirname(at), readlinkSync(at));
+        if (!(to === tree || to.startsWith(tree + sep))) return relative(tree, at);
+      } else if (st.isDirectory()) stack.push(at);
+    }
+  }
+  return null;
+}
+
 /** Link `w` in the snapshot to the same path in the clone. Never through a symlink inside the snapshot. */
 function linkWritable(tree: string, root: string, w: string): string | null {
   const target = join(root, w);
@@ -639,6 +663,8 @@ async function execute(p: Prepared, timeoutS: number, env: Env, secrets: string[
       if (!r.ok) return refuseRun(r.code === "export_failed" ? "submodule_unavailable" : r.code, `${sub.key}: ${r.why}`);
       budget -= r.bytes;
     }
+    const out = outwardSymlink(tree);
+    if (out) return refuseRun("symlink_escapes_snapshot", `the export holds a committed symlink that points outside the snapshot: ${out}`);
     for (const w of entry.writable) {
       const bad = linkWritable(tree, p.root, w);
       if (bad) return refuseRun("export_failed", bad);
