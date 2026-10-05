@@ -174,6 +174,73 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
       }
     }
   }
+  // Opaque inline programs and command substitutions — fail closed inside the live super-repo clone.
+  {
+    const root = superOf(realCwd(cwd));
+    if (root) {
+      // Catch command substitutions that launch an inline interpreter program: echo $(python -c ...), backticks, etc.
+      const inlineInterpSub = /\$\((?:[^)]*\b(python3?|ruby|perl|node|bun|php|lua|Rscript)\b[^)]*? -[cer]\b[^)]*)\)/;
+      const backtickInterpSub = /`[^`]*\b(python3?|ruby|perl|node|bun|php|lua|Rscript)\b[^`]*? -[cer]\b[^`]*`/;
+      if (inlineInterpSub.test(command) || backtickInterpSub.test(command)) {
+        return { ok: false, reason: WRITE_CONTAINMENT_ERROR };
+      }
+
+      const segs2 = segments(command);
+      const isAssign = (w: string): boolean => {
+        const eq = w.indexOf("=");
+        if (eq <= 0) return false;
+        const name = w.slice(0, eq);
+        return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+      };
+      const refuse = (): ShellVerdict => ({ ok: false, reason: WRITE_CONTAINMENT_ERROR });
+
+      for (const words of segs2) {
+        if (words.length === 0) continue;
+        // Skip any leading NAME=VALUE assignments; a pure-assignment segment is allowed.
+        let i = 0;
+        while (i < words.length && isAssign(words[i]!)) i++;
+        if (i >= words.length) continue; // assignment-only segment (e.g., BASE_REF=$(git ...))
+
+        const cmd = words[i]!;
+        // Command word produced by substitution or tilde expansion? Fail closed in the live clone.
+        if (!literal(cmd)) return refuse();
+
+        const base = cmd.slice(cmd.lastIndexOf("/") + 1);
+        const rest = words.slice(i + 1);
+        const has = (f: string) => rest.includes(f);
+
+        // Recurse minimal check through sh/bash -c '...'
+        if (base === "sh" || base === "bash") {
+          const ci = rest.findIndex((w) => w === "-c");
+          if (ci !== -1 && rest[ci + 1]) {
+            const inner = rest[ci + 1]!;
+            const v = containShell(inner, cwd, { env: opts.env, rawCwd: opts.rawCwd, grant: opts.grant, now: opts.now });
+            if (!v.ok) return v;
+          }
+        }
+
+        // Inline program flags for common interpreters — fail closed in the live clone.
+        if (["python", "python3", "ruby", "perl", "node", "bun", "php", "lua", "Rscript"].includes(base)) {
+          if (has("-c") || has("-e") || has("-r")) return refuse();
+        }
+
+        // tclsh reading program from stdin (no script arg) — fail closed.
+        if (base === "tclsh" && rest.length === 0) return refuse();
+
+        // awk/gawk inline programs: refuse obvious writey forms (redirection, system()).
+        if (base === "awk" || base === "gawk") {
+          if (!rest.some((w) => w === "-f")) {
+            let pj = 0;
+            while (pj < rest.length && rest[pj]!.startsWith("-")) pj++;
+            const prog = rest[pj];
+            if (typeof prog === "string") {
+              if (prog.includes(">") || /system\s*\(/.test(prog)) return refuse();
+            }
+          }
+        }
+      }
+    }
+  }
   // The directory relative words resolve against. Null once a `cd` goes somewhere we
   // cannot evaluate (`cd "$ROOT"`): relative targets are then unknown, not the clone.
   let dir: string | null = realCwd(cwd);
