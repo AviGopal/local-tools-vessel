@@ -848,8 +848,9 @@ const runtime = new ExecutionRuntime({
   attachedVessels: [{ id: VESSEL_ID, kind: "local-tools" as never, resolverIds: Array.from(resolvers.keys()) }],
 });
 
-await new VesselDaemon({
-  port: PORT,
+if (import.meta.main) {
+  await new VesselDaemon({
+    port: PORT,
   vesselId: VESSEL_ID,
   vesselName: "Local Tools Vessel",
   shapes: [
@@ -878,9 +879,10 @@ await new VesselDaemon({
   version: "0.1.0",
   enforceCompositionChain: false,
   systemVessel: true,
-}).start();
+  }).start();
 
-console.log(`[local-tools-vessel] listening on http://127.0.0.1:${PORT}`);
+  console.log(`[local-tools-vessel] listening on http://127.0.0.1:${PORT}`);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Iteration 9 of the cross-vessel OOM hunt — periodic Bun.gc(true) workaround.
