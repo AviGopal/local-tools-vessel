@@ -95,6 +95,15 @@ describe("shell gate: git in the super-repo clone (class)", () => {
       "git submodule foreach git reset --hard", "git submodule set-url sub https://e/",
     ])).toEqual([]);
   });
+  it("refuses mutating or exec-capable git wrapped in a nested interpreter or substitution", () => {
+    const inner = ["git config core.hooksPath /tmp/h", "git remote add evil https://e/", "git -c core.fsmonitor=/tmp/x status"];
+    const wrap = (c: string): string[] => [
+      `sh -c '${c}'`, `bash -c '${c}'`, `bash -lc '${c}'`, `env sh -c '${c}'`, `eval '${c}'`,
+      `echo $(${c})`, `echo \`${c}\``, `echo x | xargs -I{} sh -c '${c}'`, `(${c})`, `{ ${c}; }`,
+      `python3 -c 'import os; os.system("${c}")'`, `node -e 'require("child_process").execSync("${c}")'`,
+    ];
+    expect(leaks(inner.flatMap(wrap))).toEqual([]);
+  });
   it("still allows plain read forms with no overrides (control)", () => {
     // Prefixed plain reads too, so refusing everything with a prefix is not a passing fix.
     const blocked = [...READS.map((r) => `git ${r}`), "git -C . status", "git --no-pager log -1"].filter((c) => !ok(c));
