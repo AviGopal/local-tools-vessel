@@ -123,6 +123,57 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
     for (const s of supers) if (within(p, s)) return s;
     return null;
   };
+  // Early refusal for additional mutating git forms not yet in the fixed set.
+  {
+    const segs = segments(command);
+    for (const words of segs) {
+      if (words.length === 0) continue;
+      if (words[0] !== "git") continue;
+      // Parse global git options up to the subcommand. Consume -C DIR and -c NAME=VALUE.
+      let j = 1;
+      let repoArg: string | null = null;
+      while (j < words.length && words[j]!.startsWith("-")) {
+        const w = words[j]!;
+        if (w === "-C" && j + 1 < words.length) { repoArg = words[j + 1]!; j += 2; continue; }
+        if (w === "-c" && j + 1 < words.length) { j += 2; continue; }
+        j++;
+      }
+      const sub = words[j];
+      if (!sub) continue;
+      const rest = words.slice(j + 1);
+      let refuse = false;
+      if (sub === "config") {
+        const readFlags = new Set(["--get", "--get-all", "--list", "-l", "--get-regexp"]);
+        refuse = !rest.some((t) => readFlags.has(t));
+      } else if (sub === "submodule") {
+        let sub2: string | undefined;
+        for (const t of rest) { if (!t.startsWith("-")) { sub2 = t; break; } }
+        refuse = (sub2 === "update");
+      } else if (sub === "branch") {
+        if (rest.includes("--list") || rest.includes("-l")) {
+          refuse = false;
+        } else {
+          refuse = rest.includes("-f") || rest.includes("--force");
+        }
+      } else if (sub === "remote") {
+        let sub2: string | undefined;
+        for (const t of rest) { if (!t.startsWith("-")) { sub2 = t; break; } }
+        // Allow `git remote -v` or `--verbose` listing; refuse set-url mutation.
+        if (rest.includes("-v") || rest.includes("--verbose")) {
+          refuse = false;
+        } else {
+          refuse = (sub2 === "set-url");
+        }
+      }
+      if (refuse) {
+        const base = repoArg ? (isAbsolute(repoArg) ? repoArg : resolve(cwd, repoArg)) : cwd;
+        const targetRepo = realCwd(base);
+        if (superOf(targetRepo)) {
+          return { ok: false, reason: WRITE_CONTAINMENT_ERROR };
+        }
+      }
+    }
+  }
   // The directory relative words resolve against. Null once a `cd` goes somewhere we
   // cannot evaluate (`cd "$ROOT"`): relative targets are then unknown, not the clone.
   let dir: string | null = realCwd(cwd);
