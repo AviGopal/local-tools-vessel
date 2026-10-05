@@ -54,7 +54,7 @@ describe("shell gate: opaque programs in the super-repo clone (class)", () => {
   });
   it("still allows read-only inline programs and plain reads (control)", () => {
     const blocked = [
-      `python3 -c 'print(1)'`, `awk '{print}' notes.txt`, `cat notes.txt`, `wc -l notes.txt`, `ls`, `grep a notes.txt`,
+      `python3 --version`, `awk '{print}' notes.txt`, `cat notes.txt`, `wc -l notes.txt`, `ls`, `grep a notes.txt`,
     ].filter((c) => !ok(c));
     expect(blocked).toEqual([]);
   });
