@@ -18,10 +18,16 @@ import { describe, expect, it } from "bun:test";
 
 import { mapPath } from "./index";
 
+// The roots mapPath reads (index.ts): relative paths anchor to WORKSPACE_ROOT, repos/ paths to
+// MITOSIS_RUNTIME_DIR. The pull-sync gate runs this suite with WORKSPACE_ROOT set to a throwaway root, so
+// expectations hardcoded to /workspace failed there on every tick although mapPath was right.
+const WORKSPACE = process.env.WORKSPACE_ROOT ?? "/workspace";
+const RUNTIME = process.env.MITOSIS_RUNTIME_DIR ?? "/vessels";
+
 describe("mapPath", () => {
   it("rewrites repos/ to the runtime root", () => {
     expect(mapPath("repos/goal-host-vessel/src/index.ts")).toBe(
-      "/vessels/goal-host-vessel/src/index.ts",
+      `${RUNTIME}/goal-host-vessel/src/index.ts`,
     );
   });
 
@@ -35,15 +41,16 @@ describe("mapPath", () => {
     // The whole point: without this, `find . -name '*.ts'` searched
     // /vessels/local-tools-vessel and found no vessel source.
     expect(mapPath("scripts/substrate/vessels.inventory.json")).toBe(
-      "/workspace/scripts/substrate/vessels.inventory.json",
+      `${WORKSPACE}/scripts/substrate/vessels.inventory.json`,
     );
+    expect(mapPath("scripts/substrate/vessels.inventory.json")!.startsWith(`${process.cwd()}/`)).toBe(WORKSPACE === process.cwd());
   });
 
   it("keeps repos/ winning over the relative-path anchor", () => {
     // Both branches match a bare "repos/..." string; the repos/ rewrite must run
     // first or every vessel path lands under /workspace/repos/... which is dead.
     expect(mapPath("repos/concept-db/sql/001.surql")).toBe(
-      "/vessels/concept-db/sql/001.surql",
+      `${RUNTIME}/concept-db/sql/001.surql`,
     );
   });
 
