@@ -67,6 +67,12 @@ describe("agentShellEnv", () => {
     expect(env.FOO).toBeUndefined();
   });
 
+  it("MUST-FAIL neither fleet-key name reaches the agent shell from the vessel env or the extra env", () => {
+    const env = agentShellEnv({ ...VESSEL_ENV, SUBSTRATE_API_KEY: "x" }, { METABOB_API_KEY: "y", SUBSTRATE_API_KEY: "z" });
+    expect(env.SUBSTRATE_API_KEY).toBeUndefined();
+    expect(env.METABOB_API_KEY).toBeUndefined();
+  });
+
   it("returns exactly the allowlisted names present, nothing else", () => {
     expect(Object.keys(agentShellEnv(VESSEL_ENV)).sort()).toEqual(["HOME", "LANG", "LC_ALL", "PATH"]);
   });
