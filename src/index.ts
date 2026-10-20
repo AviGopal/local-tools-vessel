@@ -22,6 +22,7 @@ import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
 import { containShell } from "./shell-containment.js";
 import { runAllowlistedScript } from "./script-runner.js";
+import { openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -200,7 +201,7 @@ export function groupBounded(command: string, timeoutSec: number): string {
   ].join("\n");
 }
 
-export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, extraEnv?: Record<string, string>) {
+export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, extraEnv?: Record<string, string>, callerTag?: string) {
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
@@ -235,15 +236,36 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   // Ordinary commands (git, ls, cat, curl) skip this entirely — only the expensive
   // class waits for a slot, and even that wait is bounded and fails open.
   const testClass = isTestClassCommand(cmd);
-  const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
+  // OBSERVE-ONLY: one `[sh-instrument]` line per call, on return or throw (sh-instrument.ts).
+  // A 720 s verify came back empty at ~300 s while a bare 320 s call did not, so this records
+  // the bound actually applied, the slot wait, bash exit vs pipe EOF, the end kind and what
+  // the call left alive. The probe swallows its own errors; nothing below changes behaviour.
+  const probe = openShProbe({ cmd, requestedTimeoutSec: timeoutSec, effectiveTimeoutSec: requestTimeoutSec, testClass, executionId: extraEnv?.SUBSTRATE_EXECUTION_ID, callerTag });
+  let abort: AbortSignal | undefined;
+  let proc: { signalCode: string | null } | undefined;
+  let result: { stdout: string; stderr: string; exit_code: number } | undefined;
+  let threw = false;
   try {
-    const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env: agentShellEnv(process.env, extraEnv), stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout((requestTimeoutSec + 5) * 1000) });
-    const [stdout, stderr, exit_code] = await Promise.all([
-      new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
-    ]);
-    return { stdout, stderr, exit_code };
+    const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
+    probe.slotAcquired();
+    try {
+      const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env: agentShellEnv(process.env, extraEnv), stdout: "pipe", stderr: "pipe", signal: (abort = AbortSignal.timeout((requestTimeoutSec + 5) * 1000)) });
+      proc = p;
+      probe.spawned(p.pid);
+      p.exited.then(probe.exited, () => {});
+      const out = new Response(p.stdout).text(), err = new Response(p.stderr).text();
+      Promise.all([out, err]).then(probe.eof, () => {});
+      const [stdout, stderr, exit_code] = await Promise.all([out, err, p.exited]);
+      result = { stdout, stderr, exit_code };
+      return result;
+    } finally {
+      if (slot) await slot.release();
+    }
+  } catch (e) {
+    threw = true;
+    throw e;
   } finally {
-    if (slot) await slot.release();
+    probe.done({ result, threw, aborted: abort?.aborted ?? false, signal: proc?.signalCode ?? null });
   }
 }
 
@@ -271,7 +293,10 @@ const shell: ResolverHandler = async (ctx) => {
     return { error: sv.reason, cwd: rawCwd ?? DEFAULT_CWD };
   }
   if (!execution_id) console.log(`[local-tools] shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
-  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined, execution_id ? { SUBSTRATE_EXECUTION_ID: execution_id } : undefined).then(r => ({ shape: "shellResult", ...r }))
+  // caller_tag: an optional fixed label a caller may send so its calls are findable in the
+  // [sh-instrument] line; logged only when it is a short plain identifier.
+  const callerTag = str(ctx.body, "impulse", "pointer", "caller_tag") ?? str(ctx.body, "caller_tag");
+  return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined, execution_id ? { SUBSTRATE_EXECUTION_ID: execution_id } : undefined, callerTag).then(r => ({ shape: "shellResult", ...r }))
     .catch(e => ({ error: (e as Error).message }));
 };
 
