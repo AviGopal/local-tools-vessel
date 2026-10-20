@@ -55,6 +55,15 @@ export function argv0Base(cmd: string): string {
   return "?";
 }
 
+/** The only form of a command the journal gets: hash + first-word basename, never its text.
+ *  Used by this instrument and by the shell handlers' own request/refusal log lines. */
+export function cmdSha12(cmd: string): string {
+  return createHash("sha256").update(cmd).digest("hex").slice(0, 12);
+}
+export function cmdRef(cmd: string): string {
+  return `cmd_sha12=${cmdSha12(cmd)} argv0_base=${argv0Base(cmd)}`;
+}
+
 interface ProcStat { pid: number; ppid: number; pgid: number; start: number }
 
 function readStat(pid: number): ProcStat | null {
@@ -207,7 +216,7 @@ function openProbe(input: ShProbeInput): ShProbe {
   // as a start with no end rather than as nothing at all.
   const ident = () => ({
     call_id: randomBytes(6).toString("hex"),
-    cmd_sha12: createHash("sha256").update(input.cmd).digest("hex").slice(0, 12),
+    cmd_sha12: cmdSha12(input.cmd),
     argv0_base: argv0Base(input.cmd),
     caller_tag: safeId(input.callerTag),
     execution_id: safeId(input.executionId),

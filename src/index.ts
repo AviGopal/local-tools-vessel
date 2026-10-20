@@ -22,7 +22,7 @@ import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
 import { containShell } from "./shell-containment.js";
 import { runAllowlistedScript } from "./script-runner.js";
-import { openShProbe } from "./sh-instrument.js";
+import { cmdRef, openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -178,9 +178,19 @@ function str(o: unknown, ...keys: string[]): string | undefined {
  * so that alone is not proof of a durable steady-state improvement.
  */
 export function groupBounded(command: string, timeoutSec: number): string {
+  // NO JOB NOTICES (user ruling 2026-10-20). `set -m` also makes bash print job bookkeeping
+  // on ITS stderr ("[1]-  Exit 3  ( <command> )", "line N: PID Killed  ( <command> )"),
+  // which echoed the command text, and any token in it, back in every shellResult. The body
+  // runs in a brace group whose stderr is /dev/null with the real stderr kept on fd 3; the
+  // job gets fd 3 back as its stderr (and closes 3), the watchdog closes 3 too, since its
+  // orphaned sleep would otherwise hold the stderr pipe open for the full bound. A group is
+  // parsed before its redirections apply, so a syntax error in the command still reaches the
+  // caller. Process groups are set at fork by `set -m`, untouched here, so the kill below is
+  // unchanged. Redirecting after the spawn instead raced: a fast job's notice could print first.
   return [
     "set -m",
-    `( ${command} ) &`,
+    "{",
+    `( ${command} ) 2>&3 3>&- &`,
     "__cpid=$!",
     "__killtree() {",
     "  local __t=\"$1\"",
@@ -193,11 +203,12 @@ export function groupBounded(command: string, timeoutSec: number): string {
     "  done",
     "  kill -9 \"$__t\" 2>/dev/null",
     "}",
-    `( sleep ${timeoutSec}; kill -0 $__cpid && __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 &`,
+    `( sleep ${timeoutSec}; kill -0 $__cpid && __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 3>&- &`,
     "__wpid=$!",
     "wait $__cpid; __rc=$?",
     "kill $__wpid 2>/dev/null",
     "exit $__rc",
+    "} 3>&2 2>/dev/null",
   ].join("\n");
 }
 
@@ -290,10 +301,10 @@ const shell: ResolverHandler = async (ctx) => {
   const rawCwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   const sv = containShell(command, rawCwd ? resolvePath(rawCwd) : resolvePath(DEFAULT_CWD), { env: process.env, rawCwd: rawCwd ?? DEFAULT_CWD, grant: pointerField(ctx, WRITE_GRANT_FIELD) });
   if (!sv.ok) {
-    console.error(`[local-tools] shell ${sv.reason} (command ${JSON.stringify(command.slice(0, 160))})`);
+    console.error(`[local-tools] shell ${sv.reason} (${cmdRef(command)})`);
     return { error: sv.reason, cwd: rawCwd ?? DEFAULT_CWD };
   }
-  if (!execution_id) console.log(`[local-tools] shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
+  if (!execution_id) console.log(`[local-tools] shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} ${cmdRef(command)}`);
   // caller_tag: an optional fixed label a caller may send so its calls are findable in the
   // [sh-instrument] line; logged only when it is a short plain identifier.
   const callerTag = str(ctx.body, "impulse", "pointer", "caller_tag") ?? str(ctx.body, "caller_tag");
@@ -463,13 +474,13 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const rawCwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   const sv = containShell(command, resolvePath(cwd), { env: process.env, rawCwd: rawCwd ?? cwd, grant: pointerField(ctx, WRITE_GRANT_FIELD) });
   if (!sv.ok) {
-    console.error(`[local-tools] bounded_shell ${sv.reason} (command ${JSON.stringify(command.slice(0, 160))})`);
+    console.error(`[local-tools] bounded_shell ${sv.reason} (${cmdRef(command)})`);
     return { error: sv.reason, cwd };
   }
   const testClass = isTestClassCommand(command);
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
   try {
-    if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} command=${JSON.stringify(command.slice(0, 100))}`);
+    if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} ${cmdRef(command)}`);
     const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env: agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
