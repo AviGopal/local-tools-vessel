@@ -236,7 +236,8 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   // Ordinary commands (git, ls, cat, curl) skip this entirely — only the expensive
   // class waits for a slot, and even that wait is bounded and fails open.
   const testClass = isTestClassCommand(cmd);
-  // OBSERVE-ONLY: one `[sh-instrument]` line per call, on return or throw (sh-instrument.ts).
+  // OBSERVE-ONLY: a `[sh-instrument]` start line at spawn and an end line on return or throw,
+  // paired by call_id (sh-instrument.ts), so a hung call shows as a start with no end.
   // A 720 s verify came back empty at ~300 s while a bare 320 s call did not, so this records
   // the bound actually applied, the slot wait, bash exit vs pipe EOF, the end kind and what
   // the call left alive. The probe swallows its own errors; nothing below changes behaviour.

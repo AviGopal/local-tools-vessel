@@ -1,6 +1,6 @@
-// One [sh-instrument] line per sh() call (sh-instrument.ts). Real processes, real
-// /proc: the survivor and pipe-EOF measurements are OS-level properties a mock
-// cannot stand in for. The line is captured from console.log, the path the vessel
+// [sh-instrument] start + end lines per sh() call (sh-instrument.ts). Real processes,
+// real /proc: the survivor and pipe-EOF measurements are OS-level properties a mock
+// cannot stand in for. Lines are captured from console.log, the path the vessel
 // actually logs through, so a tree without the instrument fails on "no line".
 import { describe, expect, it } from "bun:test";
 
@@ -11,23 +11,41 @@ const { sh } = await import("./index");
 
 const PREFIX = "[sh-instrument] ";
 
-async function shWithLine(...args: Parameters<typeof sh>) {
+function capture() {
   const lines: string[] = [];
   const orig = console.log;
   console.log = (...a: unknown[]) => {
     const s = a.map(String).join(" ");
     if (s.startsWith(PREFIX)) lines.push(s); else orig(...a);
   };
+  return { lines, restore: () => { console.log = orig; } };
+}
+const parse = (l: string) => JSON.parse(l.slice(PREFIX.length));
+
+// One call yields exactly one end line, and (when bash was spawned) one start line
+// before it with the same call_id.
+async function shWithLine(...args: Parameters<typeof sh>) {
+  const c = capture();
   let r: Awaited<ReturnType<typeof sh>> | undefined;
   let thrown: unknown;
-  try { r = await sh(...args); } catch (e) { thrown = e; } finally { console.log = orig; }
-  expect(lines.length).toBe(1);
-  return { r, thrown, line: lines[0]!, j: JSON.parse(lines[0]!.slice(PREFIX.length)) };
+  try { r = await sh(...args); } catch (e) { thrown = e; } finally { c.restore(); }
+  const ends = c.lines.filter((l) => parse(l).phase === "end");
+  const starts = c.lines.filter((l) => parse(l).phase === "start");
+  expect(ends.length).toBe(1);
+  expect(starts.length).toBeLessThanOrEqual(1);
+  expect(c.lines.length).toBe(ends.length + starts.length);
+  const j = parse(ends[0]!);
+  const start = starts[0] !== undefined ? parse(starts[0]) : undefined;
+  if (start) {
+    expect(c.lines[0]).toBe(starts[0]!);
+    expect(start.call_id).toBe(j.call_id);
+  }
+  return { r, thrown, line: ends[0]!, startLine: starts[0], all: c.lines.join("\n"), j, start };
 }
 
-describe("sh() emits exactly one instrument line per call", () => {
+describe("sh() emits one start and one end instrument line per call", () => {
   it("a quick command: normal_exit, measured survivors 0, bound and sizes", async () => {
-    const { r, j, line } = await shWithLine("echo hi; sleep 0.3", "/tmp", 5);
+    const { r, j, line, start } = await shWithLine("echo hi; sleep 0.3", "/tmp", 5);
     expect(r!.stdout).toBe("hi\n");
     expect(j.end_kind).toBe("normal_exit");
     expect(j.exit_code).toBe(0);
@@ -45,6 +63,9 @@ describe("sh() emits exactly one instrument line per call", () => {
     expect(j.survivors_tracked).toBe(true);
     expect(j.survivors).toBe(0);
     expect(typeof j.watchdog_left).toBe("number");
+    expect(j.call_id).toMatch(/^[0-9a-f]{12}$/);
+    expect(Object.keys(start).sort()).toEqual(["argv0_base", "call_id", "caller_tag", "cmd_sha12", "effective_timeout_sec", "execution_id", "phase", "requested_timeout_sec", "slot_wait_ms", "test_class"]);
+    expect(start).toMatchObject({ phase: "start", effective_timeout_sec: 5, cmd_sha12: j.cmd_sha12, argv0_base: "echo" });
     console.error(`sample: ${line}`);
   });
 
@@ -54,8 +75,9 @@ describe("sh() emits exactly one instrument line per call", () => {
   });
 
   it("a command that outlives timeout_sec=2: group_kill (exit 137 at the bound), line still emitted", async () => {
-    const { r, j, line } = await shWithLine("sleep 30", "/tmp", 2);
+    const { r, j, line, start } = await shWithLine("sleep 30", "/tmp", 2);
     expect(r!.exit_code).toBe(137);
+    expect(start?.phase).toBe("start");
     expect(j.end_kind).toBe("group_kill");
     expect(j.exit_code).toBe(137);
     expect(j.spawn_to_exit_ms).toBeGreaterThanOrEqual(1750);
@@ -81,32 +103,51 @@ describe("sh() emits exactly one instrument line per call", () => {
     expect(j.spawn_to_eof_ms - j.spawn_to_exit_ms).toBeGreaterThanOrEqual(1500);
   }, 10_000);
 
+  it("a call still running (hung, as far as a reader knows) already has its start line and no end", async () => {
+    const c = capture();
+    let pending: Promise<unknown> | undefined;
+    let mid: string[] = [];
+    try {
+      pending = sh("sleep 1.5", "/tmp", 10);
+      await new Promise((r) => setTimeout(r, 400));
+      mid = [...c.lines];
+      await pending;
+    } finally { c.restore(); }
+    expect(mid.length).toBe(1);
+    expect(parse(mid[0]!).phase).toBe("start");
+    expect(c.lines.length).toBe(2);
+    expect(parse(c.lines[1]!)).toMatchObject({ phase: "end", call_id: parse(mid[0]!).call_id });
+  }, 10_000);
+
   it("a spawn that throws: end_kind error, line emitted, the error still reaches the caller", async () => {
-    const { thrown, j } = await shWithLine("true", "/nonexistent-sh-instrument-dir", 5);
+    const { thrown, j, start } = await shWithLine("true", "/nonexistent-sh-instrument-dir", 5);
     expect(thrown).toBeDefined();
     expect(j.end_kind).toBe("error");
     expect(j.exit_code).toBe(null);
+    expect(start).toBeUndefined();
   });
 });
 
 describe("the line carries no command text, output or secrets", () => {
   it("a command with a fake token in an env assignment and an Authorization header", async () => {
     const cmd = `T=FAKE_TOKEN_abc123 echo OUT_MARKER_q9; echo ERR_MARKER_q9 >&2; curl -sS -m 2 -H "Authorization: ApiKey FAKE_TOKEN_abc123" http://127.0.0.1:9/ >/dev/null 2>&1 || true`;
-    const { r, line, j } = await shWithLine(cmd, "/tmp", 5, { SUBSTRATE_EXECUTION_ID: "exec-test-1" }, "sh-instrument.test");
+    const { r, all, startLine, j, start } = await shWithLine(cmd, "/tmp", 5, { SUBSTRATE_EXECUTION_ID: "exec-test-1" }, "sh-instrument.test");
     expect(r!.stdout).toContain("OUT_MARKER_q9");
+    expect(startLine).toBeDefined();
     for (const banned of ["FAKE_TOKEN_abc123", "Authorization", "ApiKey", "OUT_MARKER_q9", "ERR_MARKER_q9", "curl -", "127.0.0.1"]) {
-      expect(line).not.toContain(banned);
+      expect(all).not.toContain(banned); // start AND end line
     }
+    expect(start).toMatchObject({ argv0_base: "echo", execution_id: "exec-test-1", caller_tag: "sh-instrument.test" });
     expect(j.argv0_base).toBe("echo");
     expect(j.execution_id).toBe("exec-test-1");
     expect(j.caller_tag).toBe("sh-instrument.test");
   });
 
   it("a caller_tag or execution_id that is not a plain identifier is dropped, not logged", async () => {
-    const { line, j } = await shWithLine("true", "/tmp", 5, { SUBSTRATE_EXECUTION_ID: "x y FAKE_TOKEN_abc123" }, "tag with spaces FAKE_TOKEN_abc123");
+    const { all, j } = await shWithLine("true", "/tmp", 5, { SUBSTRATE_EXECUTION_ID: "x y FAKE_TOKEN_abc123" }, "tag with spaces FAKE_TOKEN_abc123");
     expect(j.execution_id).toBe(null);
     expect(j.caller_tag).toBe(null);
-    expect(line).not.toContain("FAKE_TOKEN_abc123");
+    expect(all).not.toContain("FAKE_TOKEN_abc123");
   });
 
   it("argv0_base skips assignments and never returns more than one charset-limited word", async () => {

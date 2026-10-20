@@ -1,5 +1,6 @@
 /**
- * ONE OBSERVE-ONLY LINE PER sh() CALL: `[sh-instrument] {json}`.
+ * OBSERVE-ONLY LINES PER sh() CALL: `[sh-instrument] {"phase":"start",...}` at spawn and
+ * `[sh-instrument] {"phase":"end",...}` on return or throw, paired by `call_id`.
  *
  * Why it exists (2026-10-20): feature_compose's main verify asks sh() for a 720 s
  * bound, yet every single-verify compose measured got EMPTY stdout back 300-359 s
@@ -16,7 +17,7 @@
  * command, the basename of its first non-assignment word, byte counts, and for
  * survivors pid/comm/pgid/age read from /proc/<pid>/stat and /proc/<pid>/comm.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 
 export type EndKind = "normal_exit" | "group_kill" | "signal_abort" | "killed_unknown" | "error";
@@ -202,9 +203,32 @@ function openProbe(input: ShProbeInput): ShProbe {
   let tExit: number | null = null;
   let tEof: number | null = null;
   const tracker = new Tracker();
+  // Fields both lines carry. call_id pairs a start with its end, so a hung call reads
+  // as a start with no end rather than as nothing at all.
+  const ident = () => ({
+    call_id: randomBytes(6).toString("hex"),
+    cmd_sha12: createHash("sha256").update(input.cmd).digest("hex").slice(0, 12),
+    argv0_base: argv0Base(input.cmd),
+    caller_tag: safeId(input.callerTag),
+    execution_id: safeId(input.executionId),
+  });
+  let id: ReturnType<typeof ident> | null = null;
+  const bounds = () => ({
+    effective_timeout_sec: input.effectiveTimeoutSec,
+    requested_timeout_sec: typeof input.requestedTimeoutSec === "number" && Number.isFinite(input.requestedTimeoutSec) ? input.requestedTimeoutSec : null,
+    test_class: input.testClass,
+    slot_wait_ms: input.testClass && tSlot !== null ? tSlot - t0 : 0,
+  });
   return {
     slotAcquired() { tSlot = Date.now(); },
-    spawned(pid) { try { tSpawn = Date.now(); tracker.start(pid); } catch { /* observe-only */ } },
+    spawned(pid) {
+      tSpawn = Date.now();
+      try { tracker.start(pid); } catch { /* observe-only */ }
+      try {
+        id = ident();
+        shInstrument.emit(`[sh-instrument] ${JSON.stringify({ phase: "start", call_id: id.call_id, ...bounds(), cmd_sha12: id.cmd_sha12, argv0_base: id.argv0_base, caller_tag: id.caller_tag, execution_id: id.execution_id })}`);
+      } catch { /* observe-only */ }
+    },
     exited() { tExit = Date.now(); },
     eof() { tEof = Date.now(); },
     done(o) {
@@ -213,11 +237,11 @@ function openProbe(input: ShProbeInput): ShProbe {
         const spawnToExit = tSpawn !== null && tExit !== null ? tExit - tSpawn : null;
         const exitCode = o.result ? o.result.exit_code : null;
         const s = tracker.survivors();
+        const i = id ?? ident(); // no start line when spawn itself threw
         const line = {
-          effective_timeout_sec: input.effectiveTimeoutSec,
-          requested_timeout_sec: typeof input.requestedTimeoutSec === "number" && Number.isFinite(input.requestedTimeoutSec) ? input.requestedTimeoutSec : null,
-          test_class: input.testClass,
-          slot_wait_ms: input.testClass && tSlot !== null ? tSlot - t0 : 0,
+          phase: "end",
+          call_id: i.call_id,
+          ...bounds(),
           spawn_to_exit_ms: spawnToExit,
           spawn_to_eof_ms: tSpawn !== null && tEof !== null ? tEof - tSpawn : null,
           end_kind: inferEndKind({ aborted: o.aborted, threw: o.threw, signal: o.signal, exitCode, spawnToExitMs: spawnToExit, effectiveTimeoutSec: input.effectiveTimeoutSec }),
@@ -225,10 +249,10 @@ function openProbe(input: ShProbeInput): ShProbe {
           exit_code: exitCode,
           stdout_bytes: o.result ? Buffer.byteLength(o.result.stdout) : null,
           stderr_bytes: o.result ? Buffer.byteLength(o.result.stderr) : null,
-          cmd_sha12: createHash("sha256").update(input.cmd).digest("hex").slice(0, 12),
-          argv0_base: argv0Base(input.cmd),
-          caller_tag: safeId(input.callerTag),
-          execution_id: safeId(input.executionId),
+          cmd_sha12: i.cmd_sha12,
+          argv0_base: i.argv0_base,
+          caller_tag: i.caller_tag,
+          execution_id: i.execution_id,
           survivors_tracked: s.tracked,
           survivors: s.count,
           survivor_procs: s.procs,
