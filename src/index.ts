@@ -187,6 +187,14 @@ export function groupBounded(command: string, timeoutSec: number): string {
   // parsed before its redirections apply, so a syntax error in the command still reaches the
   // caller. Process groups are set at fork by `set -m`, untouched here, so the kill below is
   // unchanged. Redirecting after the spawn instead raced: a fast job's notice could print first.
+  //
+  // NO ORPHANED SLEEP. The watchdog is a job of its own, so it is its own process group, and
+  // its `sleep` shares that group. Signalling only the subshell's pid on a normal exit left
+  // the sleep reparented and alive for the full bound, one per call (up to 720 s per verify).
+  // A normal exit now signals the watchdog's whole GROUP. Once its sleep has run out the
+  // watchdog ignores TERM, so a job that dies at the bound cannot cut the kill short before
+  // the group backstop below lands: bash's wait returns as soon as the job leader is killed,
+  // which is before that backstop.
   return [
     "set -m",
     "{",
@@ -203,10 +211,10 @@ export function groupBounded(command: string, timeoutSec: number): string {
     "  done",
     "  kill -9 \"$__t\" 2>/dev/null",
     "}",
-    `( sleep ${timeoutSec}; kill -0 $__cpid && __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 3>&- &`,
+    `( sleep ${timeoutSec}; trap '' TERM; kill -0 $__cpid && __killtree $__cpid; kill -9 -$__cpid 2>/dev/null ) >/dev/null 2>&1 3>&- &`,
     "__wpid=$!",
     "wait $__cpid; __rc=$?",
-    "kill $__wpid 2>/dev/null",
+    "kill -TERM -$__wpid 2>/dev/null",
     "exit $__rc",
     "} 3>&2 2>/dev/null",
   ].join("\n");

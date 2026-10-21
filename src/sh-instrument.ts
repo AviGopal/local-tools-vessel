@@ -105,9 +105,9 @@ function uptimeSec(): number {
  * `( cmd ) &` job, a process-group leader (pgid = its pid), and its SECOND is the
  * watchdog subshell, also its own group. /proc/<pid>/task/<pid>/children lists
  * children in creation order; the job/watchdog split rests on that order. The
- * watchdog group is reported apart (`watchdog_left`): on a normal exit bash kills
- * the watchdog subshell, but its `sleep <timeout>` child is orphaned and lives out
- * the full bound. Counting it as a survivor would put one on every call.
+ * watchdog group is reported apart (`watchdog_left`): on a normal exit bash signals
+ * the watchdog's whole group, its `sleep <timeout>` included, so this should read 0;
+ * a nonzero count is a watchdog that outlived its call, not a job survivor.
  *
  * Sampling at 10 ms, 100 ms, 1 s, then every 30 s also records the job's
  * descendants (pid + starttime) while their parents still link them, which
