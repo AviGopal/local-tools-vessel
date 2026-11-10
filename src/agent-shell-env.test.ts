@@ -2,7 +2,8 @@
 // is an explicit allowlist, and both Bun.spawn sites in index.ts build it through
 // agentShellEnv rather than spreading the vessel's own env.
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -84,10 +85,16 @@ describe("agentShellEnv", () => {
   });
 
   it("(ii) PATH carries the bun dir ahead of the inherited PATH", () => {
-    const env = agentShellEnv(VESSEL_ENV);
-    expect(env.PATH).toBe("/root/.bun/bin:/usr/local/bin:/usr/bin:/bin");
-    expect(agentShellEnv({ PATH: "/bin", HOME: "/home/x" }).PATH).toBe("/home/x/.bun/bin:/bin");
-    expect(agentShellEnv({ PATH: "/bin" }).PATH).toBe("/root/.bun/bin:/bin");
+    expect(agentShellEnv({ PATH: "/bin", HOME: "/nonexistent-home" }).PATH).toBe("/nonexistent-home/.bun/bin:/bin");
+    expect(agentShellEnv({ PATH: "/usr/bin:/bin", HOME: "/nonexistent-home" }).PATH).toBe("/nonexistent-home/.bun/bin:/usr/bin:/bin");
+  });
+
+  it("(ii) the bun dir is resolved, so a shell that cannot traverse $HOME still finds bun", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-shell-env-"));
+    const install = mkdtempSync(join(tmpdir(), "agent-shell-env-bun-"));
+    mkdirSync(join(install, "bin"));
+    symlinkSync(install, join(home, ".bun"));
+    expect(agentShellEnv({ PATH: "/bin", HOME: home }).PATH).toBe(`${realpathSync(join(install, "bin"))}:/bin`);
   });
 
   it("(iii) SUBSTRATE_EXECUTION_ID passes through from extra", () => {
@@ -103,9 +110,10 @@ describe("(iv) both shell spawn sites use agentShellEnv", () => {
     expect(src.includes("...process.env")).toBe(false);
   });
 
-  it("each Bun.spawn of bash passes an env built by agentShellEnv", () => {
-    const spawns = src.split("\n").filter((l) => /Bun\.spawn\(\s*\[\s*"bash"/.test(l));
+  it("each bash spawn passes an env built by agentShellEnv (through agentShellSpawn)", () => {
+    const spawns = src.split("\n").filter((l) => /agentShellSpawn\(\s*\[\s*"bash"/.test(l));
     expect(spawns.length).toBe(2);
-    for (const l of spawns) expect(l).toMatch(/env:\s*agentShellEnv\(process\.env/);
+    for (const l of spawns) expect(l).toMatch(/agentShellEnv\(process\.env/);
+    expect(src.split("\n").filter((l) => /Bun\.spawn\(run\.argv, \{ cwd, env: run\.env/.test(l)).length).toBe(2);
   });
 });

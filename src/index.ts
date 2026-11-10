@@ -16,6 +16,7 @@ import { ActivityExecutor, ExecutionRuntime, VesselDaemon } from "@avigopal/ias-
 import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
+import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
@@ -269,7 +270,9 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
     const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
     probe.slotAcquired();
     try {
-      const p = Bun.spawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], { cwd, env: agentShellEnv(process.env, extraEnv), stdout: "pipe", stderr: "pipe", signal: (abort = AbortSignal.timeout((requestTimeoutSec + 5) * 1000)) });
+      // Unprivileged when this vessel runs as root (shell-privilege.ts).
+      const run = agentShellSpawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], agentShellEnv(process.env, extraEnv), tmpdir());
+      const p = Bun.spawn(run.argv, { cwd, env: run.env, stdout: "pipe", stderr: "pipe", signal: (abort = AbortSignal.timeout((requestTimeoutSec + 5) * 1000)) });
       proc = p;
       probe.spawned(p.pid);
       p.exited.then(probe.exited, () => {});
@@ -469,7 +472,8 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   if (!command) return { error: "command is required" };
   const timeoutSec = Number((ctx.body as Record<string, unknown>)?.timeout ?? 10);
   if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) return { error: "timeout must be a positive number" };
-  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? ((): string => { const d = "/workspace/tmp/bounded-shell"; try { require("node:fs").mkdirSync(d, { recursive: true }); } catch { /* spawn will report it */ } return d; })();
+  // The default cwd is owned by the shell's user, so the unprivileged child can write it.
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? ((): string => { const d = "/workspace/tmp/bounded-shell"; try { agentWritableDir(d); } catch { /* spawn will report it */ } return d; })();
   // Same allowlisted env as sh() (agent-shell-env.ts): no inherited credentials.
   // Same reasoning as sh(): the in-shell watchdog kills the process GROUP at
   // timeoutSec, and Bun's own timeout trails it as a backstop.
@@ -489,7 +493,8 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
   try {
     if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} ${cmdRef(command)}`);
-    const p = Bun.spawn(["bash", "-c", groupBounded(command, timeoutSec)], { cwd, env: agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
+    const run = agentShellSpawn(["bash", "-c", groupBounded(command, timeoutSec)], agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), tmpdir());
+    const p = Bun.spawn(run.argv, { cwd, env: run.env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
     ]);

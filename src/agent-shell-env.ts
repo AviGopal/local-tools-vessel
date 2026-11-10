@@ -16,6 +16,10 @@
 // from the inherited env. Endpoints are not passed either — a command that needs a
 // shaped read should go through a resolver, which holds its own credential.
 
+import { realpathSync } from "node:fs";
+
+const realOr = (p: string): string => { try { return realpathSync(p); } catch { return p; } };
+
 /** Exact names passed through from the vessel env when present. */
 export const AGENT_SHELL_ENV_ALLOWLIST: readonly string[] = [
   "PATH",
@@ -52,7 +56,9 @@ export function agentShellEnv(
   for (const [k, v] of Object.entries(merged)) {
     if (typeof v === "string" && allowed(k)) out[k] = v;
   }
-  const bunDir = `${base.HOME ?? "/root"}/.bun/bin`;
+  // Resolved, because the shell may run as an unprivileged user (shell-privilege.ts) that
+  // cannot traverse /root; the image links $HOME/.bun to a world-readable install.
+  const bunDir = realOr(`${base.HOME ?? "/root"}/.bun/bin`);
   out.PATH = `${bunDir}:${base.PATH ?? ""}`;
   return out;
 }
