@@ -111,7 +111,11 @@ export function agentShellSpawn(argv: string[], env: Record<string, string>, tmp
     // Emptied as the shell user, so root never walks a tree the child shaped; the entry itself
     // sits in a root-only parent, so only root can remove it, and only once it is empty. Callers
     // do not await it (see above); the promise is there for tests.
-    done: () => Bun.spawn(["setpriv", ...SETPRIV_ARGS, "--", "find", home, "-mindepth", "1", "-delete"], { stdout: "ignore", stderr: "ignore" }).exited
-      .then(() => { try { rmdirSync(home); } catch { /* something still in it (a process the command left): leave it */ } }, () => {}),
+    done: () => {
+      const rmdir = () => { try { rmdirSync(home); } catch { /* something still in it (a process the command left): leave it */ } };
+      try {
+        return Bun.spawn(["setpriv", ...SETPRIV_ARGS, "--", "find", home, "-mindepth", "1", "-delete"], { stdout: "ignore", stderr: "ignore" }).exited.then(rmdir, () => {});
+      } catch { return Promise.resolve(); } // a spawn that throws leaves the HOME; it must not escape a caller's finally
+    },
   };
 }

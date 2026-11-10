@@ -67,7 +67,8 @@ describe("the shell handlers' journal lines carry no command text", () => {
     probe.stop(true);
     child = Bun.spawn(["bun", join(import.meta.dir, "index.ts")], {
       env: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: base, PORT: String(port),
+        // TMPDIR inside base, so what the server makes in tmp (shell-privilege's homes) goes with base.
+        PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: base, TMPDIR: base, PORT: String(port),
         WORKSPACE_ROOT: base, SUPER_REPO_DIR: superRepo, MITOSIS_RUNTIME_DIR: join(base, "vessels"),
         DISCOVERY_ENDPOINT: "http://127.0.0.1:9", LOCAL_TOOLS_GC_INTERVAL_MS: "600000",
       },

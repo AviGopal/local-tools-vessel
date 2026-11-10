@@ -4,7 +4,7 @@
 // how the vessel runs; as a user they are reported as not judged, and the unchanged-argv leg
 // runs instead.
 import { afterAll, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync as mkdtempRaw, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,13 +13,15 @@ import { AGENT_SHELL_UID, agentShellSpawn, agentWritableDir, runningAsRoot, SETP
 
 const root = runningAsRoot();
 
-// Every directory a leg makes is removed afterwards (rmSync unlinks a symlink, never follows it).
-const made: string[] = [];
-const mkdtempSync = (prefix: string): string => { const d = mkdtempRaw(prefix); made.push(d); return d; };
-afterAll(() => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
+// Everything the legs make, the homes parent agentShellSpawn makes included, lives under one throwaway
+// root that is removed afterwards (rmSync unlinks a symlink, never follows it). 0755, so the shell user
+// can reach a HOME inside it, as it can under /tmp.
+const TMP = mkdtempSync(join(tmpdir(), "shell-privilege-"));
+chmodSync(TMP, 0o755);
+afterAll(() => rmSync(TMP, { recursive: true, force: true }));
 
 const run = async (cmd: string, cwd?: string) => {
-  const s = agentShellSpawn(["bash", "-c", cmd], agentShellEnv(process.env), tmpdir());
+  const s = agentShellSpawn(["bash", "-c", cmd], agentShellEnv(process.env), TMP);
   try {
     const p = Bun.spawn(s.argv, { cwd: cwd ?? "/", env: s.env, stdout: "pipe", stderr: "pipe" });
     const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
@@ -28,7 +30,7 @@ const run = async (cmd: string, cwd?: string) => {
 };
 
 /** A root-owned 0755 directory: the only kind of parent root hands entries out of. */
-const rootOnlyDir = () => { const d = mkdtempSync(join(tmpdir(), "shell-privilege-root-")); chmodSync(d, 0o755); return d; };
+const rootOnlyDir = () => { const d = mkdtempSync(join(TMP, "shell-privilege-root-")); chmodSync(d, 0o755); return d; };
 
 describe("agent shell privilege", () => {
   it("both spawn sites in index.ts go through agentShellSpawn", () => {
@@ -39,13 +41,13 @@ describe("agent shell privilege", () => {
 
   it("as a user, argv and env are unchanged (the child has no more privilege than its parent)", () => {
     const env = { PATH: "/bin" };
-    const s = agentShellSpawn(["bash", "-c", "true"], env, tmpdir(), false);
+    const s = agentShellSpawn(["bash", "-c", "true"], env, TMP, false);
     expect(s.argv).toEqual(["bash", "-c", "true"]);
     expect(s.env).toBe(env);
   });
 
   it.if(root)("as root, the command runs under setpriv as the shell user", async () => {
-    const s = agentShellSpawn(["bash", "-c", "true"], { PATH: "/bin" }, tmpdir(), true);
+    const s = agentShellSpawn(["bash", "-c", "true"], { PATH: "/bin" }, TMP, true);
     expect(s.argv).toEqual(["setpriv", ...SETPRIV_ARGS, "--", "bash", "-c", "true"]);
     expect(s.env.HOME).not.toBe("/root");
     expect(statSync(s.env.HOME).uid).toBe(AGENT_SHELL_UID);
@@ -72,7 +74,7 @@ describe("agent shell privilege", () => {
   });
 
   it.if(root)("as root, the child can still read and run git in a repo root owns", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "shell-privilege-repo-"));
+    const repo = mkdtempSync(join(TMP, "shell-privilege-repo-"));
     Bun.spawnSync(["chmod", "755", repo]);
     Bun.spawnSync(["git", "init", "-q", repo]);
     const r = await run("git rev-parse --is-inside-work-tree", repo);
@@ -91,7 +93,7 @@ describe("agent shell privilege", () => {
   });
 
   it.if(root)("as root, cleanup does not hold the caller: done() returns before the HOME is emptied", async () => {
-    const s = agentShellSpawn(["bash", "-c", "true"], { PATH: "/usr/bin:/bin" }, tmpdir(), true);
+    const s = agentShellSpawn(["bash", "-c", "true"], { PATH: "/usr/bin:/bin" }, TMP, true);
     const p = s.done();
     expect(existsSync(s.env.HOME)).toBe(true);
     await p;
@@ -99,8 +101,8 @@ describe("agent shell privilege", () => {
   });
 
   it.if(root)("as root, bun's install cache is one shared directory, the same for every command", async () => {
-    const a = agentShellSpawn(["true"], { PATH: "/bin" }, tmpdir(), true);
-    const b = agentShellSpawn(["true"], { PATH: "/bin" }, tmpdir(), true);
+    const a = agentShellSpawn(["true"], { PATH: "/bin" }, TMP, true);
+    const b = agentShellSpawn(["true"], { PATH: "/bin" }, TMP, true);
     expect(a.env.BUN_INSTALL_CACHE_DIR).toBe(b.env.BUN_INSTALL_CACHE_DIR);
     expect(a.env.BUN_INSTALL_CACHE_DIR.startsWith(a.env.HOME)).toBe(false);
     await Promise.all([a.done(), b.done()]);
@@ -117,8 +119,8 @@ describe("agent shell privilege", () => {
   });
 
   it.if(root)("as root, a directory is handed to the shell user only out of a root-only parent, never through a symlink", () => {
-    expect(() => agentWritableDir(join(mkdtempSync(join(tmpdir(), "shell-privilege-open-")), "x"), true)).not.toThrow(); // mkdtemp: 0700 root
-    const open = mkdtempSync(join(tmpdir(), "shell-privilege-open-"));
+    expect(() => agentWritableDir(join(mkdtempSync(join(TMP, "shell-privilege-open-")), "x"), true)).not.toThrow(); // mkdtemp: 0700 root
+    const open = mkdtempSync(join(TMP, "shell-privilege-open-"));
     chmodSync(open, 0o1777);
     expect(() => agentWritableDir(join(open, "x"), true)).toThrow(/root-only/);
     const parent = rootOnlyDir();

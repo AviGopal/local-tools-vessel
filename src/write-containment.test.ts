@@ -54,7 +54,8 @@ beforeAll(async () => {
   const port = probe.port;
   probe.stop(true);
   env = {
-    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? base, PORT: String(port),
+    // TMPDIR inside base, so what the server makes in tmp (shell-privilege's homes) goes with base.
+    PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? base, TMPDIR: base, PORT: String(port),
     WORKSPACE_ROOT: superRepo, MITOSIS_RUNTIME_DIR: vessels, MITOSIS_PUSH_CLONE_DIR: clones, COMPOSE_WS_DIR: compose,
     METABOB_API_KEY: KEY, DISCOVERY_ENDPOINT: "http://127.0.0.1:9", LOCAL_TOOLS_GC_INTERVAL_MS: "600000",
   };

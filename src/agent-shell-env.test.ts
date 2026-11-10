@@ -2,7 +2,7 @@
 // is an explicit allowlist, and both Bun.spawn sites in index.ts build it through
 // agentShellEnv rather than spreading the vessel's own env.
 import { describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -90,11 +90,16 @@ describe("agentShellEnv", () => {
   });
 
   it("(ii) the bun dir is resolved, so a shell that cannot traverse $HOME still finds bun", () => {
-    const home = mkdtempSync(join(tmpdir(), "agent-shell-env-"));
-    const install = mkdtempSync(join(tmpdir(), "agent-shell-env-bun-"));
+    const tmp = mkdtempSync(join(tmpdir(), "agent-shell-env-"));
+    const home = join(tmp, "home");
+    const install = join(tmp, "bun");
+    mkdirSync(home);
+    mkdirSync(install);
     mkdirSync(join(install, "bin"));
     symlinkSync(install, join(home, ".bun"));
-    expect(agentShellEnv({ PATH: "/bin", HOME: home }).PATH).toBe(`${realpathSync(join(install, "bin"))}:/bin`);
+    try {
+      expect(agentShellEnv({ PATH: "/bin", HOME: home }).PATH).toBe(`${realpathSync(join(install, "bin"))}:/bin`);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 
   it("(iii) SUBSTRATE_EXECUTION_ID passes through from extra", () => {
