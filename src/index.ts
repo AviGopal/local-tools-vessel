@@ -269,7 +269,7 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   try {
     const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
     probe.slotAcquired();
-    let done = (): void => {};
+    let done = (): Promise<void> => Promise.resolve();
     try {
       // Unprivileged when this vessel runs as root (shell-privilege.ts).
       const run = agentShellSpawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], agentShellEnv(process.env, extraEnv), tmpdir());
@@ -284,7 +284,7 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
       result = { stdout, stderr, exit_code };
       return result;
     } finally {
-      done();
+      void done(); // cleanup trails the answer (shell-privilege.ts)
       if (slot) await slot.release();
     }
   } catch (e) {
@@ -494,7 +494,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   }
   const testClass = isTestClassCommand(command);
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
-  let done = (): void => {};
+  let done = (): Promise<void> => Promise.resolve();
   try {
     if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} ${cmdRef(command)}`);
     const run = agentShellSpawn(["bash", "-c", groupBounded(command, timeoutSec)], agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), tmpdir());
@@ -505,7 +505,7 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
     ]);
     return { shape: "boundedShellResult", stdout, stderr, exit_code };
   } finally {
-    done();
+    void done(); // cleanup trails the answer (shell-privilege.ts)
     if (slot) await slot.release();
   }
 };

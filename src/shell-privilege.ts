@@ -22,7 +22,12 @@
 // child cannot rename, remove or replace an entry there), and only with lchown on what lstat
 // shows is a real directory. Each command gets a fresh HOME made by mkdtemp inside such a
 // parent, so nothing a command leaves in its HOME (a .gitconfig, a hook path) reaches the
-// next; the HOME is emptied by the shell user, never by root walking it, then removed.
+// next; the HOME is emptied by the shell user, never by root walking it, then removed. That
+// cleanup runs after the command has answered and is never awaited by it: the vessel's event
+// loop serves every resolver. bun's install cache is the one thing shared between commands
+// (BUN_INSTALL_CACHE_DIR, a directory beside the HOMEs), so a test or install run does not
+// re-fetch and re-delete thousands of files each time; it holds packages, never config, and
+// is written only by the shell user, so what it can affect is what that user already could.
 //
 // WHAT THE CHILD STILL NEEDS:
 //   - a HOME it can write (bun's cache, git's config lookups): the per-command one above;
@@ -90,23 +95,23 @@ function homes(tmp: string): string {
  * The argv and env an agent shell command is spawned with, and what to do once it has exited.
  * `env` is the allowlisted env from agentShellEnv; nothing changes unless this vessel runs as root.
  */
-export function agentShellSpawn(argv: string[], env: Record<string, string>, tmp: string, root = runningAsRoot()): { argv: string[]; env: Record<string, string>; done: () => void } {
-  if (!root) return { argv, env, done: () => {} };
+export function agentShellSpawn(argv: string[], env: Record<string, string>, tmp: string, root = runningAsRoot()): { argv: string[]; env: Record<string, string>; done: () => Promise<void> } {
+  if (!root) return { argv, env, done: async () => {} };
   const home = handOver(mkdtempSync(join(homes(tmp), "home-")));
   return {
     argv: ["setpriv", ...SETPRIV_ARGS, "--", ...argv],
     env: {
       ...env,
       HOME: home,
+      BUN_INSTALL_CACHE_DIR: agentWritableDir(join(homes(tmp), "bun-cache"), root),
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "safe.directory",
       GIT_CONFIG_VALUE_0: "*",
     },
-    done: () => {
-      // Emptied as the shell user, so root never walks a tree the child shaped; the entry itself
-      // sits in a root-only parent, so only root can remove it, and only once it is empty.
-      Bun.spawnSync(["setpriv", ...SETPRIV_ARGS, "--", "find", home, "-mindepth", "1", "-delete"], { stdout: "ignore", stderr: "ignore" });
-      try { rmdirSync(home); } catch { /* something still in it (a process the command left): leave it */ }
-    },
+    // Emptied as the shell user, so root never walks a tree the child shaped; the entry itself
+    // sits in a root-only parent, so only root can remove it, and only once it is empty. Callers
+    // do not await it (see above); the promise is there for tests.
+    done: () => Bun.spawn(["setpriv", ...SETPRIV_ARGS, "--", "find", home, "-mindepth", "1", "-delete"], { stdout: "ignore", stderr: "ignore" }).exited
+      .then(() => { try { rmdirSync(home); } catch { /* something still in it (a process the command left): leave it */ } }, () => {}),
   };
 }
