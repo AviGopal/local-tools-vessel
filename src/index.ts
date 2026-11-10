@@ -269,9 +269,11 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   try {
     const slot = testClass ? await acquireTestSlotOrWait(cmd.slice(0, 80)) : null;
     probe.slotAcquired();
+    let done = (): void => {};
     try {
       // Unprivileged when this vessel runs as root (shell-privilege.ts).
       const run = agentShellSpawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], agentShellEnv(process.env, extraEnv), tmpdir());
+      done = run.done;
       const p = Bun.spawn(run.argv, { cwd, env: run.env, stdout: "pipe", stderr: "pipe", signal: (abort = AbortSignal.timeout((requestTimeoutSec + 5) * 1000)) });
       proc = p;
       probe.spawned(p.pid);
@@ -282,6 +284,7 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
       result = { stdout, stderr, exit_code };
       return result;
     } finally {
+      done();
       if (slot) await slot.release();
     }
   } catch (e) {
@@ -491,15 +494,18 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   }
   const testClass = isTestClassCommand(command);
   const slot = testClass ? await acquireTestSlotOrWait(command.slice(0, 80)) : null;
+  let done = (): void => {};
   try {
     if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} ${cmdRef(command)}`);
     const run = agentShellSpawn(["bash", "-c", groupBounded(command, timeoutSec)], agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), tmpdir());
+    done = run.done;
     const p = Bun.spawn(run.argv, { cwd, env: run.env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
     const [stdout, stderr, exit_code] = await Promise.all([
       new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
     ]);
     return { shape: "boundedShellResult", stdout, stderr, exit_code };
   } finally {
+    done();
     if (slot) await slot.release();
   }
 };
@@ -756,7 +762,7 @@ const codeAddImport: ResolverHandler = async (ctx) => {
 const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   const script = str(ctx.body, "impulse", "pointer", "script") ?? str(ctx.body, "script") ?? "typecheck";
-  const bunCmd = str(ctx.body, "impulse", "pointer", "bun_cmd") ?? str(ctx.body, "bun_cmd") ?? "/root/.bun/bin/bun";
+  const bunCmd = str(ctx.body, "impulse", "pointer", "bun_cmd") ?? str(ctx.body, "bun_cmd") ?? "bun"; // found on the shell's PATH, resolved (agent-shell-env.ts): the unprivileged shell cannot traverse root's home
   if (!cwd) return { error: "cwd is required" };
   try {
     const r = await sh(`${bunCmd} run ${script}`, cwd);
