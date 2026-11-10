@@ -17,6 +17,7 @@ import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
+import { SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
@@ -872,7 +873,7 @@ const webSearch: ResolverHandler = async (ctx) => {
   } catch (e) { return { error: (e as Error).message }; }
 };
 
-const resolvers = new Map<string, ResolverHandler>([
+export const resolvers = new Map<string, ResolverHandler>([
   ["dispatch_id", dispatch_id],
   ["shell", shell], ["bash", shell],
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
@@ -935,6 +936,9 @@ if (import.meta.main) {
   version: "0.1.0",
   enforceCompositionChain: false,
   systemVessel: true,
+  // What a caller can fill: each shape's description and the pointer fields its handler reads (shape-inputs.ts).
+  shapeDescriptions: SHAPE_DESCRIPTIONS,
+  shapeInputs: SHAPE_INPUTS,
   }).start();
 
   console.log(`[local-tools-vessel] listening on http://127.0.0.1:${PORT}`);
