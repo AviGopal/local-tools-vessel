@@ -18,7 +18,7 @@ const sample = (field: string): unknown => {
   writeFileSync(file, "line1\nline2\nline3\n")
   const values: Record<string, unknown> = {
     path: file, content: "x", old_string: "line1", new_string: "LINE1", start_line: 1, end_line: 2, text: "t",
-    after_line: 0, pattern: "line", cwd: dir, command: "true", script: "typecheck",
+    after_line: 0, pattern: "line", cwd: dir, command: "true",
   }
   if (!(field in values)) throw new Error(`no sample for required field ${field}: add one`)
   return values[field]
@@ -44,6 +44,12 @@ describe("declared shape inputs", () => {
       expect(String(out?.error ?? "")).not.toMatch(/required/i)
     }, 60_000)
   }
+
+  it("[MUST-FAIL] no declared field reaches a command line unchecked (agf_m40aao3ttwpx)", () => {
+    const typecheck = SHAPE_INPUTS.code_verify_typecheck as unknown as Schema
+    expect(Object.keys(typecheck.properties)).not.toContain("script")
+    expect(Object.keys(typecheck.properties)).not.toContain("bun_cmd")
+  })
 
   it("every described shape is declared, and the other way round", () => {
     expect(Object.keys(SHAPE_DESCRIPTIONS).sort()).toEqual(Object.keys(SHAPE_INPUTS).sort())

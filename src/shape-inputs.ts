@@ -8,7 +8,8 @@
 // Declared only for fields a handler reads from the POINTER. Some handlers also read the request body's top level
 // (bounded_shell's timeout, git_diff's staged, code_search's limit); a walk's call sends a pointer, so those are not
 // offered. Not declared at all: git_commit (its message reaches a shell command line), shell and bash (bounded_shell
-// covers them), code_verify_typecheck's bun_cmd (an executable path spliced into a command).
+// covers them), and code_verify_typecheck's bun_cmd and script: the handler splices both into `<bun_cmd> run <script>`
+// and runs it without the shell containment check, so either field would run any command (agf_m40aao3ttwpx).
 type Schema = Record<string, unknown>
 
 const PATH = { type: "string", minLength: 1, description: "A file: absolute, repos/<vessel>/…, or relative to the workspace." }
@@ -33,10 +34,7 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
   code_search: object(["path", "pattern"], {
     path: PATH, pattern: { type: "string", minLength: 1, description: "A regular expression." }, flags: { type: "string" },
   }),
-  code_verify_typecheck: object(["cwd"], {
-    cwd: { type: "string", minLength: 1, description: "The package directory." },
-    script: { type: "string", description: "The package script to run; default typecheck." },
-  }),
+  code_verify_typecheck: object(["cwd"], { cwd: { type: "string", minLength: 1, description: "The package directory." } }),
   bounded_shell: object(["command"], {
     command: { type: "string", minLength: 1 },
     cwd: { type: "string", description: "Default: a scratch directory the command may write." },
@@ -53,7 +51,7 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   code_replace_lines: "Replaces lines start_line..end_line of a file with text.",
   code_insert_after_line: "Inserts text after a line of a file.",
   code_search: "Finds the lines of a file that match a regular expression.",
-  code_verify_typecheck: "Runs a package's typecheck script and reports the exit code and the first type errors.",
+  code_verify_typecheck: "Runs the typecheck script of the package in cwd and reports the exit code and the first type errors.",
   bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code.",
   git_status: "Lists a repository's changed files (git status --porcelain).",
   git_diff: "Shows a repository's unstaged changes (git diff).",
