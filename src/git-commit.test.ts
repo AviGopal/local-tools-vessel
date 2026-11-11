@@ -67,6 +67,7 @@ describe("git_worktree", () => {
     expect(w.base).toBe(g(join(CLONES, "demo"), "rev-parse", "HEAD"));
     expect(w.super_base).toBe(g(SUPER, "rev-parse", "HEAD"));
     expect(w.origin_url).toBe("https://example.invalid/demo.git");
+    expect(w.branch).toBe("dev");
     expect(g(w.cwd, "config", "--get", "remote.origin.url")).toBe("https://example.invalid/demo.git");
     expect(readFileSync(join(w.cwd, "a.txt"), "utf8")).toBe("one\n");
   });
@@ -143,7 +144,7 @@ describe("git_commit", () => {
     answer({ git_worktree: [row("h1", "git_worktree", w)], git_land: [row("h3", "git_land", { cwd })] });
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("already landed");
     answer({ git_worktree: [row("h1", "git_worktree", w)] });
-    expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", base: w.base, super_base: w.super_base, origin_url: w.origin_url });
+    expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: w.super_base, origin_url: w.origin_url });
     globalThis.fetch = realFetch;
     expect(String((await commitInClone(join(T, "not-made"), "x", undefined, find) as { error: string }).error)).toContain("0 walk rows");
   });
@@ -160,6 +161,27 @@ describe("git_commit", () => {
     expect(ran).toEqual(["vessel-hook", "super-hook"]);
     expect("scan" in rv && rv.scan).toBe("skipped");
     expect("scan" in rs && rs.scan).toBe("ran");
+  });
+
+  it("[MUST-FAIL] keeps the node's record-only hooks, but never its pre-commit, which would chain to the clone's own", async () => {
+    const ledger = mkdtempSync(join(tmpdir(), "ledger-hooks-"));
+    writeFileSync(join(ledger, "post-commit"), `#!/bin/sh\necho recorded >> "${T}/ledger.txt"\n`, { mode: 0o755 });
+    writeFileSync(join(ledger, "pre-commit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const sys = join(T, "gitconfig-system");
+    writeFileSync(sys, `[core]\n\thooksPath = ${ledger}\n`);
+    const keep = process.env.GIT_CONFIG_SYSTEM;
+    process.env.GIT_CONFIG_SYSTEM = sys;
+    try {
+      const cwd = await clone("demo");
+      writeFileSync(join(cwd, "a.txt"), "eight\n");
+      expect("sha" in (await commitInClone(cwd, "recorded", undefined, find))).toBe(true);
+      expect(readFileSync(join(T, "ledger.txt"), "utf8")).toContain("recorded");
+      writeFileSync(join(cwd, "BLOCK"), "x\n"); // the ledger's permissive pre-commit must not replace the super-repo's
+      expect("error" in (await commitInClone(cwd, "blocked", undefined, find))).toBe(true);
+    } finally {
+      if (keep === undefined) delete process.env.GIT_CONFIG_SYSTEM; else process.env.GIT_CONFIG_SYSTEM = keep;
+      rmSync(ledger, { recursive: true, force: true });
+    }
   });
 
   it("leaves no pinned hook directory behind, and refuses a clone with nothing changed", async () => {

@@ -13,7 +13,7 @@
 // accepted fixtures, tests the pinned hook runs from the change's own tree, this vessel's containment and landing code,
 // the records writer code, the walk's owner seed) is committed but marked needs_person: a landing then takes only a
 // person's verdict for it. Whether the hook's secrets scan ran is reported as scan, for the landing to require.
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentShellEnv } from "./agent-shell-env.js";
@@ -80,9 +80,32 @@ async function pinnedHooks(superDir: string, made: Made): Promise<string | { err
   const hook = await git(["show", `${made.super_base}:${path}`], superDir);
   if (hook.exit_code !== 0) return { error: `the super base ${made.super_base.slice(0, 12)} has no ${path}: nothing trusted would check this commit` };
   const dir = mkdtempSync(join(tmpdir(), "pinned-hooks-"));
+  // The node's own record-only hooks (the attempt ledger, set as the system hooks path) are kept, so a commit made here is
+  // recorded like any other. Only from a directory no one but this vessel's owner can write, and never its pre-commit:
+  // that one chains to the clone's own hook, which the change may have written.
+  const ledger = systemHooksDir();
+  if (ledger) {
+    for (const name of readdirSync(ledger)) {
+      if (name === "pre-commit") continue;
+      const from = join(ledger, name);
+      if (statSync(from).isFile()) writeFileSync(join(dir, name), readFileSync(from), { mode: 0o555 });
+    }
+  }
   writeFileSync(join(dir, "pre-commit"), hook.stdout, { mode: 0o555 });
   chmodSync(dir, 0o555);
   return dir;
+}
+
+/** The system hooks directory, when this vessel's owner alone can write it; null otherwise. */
+function systemHooksDir(): string | null {
+  const r = Bun.spawnSync(["git", "config", "--system", "--get", "core.hooksPath"], { env: process.env as Record<string, string>, stdout: "pipe", stderr: "ignore" });
+  const dir = r.exitCode === 0 ? r.stdout.toString().trim() : "";
+  if (!dir) return null;
+  try {
+    const s = statSync(dir);
+    const uid = process.getuid?.() ?? -1;
+    return s.isDirectory() && s.uid === uid && (s.mode & 0o022) === 0 ? dir : null;
+  } catch { return null; }
 }
 
 export type CommitResult =

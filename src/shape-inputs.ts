@@ -65,5 +65,5 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
     "answers the sha, tree and changed paths, needs_person (changed paths that judge changes, which only a person may " +
     "approve) and scan (whether the secrets scan ran).",
   git_worktree: "Makes a fresh clone of a repository for one change, at this node's current copy of it; answers cwd (where " +
-    "to read, edit and commit), base, super_base and origin_url.",
+    "to read, edit and commit), branch (where a landing goes), base, super_base and origin_url.",
 }

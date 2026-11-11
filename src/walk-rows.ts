@@ -4,7 +4,7 @@
 
 const DISCOVERY = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
 
-export type Made = { cwd: string; repo: string; base: string; super_base: string; origin_url: string };
+export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string };
 type Row = { id: string; role?: string; pointer_type?: string; phase?: string; output?: Record<string, unknown> };
 
 const readHops = async (pointerType: string): Promise<Row[] | { error: string }> => {
@@ -43,6 +43,8 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   if (landed.some((r) => r.role === "walk" && r.output?.cwd === cwd)) return { error: `the clone at ${cwd} has already landed` };
   const o = mine[0].output ?? {};
   const s = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : "");
-  if (!s("base") || !s("super_base") || !s("repo") || !s("origin_url")) return { error: `the row for ${cwd} lacks its base, repo or origin` };
-  return { cwd, repo: s("repo"), base: s("base"), super_base: s("super_base"), origin_url: s("origin_url") };
+  if (!s("base") || !s("super_base") || !s("repo") || !s("branch") || !s("origin_url")) {
+    return { error: `the row for ${cwd} lacks its base, repo, branch or origin` };
+  }
+  return { cwd, repo: s("repo"), branch: s("branch"), base: s("base"), super_base: s("super_base"), origin_url: s("origin_url") };
 }

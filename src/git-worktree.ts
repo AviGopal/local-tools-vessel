@@ -18,7 +18,7 @@ export const walkTreesDir = (env: Env): string => env.WALK_TREES_DIR?.trim() || 
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export type Worktree =
-  | { shape: "gitWorktree"; cwd: string; repo: string; base: string; super_base: string; origin_url: string }
+  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string }
   | { error: string };
 
 const isRepo = (p: string): boolean => { try { return statSync(join(p, ".git")).isDirectory(); } catch { return false; } };
@@ -34,7 +34,9 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
   const base = await read(["rev-parse", "HEAD"], source);
   const superBase = await read(["rev-parse", "HEAD"], superDir);
   const origin = await read(["config", "--get", "remote.origin.url"], source);
-  if (!base || !superBase || !origin) return { error: `the copy of ${repo} has no HEAD or origin to clone from` };
+  // The branch the copy follows is where a landing goes.
+  const branch = await read(["rev-parse", "--abbrev-ref", "HEAD"], source);
+  if (!base || !superBase || !origin || !branch || branch === "HEAD") return { error: `the copy of ${repo} has no branch, HEAD or origin to clone from` };
 
   const trees = walkTreesDir(env);
   mkdirSync(trees, { recursive: true, mode: 0o755 });
@@ -49,5 +51,5 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
     const r = await git(args, tmpdir(), { timeoutMs: 300_000 });
     if (r.exit_code !== 0) return { error: `git ${args.find((a) => !a.startsWith("-") && a !== cwd)} failed: ${r.stderr.slice(-500)}` };
   }
-  return { shape: "gitWorktree", cwd, repo, base, super_base: superBase, origin_url: origin };
+  return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin };
 }
