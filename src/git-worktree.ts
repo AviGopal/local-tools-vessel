@@ -12,6 +12,7 @@ import { git, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
 import { withClones } from "./clones-lock.js";
 import { walkTreesDir } from "./tool-roots.js";
+import { openRoots, readRows, type Row } from "./walk-rows.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
 // Where change clones are made: also a tool root (tool-roots.ts), so the file tools work in a clone's cwd.
@@ -25,7 +26,7 @@ export type Worktree =
 
 const isRepo = (p: string): boolean => { try { return statSync(join(p, ".git")).isDirectory(); } catch { return false; } };
 
-export async function makeWorktree(repo: string, env: Env = process.env): Promise<Worktree> {
+export async function makeWorktree(repo: string, env: Env = process.env, selectionRef?: string): Promise<Worktree> {
   if (!NAME.test(repo)) return { error: `repo must be "super" or a vessel's name, not ${JSON.stringify(repo)}` };
   const zones = containmentZones(env);
   const superDir = zones.supers[0];
@@ -43,15 +44,44 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
 
   const trees = walkTreesDir(env);
   mkdirSync(trees, { recursive: true, mode: 0o755 });
-  return withClones(() => chooseOrClone(trees, repo, base, superBase, origin, branch, source));
+  return withClones(() => chooseOrClone(trees, repo, base, superBase, origin, branch, source, selectionRef));
+}
+
+// Which clones may be handed to the request a call is made for: an unchanged clone goes again only to the request it
+// was handed to, or once every request it was handed to is closed. Read from the walk's rows (the git_worktree hops
+// that handed each clone out, their selections' roots, and the roots records lists as open). Anything unread (no
+// selection named, a records read failing) hands nothing out again: a fresh clone costs disk, a shared one would put one
+// request's edit into another's commit.
+async function handouts(selectionRef: string | undefined): Promise<{ mine: string; may: (cwd: string) => boolean; ours: Set<string> } | null> {
+  if (!selectionRef) return null;
+  const [sel, hops, sels, arms] = await Promise.all([
+    readRows({ ids: [selectionRef] }), readRows({ shape: "hop", where: { pointer_type: "git_worktree", phase: "ended" } }),
+    readRows({ shape: "selection" }), readRows({ shape: "arm" }),
+  ]);
+  if (!Array.isArray(sel) || !Array.isArray(hops) || !Array.isArray(sels) || !Array.isArray(arms)) return null;
+  const mine = String(sel.find((r) => r.id === selectionRef)?.root ?? "");
+  if (!mine) return null;
+  const rootOf = new Map((sels as Row[]).filter((s) => s.role === "walk").map((s) => [s.id, String(s.root ?? "")]));
+  const open = await openRoots([...new Set((arms as Row[]).map((a) => String(a.vessel_id ?? "")).filter((v) => v !== ""))]);
+  if (!(open instanceof Set)) return null;
+  const to = new Map<string, Set<string>>();
+  for (const h of (hops as Row[]).filter((x) => x.role === "walk")) {
+    const cwd = String(h.output?.cwd ?? "");
+    if (!cwd) continue;
+    if (!to.has(cwd)) to.set(cwd, new Set());
+    to.get(cwd)!.add(rootOf.get(String(h.selection_ref)) ?? "?");
+  }
+  const ours = new Set([...to.entries()].filter(([, roots]) => roots.has(mine)).map(([cwd]) => cwd));
+  const may = (cwd: string) => [...(to.get(cwd) ?? [])].every((r) => r === mine || (r !== "?" && !open.has(r)));
+  return { mine, may, ours };
 }
 
 // Under the clones lock (clones-lock.ts): hand out an unchanged clone, or make one.
-async function chooseOrClone(trees: string, repo: string, base: string, superBase: string, origin: string, branch: string, source: string): Promise<Worktree> {
+async function chooseOrClone(trees: string, repo: string, base: string, superBase: string, origin: string, branch: string, source: string, selectionRef?: string): Promise<Worktree> {
   // A clone nothing has changed yet (its own branch, at this base, from this origin, with no change and no commit) is
   // exactly what a new one would be: it is handed out again, not made again. Every clone is a whole repository, and one
   // made per call, with nothing removing them, filled a node's disk. A clone holding any change is never handed out.
-  const reused = await unchangedClone(trees, repo, base, origin);
+  const reused = await unchangedClone(trees, repo, base, origin, await handouts(selectionRef));
   if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin };
   const id = `${repo}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const cwd = agentWritableDir(join(trees, id));
@@ -69,13 +99,18 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
   return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin };
 }
 
-// The newest clone under `trees` of this repo that is still as made: its own walk/<name> branch, HEAD at `base`, origin
+// The newest clone under `trees` of this repo, that this request may be handed (handouts), still as made: its own walk/<name> branch, HEAD at `base`, origin
 // `origin`, nothing changed or untracked. Read as the shell user, who owns the clones.
-async function unchangedClone(trees: string, repo: string, base: string, origin: string): Promise<string | null> {
+async function unchangedClone(trees: string, repo: string, base: string, origin: string, h: Awaited<ReturnType<typeof handouts>>): Promise<string | null> {
+  if (h === null) return null;
   let names: string[];
   try { names = readdirSync(trees).filter((n) => n.startsWith(`${repo}-`)).sort().reverse(); } catch { return null; }
+  // the request's own clone first, then one no open request holds
+  const own = (n: string) => (h.ours.has(join(trees, n)) ? 0 : 1);
+  names = names.sort((a, b) => own(a) - own(b));
   for (const name of names) {
     const dir = join(trees, name);
+    if (!h.may(dir)) continue;
     if (!isRepo(dir)) continue;
     const out = async (args: string[]) => { const r = await git(["-C", dir, ...args], tmpdir()); return r.exit_code === 0 ? r.stdout.trim() : null; };
     if ((await out(["rev-parse", "--abbrev-ref", "HEAD"])) !== `walk/${name}`) continue;

@@ -620,7 +620,9 @@ const gitLand: ResolverHandler = async (ctx) => {
 const gitWorktree: ResolverHandler = async (ctx) => {
   const repo = str(ctx.body, "impulse", "pointer", "repo") ?? str(ctx.body, "repo");
   if (!repo) return { error: "repo is required" };
-  return makeWorktree(repo).catch(refusedOrError);
+  // The walk names the selection it calls for; the clone it gets is that request's own (git-worktree.ts handouts).
+  const selectionRef = str(ctx.body, "impulse", "pointer", "selection_ref") ?? str(ctx.body, "selection_ref");
+  return makeWorktree(repo, process.env, selectionRef).catch(refusedOrError);
 };
 
 // ── code-tool primitives (2026-06-10) ─────────────────────────────────────────

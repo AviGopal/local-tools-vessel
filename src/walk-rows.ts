@@ -63,3 +63,29 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   }
   return { cwd, repo: s("repo"), branch: s("branch"), base: s("base"), super_base: s("super_base"), origin_url: s("origin_url") };
 }
+
+/** The roots records lists as open for each walk (by its arm rows), or why they could not be read. */
+export async function openRoots(walks: string[]): Promise<Set<string> | { error: string }> {
+  const discovery = process.env.DISCOVERY_ENDPOINT?.trim();
+  if (!discovery) return { error: "no discovery endpoint is configured: the open roots cannot be read" };
+  const key = process.env.METABOB_API_KEY ?? "";
+  const open = new Set<string>();
+  for (const episode of walks) {
+    try {
+      const r = await fetch(new URL("/resolve", discovery).href, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
+        body: JSON.stringify({ pointer: { type: "record_read", episode, roots: "all" } }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!r.ok) return { error: `records answered ${r.status} for the open roots` };
+      const body = (await r.json()) as { roots?: unknown; content?: { roots?: unknown } };
+      const roots = Array.isArray(body?.roots) ? body.roots : body?.content?.roots;
+      if (!Array.isArray(roots)) return { error: "records answered no list of open roots" };
+      for (const x of roots as Array<{ root?: { id?: unknown } }>) if (typeof x?.root?.id === "string") open.add(x.root.id);
+    } catch (e) {
+      return { error: `the open roots could not be read: ${(e as Error).name}` };
+    }
+  }
+  return open;
+}

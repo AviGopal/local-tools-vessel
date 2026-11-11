@@ -18,39 +18,13 @@ import { join, sep } from "node:path";
 import { withClones } from "./clones-lock.js";
 import { git } from "./git-commit.js";
 import { walkTreesDir } from "./tool-roots.js";
-import { readRows, type Row } from "./walk-rows.js";
+import { openRoots, readRows, type Row } from "./walk-rows.js";
 
 export type Reclaimed =
   | { shape: "walkTreesReclaim"; removed: string[]; reported: Array<{ cwd: string; why: string }>; kept: number }
   | { error: string };
 
 type Env = Record<string, string | undefined>;
-
-/** The roots records lists as open for each walk (by its arm rows), or why they could not be read. */
-async function openRoots(walks: string[]): Promise<Set<string> | { error: string }> {
-  const discovery = process.env.DISCOVERY_ENDPOINT?.trim();
-  if (!discovery) return { error: "no discovery endpoint is configured: the open roots cannot be read" };
-  const key = process.env.METABOB_API_KEY ?? "";
-  const open = new Set<string>();
-  for (const episode of walks) {
-    try {
-      const r = await fetch(new URL("/resolve", discovery).href, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
-        body: JSON.stringify({ pointer: { type: "record_read", episode, roots: "all" } }),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!r.ok) return { error: `records answered ${r.status} for the open roots` };
-      const body = (await r.json()) as { roots?: unknown; content?: { roots?: unknown } };
-      const roots = Array.isArray(body?.roots) ? body.roots : body?.content?.roots;
-      if (!Array.isArray(roots)) return { error: "records answered no list of open roots" };
-      for (const x of roots as Array<{ root?: { id?: unknown } }>) if (typeof x?.root?.id === "string") open.add(x.root.id);
-    } catch (e) {
-      return { error: `the open roots could not be read: ${(e as Error).name}` };
-    }
-  }
-  return open;
-}
 
 export const reclaimWalkTrees = (env: Env = process.env, remove: (p: string) => unknown = (p) => rmSync(p, { recursive: true })): Promise<Reclaimed> =>
   withClones(() => reclaim(env, remove));

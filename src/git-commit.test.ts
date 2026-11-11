@@ -85,22 +85,48 @@ describe("git_worktree", () => {
     expect(readFileSync(join(w.cwd, "a.txt"), "utf8")).toBe("one\n");
   });
 
-  it("[MUST-FAIL] a clone nothing has changed is handed out again, not made again; one holding a change never is", async () => {
+  it("[MUST-FAIL] two open requests never share a clone; a request gets its own unchanged clone again, and a closed one's", async () => {
     const trees = join(T, "trees");
-    const first = await makeWorktree("demo");
-    if ("error" in first) throw new Error(first.error);
+    // records, stubbed: selections name their request; git_worktree's ended hops say which clone went to which selection
+    const sels: Record<string, string> = { "sel-a": "R-A", "sel-a2": "R-A", "sel-b": "R-B", "sel-b2": "R-B", "sel-c": "R-C" };
+    const hops: Array<Record<string, unknown>> = [];
+    let open = ["R-A", "R-B", "R-C"];
+    let down = false;
+    globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+      if (down) return new Response("down", { status: 503 });
+      const p = JSON.parse(String(init?.body)).pointer;
+      if (p.episode !== undefined) return Response.json({ shared: [], roots: open.map((id) => ({ root: { id }, rows: [] })) });
+      if (p.ids) return Response.json(p.ids.filter((id: string) => id in sels).map((id: string) => ({ id, shape: "selection", role: "walk", root: sels[id] })));
+      if (p.shape === "hop") return Response.json(hops);
+      if (p.shape === "selection") return Response.json(Object.entries(sels).map(([id, root]) => ({ id, shape: "selection", role: "walk", root })));
+      if (p.shape === "arm") return Response.json([{ id: "arm-1", shape: "arm", vessel_id: "walk-1" }]);
+      return Response.json([]);
+    }) as typeof fetch;
+    const ask = async (sel?: string) => {
+      const w = await makeWorktree("demo", process.env, sel);
+      if ("error" in w) throw new Error(w.error);
+      if (sel) hops.push({ id: `h-${hops.length}`, shape: "hop", role: "walk", phase: "ended", pointer_type: "git_worktree", selection_ref: sel, output: { cwd: w.cwd } });
+      return w.cwd;
+    };
+    const a = await ask("sel-a");
+    const b = await ask("sel-b");
+    expect(b).not.toBe(a); // two open requests: two clones
+    expect(await ask("sel-a2")).toBe(a); // the same request: its own clone again
+    expect(await ask("sel-b2")).toBe(b);
+    open = ["R-B", "R-C"]; // R-A closes: its unchanged clone may go to another request
+    expect(await ask("sel-c")).toBe(a);
+    writeFileSync(join(b, "edit.txt"), "x\n"); // a change makes it someone's work: never handed out again
+    expect(await ask("sel-b2")).not.toBe(b);
+    // nothing read, nothing shared: no selection named, or records down, gets a fresh clone
     const before = readdirSync(trees).length;
-    const again = await makeWorktree("demo");
-    if ("error" in again) throw new Error(again.error);
-    expect(again.cwd).toBe(first.cwd);
-    expect(readdirSync(trees).length).toBe(before);
-    // a change (an edit, or an untracked file) makes it someone's work: the next call gets a fresh clone
-    writeFileSync(join(first.cwd, "new.txt"), "x\n");
-    const fresh = await makeWorktree("demo");
-    if ("error" in fresh) throw new Error(fresh.error);
-    expect(fresh.cwd).not.toBe(first.cwd);
-    expect(readdirSync(trees).length).toBe(before + 1);
+    await ask(undefined);
+    down = true;
+    await ask("sel-a");
+    down = false;
+    expect(readdirSync(trees).length).toBe(before + 2);
+    globalThis.fetch = realFetch;
   });
+
 
   it("refuses a name that is not a repo's, and a repo this node has no copy of", async () => {
     expect("error" in (await makeWorktree("../etc"))).toBe(true);
