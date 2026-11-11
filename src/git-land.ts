@@ -17,7 +17,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git, judgesOf } from "./git-commit.js";
+import { git, judgesOf, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
@@ -109,11 +109,11 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     if (((await out(["rev-list", "--merges", range])) ?? "x") !== "") return { error: "the change holds a merge commit; only a straight line of commits lands" };
     const changed = ((await out(["diff", "--name-only", "--no-renames", origin, "refs/land/head"])) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to land: the change does not differ from origin" };
-    const judges = await judgesOf(repo, { base: origin, repo: made.repo });
+    const judges = await judgesOf((path) => out(["show", `${origin}:${path}`]), { repo: made.repo });
     const needs_person = changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p)));
 
     // The scan, with the super base's config, over exactly the commits that would be pushed.
-    const cfg = await git(["show", `${made.super_base}:scripts/git-hooks/.gitleaks.toml`], superDir);
+    const cfg = await vesselGit(["show", `${made.super_base}:scripts/git-hooks/.gitleaks.toml`], superDir);
     if (cfg.exit_code !== 0) return { error: "the super base has no scan config" };
     writeFileSync(join(work, "gitleaks.toml"), cfg.stdout);
     const report = join(work, "leaks.json");

@@ -8,7 +8,7 @@
 import { mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git } from "./git-commit.js";
+import { git, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
@@ -30,7 +30,8 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
   if (!superDir) return { error: "this node has no super-repo clone: nothing would judge a commit" };
   const source = repo === "super" ? superDir : join(zones.clones, repo);
   if (!isRepo(source)) return { error: `this node has no copy of ${repo}` };
-  const read = async (args: string[], cwd: string) => { const r = await git(args, cwd); return r.exit_code === 0 ? r.stdout.trim() : null; };
+  // The node's copies are this vessel's: read them as the vessel (the shell user cannot).
+  const read = async (args: string[], cwd: string) => { const r = await vesselGit(args, cwd); return r.exit_code === 0 ? r.stdout.trim() : null; };
   const base = await read(["rev-parse", "HEAD"], source);
   const superBase = await read(["rev-parse", "HEAD"], superDir);
   const origin = await read(["config", "--get", "remote.origin.url"], source);
@@ -43,7 +44,9 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
   const id = `${repo}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const cwd = agentWritableDir(join(trees, id));
   const steps: string[][] = [
-    ["clone", "--quiet", "--no-hardlinks", "--no-checkout", source, cwd],
+    // The shell user clones the vessel's copy. Its upload-pack runs as the shell user against a repository it does not
+    // own, which git refuses unless told this one is safe: the copy is the vessel's own, so it is.
+    ["clone", "--quiet", "--no-hardlinks", "--no-checkout", "--upload-pack=git -c 'safe.directory=*' upload-pack", source, cwd],
     ["-C", cwd, "checkout", "--quiet", "-b", `walk/${id}`, base],
     ["-C", cwd, "remote", "set-url", "origin", origin],
   ];

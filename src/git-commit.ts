@@ -48,6 +48,18 @@ export async function git(args: string[], cwd: string, opts: { stdin?: string; e
   }
 }
 
+/**
+ * git as this vessel, for a repository it owns (the node's own copies, the super-repo clone). The shell user may not read
+ * those: git refuses a repository another user owns, and older git (the image's) ignores a safe.directory given in the
+ * environment. No privilege drop, no user or global config (HOME points nowhere), no credential.
+ */
+export async function vesselGit(args: string[], cwd: string): Promise<Run> {
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", GIT_TERMINAL_PROMPT: "0" };
+  const p = Bun.spawn(["git", "-c", "credential.helper=", ...args], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(GIT_TIMEOUT_MS) });
+  const [stdout, stderr, exit_code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  return { stdout, stderr, exit_code };
+}
+
 const out = async (args: string[], cwd: string): Promise<string | null> => {
   const r = await git(args, cwd);
   return r.exit_code === 0 ? r.stdout.trim() : null;
@@ -71,8 +83,9 @@ const JUDGES_BY_REPO: Record<string, string[]> = {
 // A repo without a gate policy names no accepted fixtures, so every fixture-like path counts.
 const FIXTURES_WITHOUT_POLICY = ["validation/**", "test/fixtures/**", "src/**/fixtures/**"];
 
-export async function judgesOf(cwd: string, made: Pick<Made, "base" | "repo">): Promise<string[]> {
-  const policy = await out(["show", `${made.base}:scripts/substrate/gate/gate-policy.json`], cwd);
+/** `show(path)` reads a file at the base, as whoever may read that repository. */
+export async function judgesOf(show: (path: string) => Promise<string | null>, made: Pick<Made, "repo">): Promise<string[]> {
+  const policy = await show("scripts/substrate/gate/gate-policy.json");
   let fixtures = FIXTURES_WITHOUT_POLICY;
   if (policy !== null) {
     try { fixtures = (JSON.parse(policy) as { fixture_paths?: string[] }).fixture_paths ?? []; } catch { /* unreadable: keep the broad set */ }
@@ -83,7 +96,7 @@ export async function judgesOf(cwd: string, made: Pick<Made, "base" | "repo">): 
 /** The pre-commit hook as of the super base, in a fresh directory the agent cannot write; that directory. */
 async function pinnedHooks(superDir: string, made: Made): Promise<string | { error: string }> {
   const path = made.repo === "super" ? HOOK_FOR_SUPER : HOOK_FOR_VESSEL;
-  const hook = await git(["show", `${made.super_base}:${path}`], superDir);
+  const hook = await vesselGit(["show", `${made.super_base}:${path}`], superDir);
   if (hook.exit_code !== 0) return { error: `the super base ${made.super_base.slice(0, 12)} has no ${path}: nothing trusted would check this commit` };
   const dir = mkdtempSync(join(tmpdir(), "pinned-hooks-"));
   // The node's own record-only hooks (the attempt ledger, set as the system hooks path) are kept, so a commit made here is
@@ -133,7 +146,7 @@ export async function commitInClone(
     if (add.exit_code !== 0) return { error: "git add failed", stderr: add.stderr.slice(-2000), exit_code: add.exit_code };
     const changed = (await out(["diff", "--cached", "--name-only", "--no-renames", made.base], cwd) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to commit: the clone does not differ from its base" };
-    const judges = await judgesOf(cwd, made);
+    const judges = await judgesOf((path) => out(["show", `${made.base}:${path}`], cwd), made);
     const needs_person = changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p)));
 
     const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv, timeoutMs: COMMIT_TIMEOUT_MS });

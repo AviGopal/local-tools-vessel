@@ -213,7 +213,7 @@ describe("git_land", () => {
 
   it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {
     const { judgesOf } = await import("./git-commit");
-    const judges = await judgesOf(ORIGIN, { base: "dev", repo: "local-tools-vessel" });
+    const judges = await judgesOf(async () => null, { repo: "local-tools-vessel" });
     for (const p of ["src/git-land.ts", "src/git-commit.ts", "src/git-worktree.ts", "src/walk-rows.ts"]) {
       expect(judges.some((g) => new Bun.Glob(g).match(p))).toBe(true);
     }
