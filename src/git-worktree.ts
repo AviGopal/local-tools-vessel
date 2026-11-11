@@ -12,7 +12,7 @@ import { git, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
 import { withClones } from "./clones-lock.js";
 import { walkTreesDir } from "./tool-roots.js";
-import { openRoots, readRows, type Row } from "./walk-rows.js";
+import { endedCalls, openRoots, readRows, type Row } from "./walk-rows.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
 // Where change clones are made: also a tool root (tool-roots.ts), so the file tools work in a clone's cwd.
@@ -55,7 +55,7 @@ export async function makeWorktree(repo: string, env: Env = process.env, selecti
 async function handouts(selectionRef: string | undefined): Promise<{ mine: string; may: (cwd: string) => boolean; ours: Set<string> } | null> {
   if (!selectionRef) return null;
   const [sel, hops, sels, arms] = await Promise.all([
-    readRows({ ids: [selectionRef] }), readRows({ shape: "hop", where: { pointer_type: "git_worktree", phase: "ended" } }),
+    readRows({ ids: [selectionRef] }), endedCalls("git_worktree"),
     readRows({ shape: "selection" }), readRows({ shape: "arm" }),
   ]);
   if (!Array.isArray(sel) || !Array.isArray(hops) || !Array.isArray(sels) || !Array.isArray(arms)) return null;

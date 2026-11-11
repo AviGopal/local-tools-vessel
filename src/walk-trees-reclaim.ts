@@ -69,14 +69,17 @@ async function reclaim(env: Env, remove: (p: string) => unknown, budgetMs: numbe
   const busy = new Set(inFlight.map((h) => rootOf(h.selection_ref) ?? "?"));
   // A clone being made is on disk before any row names it: while a git_worktree call is in flight, no unnamed clone goes.
   const making = inFlight.some((h) => h.pointer_type === "git_worktree");
+  // An ended hop does not name the shape called; its started hop, under the same call_id, does.
+  const calledAs = new Map(hop.filter((h) => h.phase === "started").map((h) => [String(h.call_id), String(h.pointer_type ?? "")]));
+  const ended = (type: string) => hop.filter((h) => h.phase === "ended" && (h.pointer_type ?? calledAs.get(String(h.call_id))) === type);
   const named = new Map<string, Set<string>>();
-  for (const h of hop.filter((x) => x.phase === "ended" && x.pointer_type === "git_worktree")) {
+  for (const h of ended("git_worktree")) {
     const cwd = String(h.output?.cwd ?? "");
     if (!cwd) continue;
     if (!named.has(cwd)) named.set(cwd, new Set());
     named.get(cwd)!.add(rootOf(h.selection_ref) ?? "?");
   }
-  const landed = new Set(hop.filter((h) => h.phase === "ended" && h.pointer_type === "git_land").map((h) => String(h.output?.cwd ?? "")));
+  const landed = new Set(ended("git_land").map((h) => String(h.output?.cwd ?? "")));
 
   const out = async (cwd: string, args: string[]) => {
     const r = await git(["-C", cwd, ...args], tmpdir());

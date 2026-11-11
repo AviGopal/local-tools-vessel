@@ -41,7 +41,21 @@ export const readRows = async (q: Query): Promise<Row[] | { error: string }> => 
   return Array.isArray(rows) ? (rows as Row[]) : { error: `records answered no list for ${q.shape ?? "the"} rows` };
 };
 
-const readHops = (pointerType: string) => readRows({ shape: "hop", where: { pointer_type: pointerType, phase: "ended" } });
+/**
+ * The walk's calls of one shape that ended, as their ended hop rows (which carry the call's output). An ended hop does not
+ * name the shape called: its started hop does, under the same call_id, so each ended hop is joined to its started one.
+ * (A row that names its own pointer_type counts too.) Only the walk's own rows.
+ */
+export async function endedCalls(pointerType: string): Promise<Row[] | { error: string }> {
+  const [started, ended] = await Promise.all([
+    readRows({ shape: "hop", where: { pointer_type: pointerType, phase: "started" } }),
+    readRows({ shape: "hop", where: { phase: "ended" } }),
+  ]);
+  if (!Array.isArray(started)) return started;
+  if (!Array.isArray(ended)) return ended;
+  const calls = new Set(started.filter((h) => h.role === "walk").map((h) => String(h.call_id)));
+  return ended.filter((h) => h.role === "walk" && (h.pointer_type === pointerType || (h.pointer_type === undefined && calls.has(String(h.call_id)))));
+}
 
 /**
  * The one change clone the walk made at `cwd` and has not landed. A walk-written git_worktree row must name it: none
@@ -52,7 +66,7 @@ const readHops = (pointerType: string) => readRows({ shape: "hop", where: { poin
  * the clones made, not every hop.
  */
 export async function madeClone(cwd: string): Promise<Made | { error: string }> {
-  const made = await readHops("git_worktree");
+  const made = await endedCalls("git_worktree");
   if (!Array.isArray(made)) return made;
   const mine = made.filter((r) => r.role === "walk" && r.output?.cwd === cwd).sort((a, b) => Number(a.seq) - Number(b.seq))
   if (mine.length === 0) return { error: `no walk row records a clone made at ${cwd}: a commit or landing needs one` };
@@ -60,7 +74,7 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   if (!["repo", "branch", "base", "origin_url"].every(same)) {
     return { error: `${mine.length} walk rows record different clones made at ${cwd}: a commit or landing needs one` };
   }
-  const landed = await readHops("git_land");
+  const landed = await endedCalls("git_land");
   if (!Array.isArray(landed)) return landed;
   if (landed.some((r) => r.role === "walk" && r.output?.cwd === cwd)) return { error: `the clone at ${cwd} has already landed` };
   const o = mine[mine.length - 1].output ?? {};

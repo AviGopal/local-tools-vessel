@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { commitInClone } from "./git-commit";
 import { makeWorktree } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
+import { recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 // Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
 // fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
@@ -100,7 +101,7 @@ describe("git_worktree", () => {
       const p = JSON.parse(String(init?.body)).pointer;
       if (p.episode !== undefined) return Response.json({ shared: [], roots: open.map((id) => ({ root: { id }, rows: [] })) });
       if (p.ids) return Response.json(p.ids.filter((id: string) => id in sels).map((id: string) => ({ id, shape: "selection", role: "walk", root: sels[id] })));
-      if (p.shape === "hop") return Response.json(hops);
+      if (p.shape === "hop") return Response.json(recordRead(hops, p));
       if (p.shape === "selection") return Response.json(Object.entries(sels).map(([id, root]) => ({ id, shape: "selection", role: "walk", root })));
       if (p.shape === "arm") return Response.json([{ id: "arm-1", shape: "arm", vessel_id: "walk-1" }]);
       return Response.json([]);
@@ -108,7 +109,7 @@ describe("git_worktree", () => {
     const ask = async (sel?: string) => {
       const w = await makeWorktree("demo", process.env, sel);
       if ("error" in w) throw new Error(w.error);
-      if (sel) hops.push({ id: `h-${hops.length}`, shape: "hop", role: "walk", phase: "ended", pointer_type: "git_worktree", selection_ref: sel, output: { cwd: w.cwd } });
+      if (sel) hops.push(...walkCall(String(hops.length), "git_worktree", sel, { cwd: w.cwd }));
       return w.cwd;
     };
     const a = await ask("sel-a");
@@ -191,29 +192,28 @@ describe("git_commit", () => {
   it("[MUST-FAIL] a clone no walk row names, rows naming different clones there, or one that has landed, is refused", async () => {
     const cwd = await clone("demo");
     writeFileSync(join(cwd, "a.txt"), "five\n");
-    const row = (id: string, pointer_type: string, output: object) => ({ id, role: "walk", shape: "hop", phase: "ended", pointer_type, output });
-    const answer = (byType: Record<string, unknown[]>) => {
-      globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
-        const p = JSON.parse(String(init?.body)).pointer;
-        return Response.json(byType[p.where.pointer_type] ?? []);
-      }) as typeof fetch;
+    // the walk's call rows, as the walk writes them (started names the shape; ended carries the output, not the shape)
+    const call = (n: string, type: string, output: object, extra: Record<string, unknown> = {}) =>
+      walkCall(n, type, `sel-${n}`, output as Record<string, unknown>).map((r) => ({ ...r, ...extra }));
+    const answer = (rows: Array<Record<string, unknown>>) => {
+      globalThis.fetch = (async (_u: unknown, init?: RequestInit) => Response.json(recordRead(rows, JSON.parse(String(init?.body)).pointer))) as typeof fetch;
     };
     const w = made.get(cwd)!;
-    answer({ git_worktree: [] });
+    answer([]);
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no walk row");
-    answer({ git_worktree: [row("h1", "git_worktree", w), row("h2", "git_worktree", { ...w, base: "0".repeat(40) })] });
+    answer([...call("1", "git_worktree", w), ...call("2", "git_worktree", { ...w, base: "0".repeat(40) })]);
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("2 walk rows record different clones");
-    answer({ git_worktree: [{ ...row("h1", "git_worktree", w), role: "person" }] });
+    answer(call("1", "git_worktree", w, { role: "person" }));
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no walk row");
     // the same clone handed out twice: both rows agree, and the later one's super_base holds
-    answer({ git_worktree: [{ ...row("h1", "git_worktree", w), seq: 1 }, { ...row("h2", "git_worktree", { ...w, super_base: "f".repeat(40) }), seq: 2 }] });
+    answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, super_base: "f".repeat(40) }, { seq: 2 })]);
     expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: "f".repeat(40), origin_url: w.origin_url });
-    answer({ git_worktree: [row("h1", "git_worktree", w)], git_land: [row("h3", "git_land", { cwd })] });
+    answer([...call("1", "git_worktree", w), ...call("3", "git_land", { cwd })]);
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("already landed");
     delete process.env.DISCOVERY_ENDPOINT;
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no discovery endpoint");
     process.env.DISCOVERY_ENDPOINT = "http://discovery.test";
-    answer({ git_worktree: [row("h1", "git_worktree", w)] });
+    answer(call("1", "git_worktree", w));
     expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: w.super_base, origin_url: w.origin_url });
     globalThis.fetch = realFetch;
     expect(String((await commitInClone(join(T, "not-made"), "x", undefined, find) as { error: string }).error)).toContain("0 walk rows");

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeWorktree } from "./git-worktree";
 import { reclaimWalkTrees } from "./walk-trees-reclaim";
+import { recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 const T = mkdtempSync(join(tmpdir(), "walk-trees-reclaim-"));
 chmodSync(T, 0o755);
@@ -32,7 +33,7 @@ const clone = (name: string): string => {
 };
 
 // records, as the stub answers it: rows by shape, and the open roots of the walk's episode.
-let rows: Record<string, unknown[]> = {};
+let rows: Record<string, Array<Record<string, unknown>>> = {};
 let openRoots: string[] = [];
 let failing = false;
 // records answers 401 to a request that does not say who is asking, as the live one does.
@@ -43,16 +44,13 @@ const answer = () => {
     if (failing) return new Response("down", { status: 503 });
     const p = JSON.parse(String(init?.body)).pointer;
     if (p.episode !== undefined) return Response.json({ shared: [], roots: openRoots.map((id) => ({ root: { id }, rows: [] })) });
-    return Response.json(rows[p.shape] ?? []);
+    return Response.json(recordRead(rows[p.shape] ?? [], p));
   }) as typeof fetch;
 };
 let n = 0;
 const made = (cwd: string, root: string) => {
   const sel = `sel-${++n}`;
-  return [
-    { id: sel, shape: "selection", role: "walk", root },
-    { id: `h-${n}`, shape: "hop", role: "walk", phase: "ended", pointer_type: "git_worktree", call_id: `c-${n}`, selection_ref: sel, output: { cwd } },
-  ];
+  return [{ id: sel, shape: "selection", role: "walk", root }, ...walkCall(String(n), "git_worktree", sel, { cwd })];
 };
 const world = (parts: Array<Record<string, unknown>>, open: string[]) => {
   rows = { arm: [{ id: "arm-1", shape: "arm", vessel_id: "walk-1" }] };
@@ -109,7 +107,7 @@ describe("walk_trees_reclaim", () => {
     writeFileSync(join(changed, "a.txt"), "two\n");
     writeFileSync(join(landedCwd, "a.txt"), "three\n");
     world([...made(changed, "R1"), ...made(landedCwd, "R1"), ...made(open, "R2"),
-      { id: "h-land", shape: "hop", role: "walk", phase: "ended", pointer_type: "git_land", call_id: "c-land", selection_ref: "sel-x", output: { cwd: landedCwd } }], ["R2"]);
+      ...walkCall("land", "git_land", "sel-x", { cwd: landedCwd })], ["R2"]);
     const r = await reclaimWalkTrees(env);
     if ("error" in r) throw new Error(r.error);
     expect(existsSync(changed)).toBe(true);
@@ -141,9 +139,10 @@ describe("walk_trees_reclaim", () => {
     const [stray, target] = ["super-f1", "super-f2"].map(clone);
     world([], ["R9"]);
     rows.selection = [{ id: "sel-mk", shape: "selection", role: "walk", root: "R9" }];
-    rows.hop = [{ id: "h-mk", shape: "hop", role: "walk", phase: "started", pointer_type: "git_worktree", call_id: "c-mk", selection_ref: "sel-mk" }];
+    const [startedMk, endedMk] = walkCall("mk", "git_worktree", "sel-mk", { cwd: target });
+    rows.hop = [startedMk]; // the call is in flight: started, not yet ended
     expect((await reclaimWalkTrees(env) as { removed: string[] }).removed).toEqual([]);
-    rows.hop.push({ id: "h-mk2", shape: "hop", role: "walk", phase: "ended", pointer_type: "git_worktree", call_id: "c-mk", selection_ref: "sel-mk", output: { cwd: target } });
+    rows.hop.push(endedMk);
     expect((await reclaimWalkTrees(env) as { removed: string[] }).removed).toEqual([stray]);
   });
 
