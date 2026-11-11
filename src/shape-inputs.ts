@@ -41,8 +41,11 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
   git_status: object([], { cwd: { type: "string", description: "The repository; default the workspace." } }),
   git_diff: object([], { cwd: { type: "string", description: "The repository; default the workspace." } }),
   git_commit: object(["cwd", "message"], {
-    cwd: { type: "string", minLength: 1, description: "A worktree made for the change; never a main clone." },
+    cwd: { type: "string", minLength: 1, description: "The clone git_worktree made for the change (its answer's cwd)." },
     message: { type: "string", minLength: 1, description: "The commit message: a subject line, a blank line, then why." },
+  }),
+  git_worktree: object(["repo"], {
+    repo: { type: "string", minLength: 1, description: "\"super\" for the super-repo, or a vessel's name, e.g. walk-vessel." },
   }),
 }
 
@@ -58,6 +61,9 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code.",
   git_status: "Lists a repository's changed files (git status --porcelain).",
   git_diff: "Shows a repository's unstaged changes (git diff).",
-  git_commit: "Commits every change in a worktree, checked by the hooks of the commit it was made from; answers the " +
-    "sha, tree and changed paths, and needs_person: the changed paths that judge changes, which only a person may approve.",
+  git_commit: "Commits every change in a clone git_worktree made, checked by the super-repo's hooks as of its making; " +
+    "answers the sha, tree and changed paths, needs_person (changed paths that judge changes, which only a person may " +
+    "approve) and scan (whether the secrets scan ran).",
+  git_worktree: "Makes a fresh clone of a repository for one change, at this node's current copy of it; answers cwd (where " +
+    "to read, edit and commit), base, super_base and origin_url.",
 }
