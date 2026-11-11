@@ -70,7 +70,7 @@ const JUDGES_BY_REPO: Record<string, string[]> = {
 // A repo without a gate policy names no accepted fixtures, so every fixture-like path counts.
 const FIXTURES_WITHOUT_POLICY = ["validation/**", "test/fixtures/**", "src/**/fixtures/**"];
 
-async function judgesOf(cwd: string, made: Made): Promise<string[]> {
+export async function judgesOf(cwd: string, made: Pick<Made, "base" | "repo">): Promise<string[]> {
   const policy = await out(["show", `${made.base}:scripts/substrate/gate/gate-policy.json`], cwd);
   let fixtures = FIXTURES_WITHOUT_POLICY;
   if (policy !== null) {

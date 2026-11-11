@@ -26,6 +26,7 @@ import { containShell } from "./shell-containment.js";
 import { runAllowlistedScript } from "./script-runner.js";
 import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
+import { landClone } from "./git-land.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
@@ -559,6 +560,12 @@ const gitCommit: ResolverHandler = async (ctx) => {
     .catch(e => ({ error: (e as Error).message }));
 };
 
+const gitLand: ResolverHandler = async (ctx) => {
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  if (!cwd) return { error: "cwd is required" };
+  return landClone(resolvePath(DEFAULT_CWD, cwd)).catch(e => ({ error: (e as Error).message }));
+};
+
 const gitWorktree: ResolverHandler = async (ctx) => {
   const repo = str(ctx.body, "impulse", "pointer", "repo") ?? str(ctx.body, "repo");
   if (!repo) return { error: "repo is required" };
@@ -888,7 +895,7 @@ export const resolvers = new Map<string, ResolverHandler>([
   ["shell", shell], ["bash", shell],
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
   ["bounded_shell", boundedShellResolver],
-  ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit], ["git_worktree", gitWorktree],
+  ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit], ["git_worktree", gitWorktree], ["git_land", gitLand],
   ["code_search", codeSearch],
   ["code_find_function", codeFindFunction],
   ["code_find_import", codeFindImport],
@@ -934,7 +941,7 @@ if (import.meta.main) {
     // reach. Advertising them costs nothing; they already resolve.
     "shell", "bash", "bounded_shell",
     "fs_read", "fs_write", "fs_edit",
-    "git_status", "git_diff", "git_commit", "git_worktree",
+    "git_status", "git_diff", "git_commit", "git_worktree", "git_land",
     "code_search", "code_find_function", "code_find_import",
     "code_insert_after_line", "code_replace_lines", "code_read_lines",
     "code_add_import", "code_verify_typecheck", "web_search",

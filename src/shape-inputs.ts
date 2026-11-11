@@ -44,6 +44,9 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
     cwd: { type: "string", minLength: 1, description: "The clone git_worktree made for the change (its answer's cwd)." },
     message: { type: "string", minLength: 1, description: "The commit message: a subject line, a blank line, then why." },
   }),
+  git_land: object(["cwd"], {
+    cwd: { type: "string", minLength: 1, description: "The clone git_worktree made, with its change committed." },
+  }),
   git_worktree: object(["repo"], {
     repo: { type: "string", minLength: 1, description: "\"super\" for the super-repo, or a vessel's name, e.g. walk-vessel." },
   }),
@@ -64,6 +67,9 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   git_commit: "Commits every change in a clone git_worktree made, checked by the super-repo's hooks as of its making; " +
     "answers the sha, tree and changed paths, needs_person (changed paths that judge changes, which only a person may " +
     "approve) and scan (whether the secrets scan ran).",
+  git_land: "Pushes a committed change from a clone git_worktree made to its origin's branch, only when a land_verdict " +
+    "row approves its exact tree (a person's r 1, or a grader's r 1 from exactly the request and the walk's gitDiff row " +
+    "of that tree), the secrets scan is clean and it fast-forwards; answers what landed, or why not.",
   git_worktree: "Makes a fresh clone of a repository for one change, at this node's current copy of it; answers cwd (where " +
     "to read, edit and commit), branch (where a landing goes), base, super_base and origin_url.",
 }

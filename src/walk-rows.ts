@@ -9,9 +9,12 @@
 // write one, a person key or the shell user (which holds no key) cannot.
 
 export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string };
-type Row = { id: string; role?: string; pointer_type?: string; phase?: string; output?: Record<string, unknown> };
+export type Row = { id: string; shape?: string; role?: string; pointer_type?: string; phase?: string; output?: Record<string, unknown>; [k: string]: unknown };
 
-const readHops = async (pointerType: string): Promise<Row[] | { error: string }> => {
+export type Query = { shape?: string; where?: Record<string, unknown>; ids?: string[] };
+
+/** Rows matching a records query (a shape, top-level field equality, ids), read from records through discovery. */
+export const readRows = async (q: Query): Promise<Row[] | { error: string }> => {
   const discovery = process.env.DISCOVERY_ENDPOINT?.trim();
   if (!discovery) return { error: "no discovery endpoint is configured: the walk's rows cannot be read" };
   const key = process.env.METABOB_API_KEY ?? "";
@@ -19,17 +22,19 @@ const readHops = async (pointerType: string): Promise<Row[] | { error: string }>
     const r = await fetch(new URL("/resolve", discovery).href, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
-      body: JSON.stringify({ pointer: { type: "record_read", shape: "hop", where: { pointer_type: pointerType, phase: "ended" } } }),
+      body: JSON.stringify({ pointer: { type: "record_read", ...q } }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (!r.ok) return { error: `records answered ${r.status} for the walk's ${pointerType} rows` };
+    if (!r.ok) return { error: `records answered ${r.status} for ${q.shape ?? "the"} rows` };
     const body = (await r.json()) as unknown;
     const rows = Array.isArray(body) ? body : (body as { content?: unknown })?.content;
-    return Array.isArray(rows) ? (rows as Row[]) : { error: `records answered no rows for the walk's ${pointerType} rows` };
+    return Array.isArray(rows) ? (rows as Row[]) : { error: `records answered no list for ${q.shape ?? "the"} rows` };
   } catch (e) {
     return { error: `records could not be read: ${(e as Error).name}` };
   }
 };
+
+const readHops = (pointerType: string) => readRows({ shape: "hop", where: { pointer_type: pointerType, phase: "ended" } });
 
 /**
  * The one change clone the walk made at `cwd` and has not landed. Exactly one walk-written git_worktree row must name
