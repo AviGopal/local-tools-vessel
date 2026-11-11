@@ -83,8 +83,20 @@ afterAll(() => {
   rmSync(T, { recursive: true, force: true });
 });
 
+// Every check below runs after the secrets scan, which needs gitleaks. On a node without it, git_land refuses before any
+// of them: there, each case asserts that refusal (the node's real behaviour, itself a property that must hold) instead of
+// a check it never reaches. Where gitleaks is present, the cases are exactly as written.
+const SCANNER = Bun.which("gitleaks", { PATH: process.env.PATH ?? "" });
+const scanned = (name: string, fn: () => Promise<void>) => it(SCANNER ? name : `${name} (no secrets scanner here: refused)`, SCANNER ? fn : async () => {
+  const { cwd, tree } = await change(`noscan-${Math.random().toString(36).slice(2)}.txt`, "x\n");
+  table = [{ id: "vp", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+  const before = originHead();
+  expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no secrets scanner");
+  expect(originHead()).toBe(before);
+});
+
 describe("git_land", () => {
-  it("[MUST-FAIL] lands nothing without a verdict on its tree, nor with a verdict on another tree", async () => {
+  scanned("[MUST-FAIL] lands nothing without a verdict on its tree, nor with a verdict on another tree", async () => {
     const before = originHead();
     const { cwd, tree } = await change("a.txt", "two\n");
     table = [];
@@ -99,7 +111,7 @@ describe("git_land", () => {
     expect(r.verdict_ref).toBe("v2");
   });
 
-  it("[MUST-FAIL] a grader's r 1 lands only from exactly the request and the walk's gitDiff of this tree", async () => {
+  scanned("[MUST-FAIL] a grader's r 1 lands only from exactly the request and the walk's gitDiff of this tree", async () => {
     const { cwd, tree } = await change("b.txt", "b\n");
     const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
     const other = { id: "x1", shape: "fileContent", role: "described" } as Row;
@@ -121,7 +133,7 @@ describe("git_land", () => {
     expect("pushed" in r && r.verdict_by).toBe("described-x");
   });
 
-  it("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
+  scanned("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
     const { cwd, tree } = await change("c.txt", "c\n");
     const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
     const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, input_refs: ["ask1", "d2"] } as Row;
@@ -133,7 +145,7 @@ describe("git_land", () => {
     expect("pushed" in r && r.verdict_by).toBe("kid-person");
   });
 
-  it("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
+  scanned("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
     const { cwd, tree } = await change("scripts/substrate/gate/x.sh", "x\n");
     const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
     table = [ask, diff, { id: "v9", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d3"] }];
@@ -142,7 +154,7 @@ describe("git_land", () => {
     expect((r as unknown as { needs_person: string[] }).needs_person).toEqual(["scripts/substrate/gate/x.sh"]);
   });
 
-  it("[MUST-FAIL] a planted secret is refused by its rule, and the answer never carries its text", async () => {
+  scanned("[MUST-FAIL] a planted secret is refused by its rule, and the answer never carries its text", async () => {
     const secret = ["mb", "_", "Q".repeat(20), "z".repeat(20)].join("");
     const { cwd, tree } = await change("d.txt", `key = ${secret}\n`);
     table = [{ id: "v10", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
@@ -152,7 +164,7 @@ describe("git_land", () => {
     expect(JSON.stringify(r)).not.toContain(secret);
   });
 
-  it("[MUST-FAIL] a change that no longer fast-forwards origin, or holds a merge, is refused", async () => {
+  scanned("[MUST-FAIL] a change that no longer fast-forwards origin, or holds a merge, is refused", async () => {
     const { cwd, tree } = await change("e.txt", "e\n");
     const elsewhere = join(T, "elsewhere");
     g(T, "clone", "-q", "-b", "dev", ORIGIN, elsewhere);
@@ -181,7 +193,7 @@ describe("git_land", () => {
     expect(originHead()).toBe(before);
   });
 
-  it("[MUST-FAIL] a pre-push hook the clone sets up never runs: no hooks run beside the credential", async () => {
+  scanned("[MUST-FAIL] a pre-push hook the clone sets up never runs: no hooks run beside the credential", async () => {
     const { cwd, tree } = await change("i.txt", "i\n");
     mkdirSync(join(cwd, "evil"));
     writeFileSync(join(cwd, "evil", "pre-push"), `#!/bin/sh\ntouch "${T}/PRE_PUSH_RAN"\n`, { mode: 0o755 });
