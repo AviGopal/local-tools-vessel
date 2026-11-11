@@ -92,7 +92,10 @@ describe("git_worktree", () => {
     const hops: Array<Record<string, unknown>> = [];
     let open = ["R-A", "R-B", "R-C"];
     let down = false;
+    // records answers 401 to a request that does not say who is asking, as the live one does
+    process.env.METABOB_API_KEY = "test-node-key";
     globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+      if ((init?.headers as Record<string, string> | undefined)?.Authorization !== "ApiKey test-node-key") return new Response("no key", { status: 401 });
       if (down) return new Response("down", { status: 503 });
       const p = JSON.parse(String(init?.body)).pointer;
       if (p.episode !== undefined) return Response.json({ shared: [], roots: open.map((id) => ({ root: { id }, rows: [] })) });
@@ -124,6 +127,9 @@ describe("git_worktree", () => {
     await ask("sel-a");
     down = false;
     expect(readdirSync(trees).length).toBe(before + 2);
+    // without the node key records refuses every read, and nothing is shared: a fresh clone (a pin)
+    delete process.env.METABOB_API_KEY;
+    expect(await ask("sel-a2")).not.toBe(a);
     globalThis.fetch = realFetch;
   });
 

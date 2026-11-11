@@ -20,6 +20,7 @@ const g = (cwd: string, ...args: string[]) => {
 };
 const realFetch = globalThis.fetch;
 const savedDiscovery = process.env.DISCOVERY_ENDPOINT;
+const savedKey = process.env.METABOB_API_KEY;
 
 // A clone as git_worktree makes one: from the copy, on its own walk/<name> branch.
 const clone = (name: string): string => {
@@ -34,8 +35,11 @@ const clone = (name: string): string => {
 let rows: Record<string, unknown[]> = {};
 let openRoots: string[] = [];
 let failing = false;
+// records answers 401 to a request that does not say who is asking, as the live one does.
+const KEY = "test-node-key";
 const answer = () => {
   globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+    if ((init?.headers as Record<string, string> | undefined)?.Authorization !== `ApiKey ${KEY}`) return new Response("no key", { status: 401 });
     if (failing) return new Response("down", { status: 503 });
     const p = JSON.parse(String(init?.body)).pointer;
     if (p.episode !== undefined) return Response.json({ shared: [], roots: openRoots.map((id) => ({ root: { id }, rows: [] })) });
@@ -58,6 +62,7 @@ const world = (parts: Array<Record<string, unknown>>, open: string[]) => {
 
 beforeAll(() => {
   process.env.DISCOVERY_ENDPOINT = "http://discovery.test";
+  process.env.METABOB_API_KEY = KEY;
   mkdirSync(SRC);
   g(SRC, "init", "-q", "-b", "dev");
   writeFileSync(join(SRC, "a.txt"), "one\n");
@@ -74,6 +79,7 @@ beforeEach(() => {
 afterAll(() => {
   globalThis.fetch = realFetch;
   if (savedDiscovery === undefined) delete process.env.DISCOVERY_ENDPOINT; else process.env.DISCOVERY_ENDPOINT = savedDiscovery;
+  if (savedKey === undefined) delete process.env.METABOB_API_KEY; else process.env.METABOB_API_KEY = savedKey;
   rmSync(T, { recursive: true, force: true });
 });
 
@@ -173,6 +179,19 @@ describe("walk_trees_reclaim", () => {
     if ("error" in r || "error" in w) throw new Error(JSON.stringify([r, w]));
     expect(r.removed).not.toContain(w.cwd);
     expect(existsSync(w.cwd)).toBe(true);
+  });
+
+  it("every records read says who is asking: without the node key, records refuses and nothing is removed (a pin)", async () => {
+    const [c1, c2] = ["super-k1", "super-k2"].map(clone);
+    world([...made(c1, "R1"), ...made(c2, "R1")], ["R9"]);
+    delete process.env.METABOB_API_KEY;
+    const refused = await reclaimWalkTrees(env);
+    process.env.METABOB_API_KEY = KEY;
+    expect("error" in refused).toBe(true);
+    expect([c1, c2].map(existsSync)).toEqual([true, true]);
+    const r = await reclaimWalkTrees(env); // with the key: the older unchanged clone goes
+    if ("error" in r) throw new Error(r.error);
+    expect(r.removed).toEqual([c1]);
   });
 
   it("never touches what is not a whole clone directly under the clones directory (a guard)", async () => {

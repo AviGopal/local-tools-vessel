@@ -14,7 +14,9 @@ export type Row = { id: string; shape?: string; role?: string; pointer_type?: st
 export type Query = { shape?: string; where?: Record<string, unknown>; ids?: string[] };
 
 /** Rows matching a records query (a shape, top-level field equality, ids), read from records through discovery. */
-export const readRows = async (q: Query): Promise<Row[] | { error: string }> => {
+// One request to records through discovery, under the node key: every read here goes through it, so none can drift
+// from the others in where it goes or how it says who is asking (records answers 401 to a request with no key).
+export const resolveRecords = async (pointer: Record<string, unknown>): Promise<{ ok: true; body: unknown } | { error: string }> => {
   const discovery = process.env.DISCOVERY_ENDPOINT?.trim();
   if (!discovery) return { error: "no discovery endpoint is configured: the walk's rows cannot be read" };
   const key = process.env.METABOB_API_KEY ?? "";
@@ -22,16 +24,21 @@ export const readRows = async (q: Query): Promise<Row[] | { error: string }> => 
     const r = await fetch(new URL("/resolve", discovery).href, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
-      body: JSON.stringify({ pointer: { type: "record_read", ...q } }),
+      body: JSON.stringify({ pointer: { type: "record_read", ...pointer } }),
       signal: AbortSignal.timeout(15_000),
     });
-    if (!r.ok) return { error: `records answered ${r.status} for ${q.shape ?? "the"} rows` };
-    const body = (await r.json()) as unknown;
-    const rows = Array.isArray(body) ? body : (body as { content?: unknown })?.content;
-    return Array.isArray(rows) ? (rows as Row[]) : { error: `records answered no list for ${q.shape ?? "the"} rows` };
+    if (!r.ok) return { error: `records answered ${r.status}` };
+    return { ok: true, body: (await r.json()) as unknown };
   } catch (e) {
     return { error: `records could not be read: ${(e as Error).name}` };
   }
+};
+
+export const readRows = async (q: Query): Promise<Row[] | { error: string }> => {
+  const r = await resolveRecords(q);
+  if ("error" in r) return { error: `${r.error} (${q.shape ?? "the"} rows)` };
+  const rows = Array.isArray(r.body) ? r.body : (r.body as { content?: unknown })?.content;
+  return Array.isArray(rows) ? (rows as Row[]) : { error: `records answered no list for ${q.shape ?? "the"} rows` };
 };
 
 const readHops = (pointerType: string) => readRows({ shape: "hop", where: { pointer_type: pointerType, phase: "ended" } });
@@ -66,26 +73,14 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
 
 /** The roots records lists as open for each walk (by its arm rows), or why they could not be read. */
 export async function openRoots(walks: string[]): Promise<Set<string> | { error: string }> {
-  const discovery = process.env.DISCOVERY_ENDPOINT?.trim();
-  if (!discovery) return { error: "no discovery endpoint is configured: the open roots cannot be read" };
-  const key = process.env.METABOB_API_KEY ?? "";
   const open = new Set<string>();
   for (const episode of walks) {
-    try {
-      const r = await fetch(new URL("/resolve", discovery).href, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
-        body: JSON.stringify({ pointer: { type: "record_read", episode, roots: "all" } }),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!r.ok) return { error: `records answered ${r.status} for the open roots` };
-      const body = (await r.json()) as { roots?: unknown; content?: { roots?: unknown } };
-      const roots = Array.isArray(body?.roots) ? body.roots : body?.content?.roots;
-      if (!Array.isArray(roots)) return { error: "records answered no list of open roots" };
-      for (const x of roots as Array<{ root?: { id?: unknown } }>) if (typeof x?.root?.id === "string") open.add(x.root.id);
-    } catch (e) {
-      return { error: `the open roots could not be read: ${(e as Error).name}` };
-    }
+    const r = await resolveRecords({ episode, roots: "all" });
+    if ("error" in r) return { error: `${r.error} (the open roots)` };
+    const body = r.body as { roots?: unknown; content?: { roots?: unknown } };
+    const roots = Array.isArray(body?.roots) ? body.roots : body?.content?.roots;
+    if (!Array.isArray(roots)) return { error: "records answered no list of open roots" };
+    for (const x of roots as Array<{ root?: { id?: unknown } }>) if (typeof x?.root?.id === "string") open.add(x.root.id);
   }
   return open;
 }
