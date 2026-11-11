@@ -63,7 +63,8 @@ const JUDGES_EVERYWHERE = ["scripts/git-hooks/**", ".git-hooks/**", "scripts/sub
 const JUDGES_BY_REPO: Record<string, string[]> = {
   // The super-repo pre-commit runs the glue tests from the change's own tree.
   super: ["validation/scripts/**"],
-  "local-tools-vessel": ["src/git-commit.ts", "src/git-worktree.ts", "src/walk-rows.ts", "src/index.ts", "src/shell-containment.ts",
+  // Every file on the landing path decides whether a change lands.
+  "local-tools-vessel": ["src/git-*.ts", "src/walk-rows.ts", "src/index.ts", "src/shell-containment.ts",
     "src/write-containment.ts", "src/agent-shell-env.ts", "src/shell-privilege.ts"],
   "records-vessel": ["src/**"],
 };

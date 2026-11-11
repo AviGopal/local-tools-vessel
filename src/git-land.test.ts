@@ -88,31 +88,41 @@ describe("git_land", () => {
 
   it("[MUST-FAIL] a grader's r 1 lands only from exactly the request and the walk's gitDiff of this tree", async () => {
     const { cwd, tree } = await change("b.txt", "b\n");
-    const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree } as Row;
+    const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
     const other = { id: "x1", shape: "fileContent", role: "described" } as Row;
     table = [ask, diff, other, { id: "v3", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1", "x1"] }];
     expect("error" in (await landClone(cwd, deps))).toBe(true);
     table = [ask, diff, { id: "v4", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["x1", "d1"] }, other];
     expect("error" in (await landClone(cwd, deps))).toBe(true);
-    table = [ask, diff, { id: "v5", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1"] }];
+    // an owner's configuration row is not the request
+    const channel = { id: "ch1", shape: "channel", role: "owner" } as Row;
+    table = [ask, channel, { ...diff, input_refs: ["ch1"] }, { id: "v15", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ch1", "d1"] }];
+    expect("error" in (await landClone(cwd, deps))).toBe(true);
+    // a diff made for another request is not this request's change
+    const ask2 = { id: "ask2", shape: "world_changed", role: "person" } as Row;
+    table = [ask, ask2, { ...diff, input_refs: ["ask2"] }, { id: "v16", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1"] }];
+    expect("error" in (await landClone(cwd, deps))).toBe(true)
+    table = [ask, diff, { id: "v5", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, writer: "described-x", input_refs: ["ask1", "d1"] }];
     const r = await landClone(cwd, deps);
     expect("pushed" in r && r.verdict_ref).toBe("v5");
+    expect("pushed" in r && r.verdict_by).toBe("described-x");
   });
 
   it("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
     const { cwd, tree } = await change("c.txt", "c\n");
-    const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree } as Row;
+    const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
     const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, input_refs: ["ask1", "d2"] } as Row;
     const yes = { id: "v7", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d2"] } as Row;
     table = [ask, diff, no, yes];
     expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("r 0");
-    table = [ask, diff, no, yes, { id: "v8", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
-    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+    table = [ask, diff, no, yes, { id: "v8", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, writer: "kid-person" }];
+    const r = await landClone(cwd, deps);
+    expect("pushed" in r && r.verdict_by).toBe("kid-person");
   });
 
   it("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
     const { cwd, tree } = await change("scripts/substrate/gate/x.sh", "x\n");
-    const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree } as Row;
+    const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
     table = [ask, diff, { id: "v9", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d3"] }];
     const r = await landClone(cwd, deps);
     expect(String((r as { error: string }).error)).toContain("only a person's verdict");
@@ -184,5 +194,14 @@ describe("git_land", () => {
     expect(r.diff).toContain("+j");
     expect(r.truncated).toBe(false);
     expect(r.repo).toBe("demo");
+  });
+
+  it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {
+    const { judgesOf } = await import("./git-commit");
+    const judges = await judgesOf(ORIGIN, { base: "dev", repo: "local-tools-vessel" });
+    for (const p of ["src/git-land.ts", "src/git-commit.ts", "src/git-worktree.ts", "src/walk-rows.ts"]) {
+      expect(judges.some((g) => new Bun.Glob(g).match(p))).toBe(true);
+    }
+    expect(judges.some((g) => new Bun.Glob(g).match("src/fs-read.ts"))).toBe(false);
   });
 });
