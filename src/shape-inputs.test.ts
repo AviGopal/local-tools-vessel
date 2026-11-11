@@ -63,6 +63,14 @@ describe("declared shape inputs", () => {
     expect(process.env.DISCOVERY_ENDPOINT).toBe("http://127.0.0.1:9")
   })
 
+  it("[MUST-FAIL] fs_edit's contract says old_string is copied from an fs_read of the file, never words about the change", () => {
+    const edit = SHAPE_INPUTS.fs_edit as unknown as { properties: Record<string, { description?: string }> }
+    expect(SHAPE_DESCRIPTIONS.fs_edit).toContain("fs_read")
+    expect(SHAPE_DESCRIPTIONS.fs_edit).toContain("read the file first")
+    expect(String(edit.properties.old_string.description)).toContain("character for character")
+    expect(String(edit.properties.old_string.description)).toContain("never words about the change")
+  })
+
   it("every described shape is declared, and the other way round", () => {
     expect(Object.keys(SHAPE_DESCRIPTIONS).sort()).toEqual(Object.keys(SHAPE_INPUTS).sort())
   })

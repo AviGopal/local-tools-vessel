@@ -20,7 +20,11 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
   fs_write: object(["path", "content"], { path: PATH, content: { type: "string" } }),
   fs_edit: object(["path", "old_string", "new_string"], {
     path: PATH,
-    old_string: { type: "string", minLength: 1, description: "An exact substring of the file, as fs_read returned it." },
+    old_string: {
+      type: "string", minLength: 1,
+      description: "Text copied character for character from the file as fs_read returned it (read the file first): the " +
+        "lines being replaced, never words about the change.",
+    },
     new_string: { type: "string" },
   }),
   code_read_lines: object(["path", "start_line", "end_line"], { path: PATH, start_line: LINE, end_line: LINE }),
@@ -56,7 +60,8 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
 export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   fs_read: "Reads a file and returns its content.",
   fs_write: "Writes content to a file, replacing it.",
-  fs_edit: "Replaces one exact substring of a file with new text.",
+  fs_edit: "Replaces one exact substring of a file with new text. old_string is copied from the file as fs_read " +
+    "returned it, so read the file first; a refusal quotes the file's closest real lines to copy from.",
   code_read_lines: "Returns lines start_line..end_line of a file, numbered.",
   code_replace_lines: "Replaces lines start_line..end_line of a file with text.",
   code_insert_after_line: "Inserts text after a line of a file.",
