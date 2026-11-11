@@ -245,7 +245,6 @@ export function runDir(cwd: string | undefined): string {
 }
 
 export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, extraEnv?: Record<string, string>, callerTag?: string) {
-  cwd = runDir(cwd);
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
@@ -295,6 +294,9 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
     probe.slotAcquired();
     let done = (): Promise<void> => Promise.resolve();
     try {
+      // Inside the instrumented block, so a refused directory still leaves its end line (end_kind error) and the 422 still
+      // reaches the caller.
+      cwd = runDir(cwd);
       // Unprivileged when this vessel runs as root (shell-privilege.ts).
       const run = agentShellSpawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], agentShellEnv(process.env, extraEnv), tmpdir());
       done = run.done;
