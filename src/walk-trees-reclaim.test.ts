@@ -194,6 +194,46 @@ describe("walk_trees_reclaim", () => {
     expect(r.removed).toEqual([c1]);
   });
 
+  it("[MUST-FAIL] answers what it did with every clone it looked at, and why", async () => {
+    const [c1, c2, c3] = ["super-m1", "super-m2", "super-m3"].map(clone);
+    world([...made(c1, "R1"), ...made(c2, "R2"), ...made(c3, "R1")], ["R2"]);
+    const r = await reclaimWalkTrees(env);
+    if ("error" in r) throw new Error(r.error);
+    const did = Object.fromEntries(r.decisions.map((d) => [d.cwd, d.did]));
+    expect(did).toEqual({ [c3]: "kept", [c2]: "kept", [c1]: "removed" }); // c3 newest (handed out again), c2 open, c1 goes
+    expect(r.decisions.every((d) => d.why.length > 0)).toBe(true);
+    expect(r.more).toBe(false);
+  });
+
+  it("[MUST-FAIL] answers within its budget: past it, it stops looking and says more remain, removing nothing unseen", async () => {
+    const [c1, c2] = ["super-n1", "super-n2"].map(clone);
+    world([...made(c1, "R1"), ...made(c2, "R1")], ["R9"]);
+    const r = await reclaimWalkTrees(env, undefined, -1);
+    if ("error" in r) throw new Error(r.error);
+    expect(r.more).toBe(true);
+    expect(r.removed).toEqual([]);
+    expect([c1, c2].map(existsSync)).toEqual([true, true]);
+  });
+
+  it("[MUST-FAIL] a reclaim already running answers a second call at once that it is busy", async () => {
+    const [c1, c2] = ["super-p1", "super-p2"].map(clone);
+    world([...made(c1, "R1"), ...made(c2, "R1")], ["R9"]);
+    let release!: () => void;
+    const gate = new Promise<void>((res) => { release = res; });
+    let removing = false;
+    const first = reclaimWalkTrees(env, async (p) => { removing = true; await gate; rmSync(p, { recursive: true }); });
+    for (let i = 0; i < 200 && !removing; i++) await Bun.sleep(10);
+    const second = await Promise.race([reclaimWalkTrees(env), Bun.sleep(1000).then(() => null)]);
+    release(); // whatever the second call did, let the first finish so nothing after this waits on it
+    if (second === null) throw new Error("the second call waited behind the first instead of answering busy");
+    if ("error" in second) throw new Error(second.error);
+    expect(second.busy).toBe(true);
+    expect(second.removed).toEqual([]);
+    const r = await first;
+    if ("error" in r) throw new Error(r.error);
+    expect(r.removed).toEqual([c1]);
+  });
+
   it("never touches what is not a whole clone directly under the clones directory (a guard)", async () => {
     const outside = join(T, "outside-clone");
     if (!existsSync(outside)) { g(T, "clone", "-q", SRC, outside); g(outside, "checkout", "-q", "-b", "walk/outside-clone"); }
