@@ -117,6 +117,20 @@ describe("configuredToolRoots (the live configuration)", () => {
     ]) expect(confinePath(p, live)).not.toBeNull();
   });
 
+  it("[MUST-FAIL] serves the change clones git_worktree makes, so a later call can read and edit in the clone's cwd", () => {
+    const cwd = "/workspace/git/walk-trees/super-abc-12345678";
+    expect(confinePath(`${cwd}/README.md`, live)).not.toBeNull();
+    expect(confinePath(cwd, live)).not.toBeNull();
+    const moved = configuredToolRoots({ ...LIVE, WALK_TREES_DIR: "/srv/trees" }, "/tmp");
+    expect(confinePath("/srv/trees/super-x/README.md", moved)).not.toBeNull();
+  });
+
+  it("a WALK_TREES_DIR naming a protected location is still dropped (a guard)", () => {
+    const roots = configuredToolRoots({ ...LIVE, WALK_TREES_DIR: "/etc" }, "/tmp");
+    expect(roots.includes("/etc")).toBe(false);
+    expect(confinePath("/etc/substrate/env", roots)).toBeNull();
+  });
+
   it("an unset WORKSPACE_ROOT does not open the whole workspace", () => {
     const roots = configuredToolRoots({}, "/tmp");
     expect(roots.includes("/workspace")).toBe(false);

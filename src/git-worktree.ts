@@ -10,10 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
+import { walkTreesDir } from "./tool-roots.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
-// A bootstrap location, like the protected ones beside it: where change clones are made.
-export const walkTreesDir = (env: Env): string => env.WALK_TREES_DIR?.trim() || "/workspace/git/walk-trees";
+// Where change clones are made: also a tool root (tool-roots.ts), so the file tools work in a clone's cwd.
+export { walkTreesDir };
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 

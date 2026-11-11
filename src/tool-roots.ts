@@ -100,18 +100,25 @@ export const WORKSPACE_DATA_DIRS: readonly string[] = [
   "repos", "scripts/substrate/units",
 ];
 
+// A bootstrap location, like the protected ones beside it: where change clones are made (git_worktree).
+export const walkTreesDir = (env: Record<string, string | undefined>): string => env.WALK_TREES_DIR?.trim() || "/workspace/git/walk-trees";
+
 /**
  * The configured roots, from the settings the fleet already uses for them:
  * WORKSPACE_ROOT (this vessel's relative-path anchor), MITOSIS_RUNTIME_DIR (the
  * running vessel tree), MITOSIS_PUSH_CLONE_DIR and COMPOSE_WS_DIR (the clones and
  * compose worktrees /vessels symlinks point into; defaults as in
  * development-vessel's compose-workspace.ts), EXTRA_WORKSPACE_ROOTS (the fleet's
- * existing comma-separated extension), the temp dir, and the data dirs above.
+ * existing comma-separated extension), the temp dir, the data dirs above, and
+ * WALK_TREES_DIR (the change clones git_worktree makes: a later call on the change
+ * reads and edits the files in the cwd that clone's answer names, so that cwd must
+ * be inside a root, whatever WORKSPACE_ROOT is).
  */
 export function configuredToolRoots(env: Record<string, string | undefined>, tmp: string): string[] {
   const workspace = "/workspace";
   return toolRoots([
     env.WORKSPACE_ROOT ?? workspace,
+    walkTreesDir(env),
     env.MITOSIS_RUNTIME_DIR ?? "/vessels",
     env.MITOSIS_PUSH_CLONE_DIR ?? `${workspace}/git/vessels`,
     env.COMPOSE_WS_DIR ?? `${workspace}/git/compose`,
