@@ -26,7 +26,8 @@ import { containShell } from "./shell-containment.js";
 import { runAllowlistedScript } from "./script-runner.js";
 import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
-import { landClone } from "./git-land.js";
+import { diffClone, landClone } from "./git-land.js";
+import { madeClone } from "./walk-rows.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
@@ -529,8 +530,14 @@ const gitStatus: ResolverHandler = async (ctx) =>
     .catch(e => ({ error: (e as Error).message }));
 
 const gitDiff: ResolverHandler = async (ctx) => {
+  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  // A clone git_worktree made answers its committed change, with the tree it would land as: what a grader judges.
+  if (cwd) {
+    const made = await madeClone(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
+    if (made && !("error" in made)) return diffClone(made.cwd, made).catch(e => ({ error: (e as Error).message }));
+  }
   const staged = (ctx.body as Record<string,unknown>)?.staged === true;
-  return sh(staged ? "git diff --staged" : "git diff", str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"))
+  return sh(staged ? "git diff --staged" : "git diff", cwd)
     .then(r => ({ shape: "gitDiff", ...r })).catch(e => ({ error: (e as Error).message }));
 };
 

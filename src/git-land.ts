@@ -42,6 +42,45 @@ async function trusted(args: string[], cwd: string, home: string, opts: { creden
   return { stdout, stderr, exit_code };
 }
 
+export type Trusted = {
+  repo: string; origin: string; head: string; tree: string;
+  out: (args: string[]) => Promise<string | null>;
+  step: (args: string[], what: string, opts?: { credential?: boolean; transports?: string[] }) => Promise<Run | { error: string }>;
+};
+
+/**
+ * The clone's commits since its base, in a fresh bare repository this vessel owns under `work`, beside origin's branch
+ * fetched afresh: refs/remotes/origin/<branch> and refs/land/head. The commits leave the clone only as a bundle the
+ * shell user writes (data, no config), so nothing of the clone's config, refs or index is read here.
+ */
+export async function intoTrusted(cwd: string, made: Made, work: string, transports: string[]): Promise<Trusted | { error: string; stderr?: string }> {
+  const drop = agentWritableDir(join(work, "drop"));
+  const bundle = join(drop, "change.bundle");
+  const b = await git(["bundle", "create", bundle, `${made.base}..HEAD`], cwd);
+  if (b.exit_code !== 0) return { error: "the clone's commits could not be bundled", stderr: b.stderr.slice(-500) };
+  const repo = join(work, "repo.git");
+  const step = async (args: string[], what: string, opts: { credential?: boolean; transports?: string[] } = {}): Promise<Run | { error: string }> => {
+    const r = await trusted(args, repo, work, opts);
+    return r.exit_code === 0 ? r : { error: `${what} failed`, stderr: r.stderr.slice(-500) } as { error: string };
+  };
+  const init = await trusted(["init", "--quiet", "--bare", repo], work, work);
+  if (init.exit_code !== 0) return { error: "a repository to check the change in could not be made" };
+  const origin = `refs/remotes/origin/${made.branch}`;
+  for (const [args, what, opts] of [
+    [["fetch", "--quiet", made.origin_url, `refs/heads/${made.branch}:${origin}`], `fetching ${made.branch} from origin`, { transports }],
+    [["bundle", "verify", bundle], "verifying the bundle", { transports: ["file"] }],
+    [["fetch", "--quiet", bundle, "HEAD:refs/land/head"], "reading the bundle", { transports: ["file"] }],
+  ] as Array<[string[], string, { transports: string[] }]>) {
+    const r = await step(args, what, opts);
+    if ("error" in r) return r;
+  }
+  const out = async (args: string[]) => { const r = await trusted(args, repo, work); return r.exit_code === 0 ? r.stdout.trim() : null; };
+  const head = await out(["rev-parse", "refs/land/head"]);
+  const tree = await out(["rev-parse", "refs/land/head^{tree}"]);
+  if (!head || !tree) return { error: "the bundle carried no commit" };
+  return { repo, origin, head, tree, out, step };
+}
+
 export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
       needs_person: string[]; verdict_ref: string; scan: { ran: true; rules: string[] }; pushed: true }
@@ -58,32 +97,9 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
 
   const work = mkdtempSync(join(tmpdir(), "land-"));
   try {
-    // The clone's commits, as data the shell user writes into a directory handed to it.
-    const drop = agentWritableDir(join(work, "drop"));
-    const bundle = join(drop, "change.bundle");
-    const b = await git(["bundle", "create", bundle, `${made.base}..HEAD`], cwd);
-    if (b.exit_code !== 0) return { error: "the clone's commits could not be bundled", stderr: b.stderr.slice(-500) };
-
-    const repo = join(work, "repo.git");
-    const step = async (args: string[], what: string, opts: { credential?: boolean; transports?: string[] } = {}): Promise<Run | { error: string }> => {
-      const r = await trusted(args, repo, work, opts);
-      return r.exit_code === 0 ? r : { error: `${what} failed`, stderr: r.stderr.slice(-500) } as { error: string };
-    };
-    const init = await trusted(["init", "--quiet", "--bare", repo], work, work);
-    if (init.exit_code !== 0) return { error: "a repository to check the change in could not be made" };
-    const origin = `refs/remotes/origin/${made.branch}`;
-    for (const [args, what, opts] of [
-      [["fetch", "--quiet", made.origin_url, `refs/heads/${made.branch}:${origin}`], `fetching ${made.branch} from origin`, { transports: d.transports }],
-      [["bundle", "verify", bundle], "verifying the bundle", { transports: ["file"] }],
-      [["fetch", "--quiet", bundle, "HEAD:refs/land/head"], "reading the bundle", { transports: ["file"] }],
-    ] as Array<[string[], string, { transports: string[] }]>) {
-      const r = await step(args, what, opts);
-      if ("error" in r) return r;
-    }
-    const out = async (args: string[]) => { const r = await trusted(args, repo, work); return r.exit_code === 0 ? r.stdout.trim() : null; };
-    const head = await out(["rev-parse", "refs/land/head"]);
-    const tree = await out(["rev-parse", "refs/land/head^{tree}"]);
-    if (!head || !tree) return { error: "the bundle carried no commit" };
+    const t = await intoTrusted(cwd, made, work, d.transports);
+    if ("error" in t) return t;
+    const { repo, origin, head, tree, out } = t;
     if ((await trusted(["merge-base", "--is-ancestor", origin, "refs/land/head"], repo, work)).exit_code !== 0) {
       return { error: `the change does not fast-forward origin's ${made.branch}: it moved since the clone was made` };
     }
@@ -116,7 +132,7 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     // No hooks run beside the credential: an empty directory this vessel owns.
     const hooksDir = mkdtempSync(join(work, "hooks-"));
     chmodSync(hooksDir, 0o555);
-    const push = await step(["-c", `core.hooksPath=${hooksDir}`, "push", "--quiet", made.origin_url, `refs/land/head:refs/heads/${made.branch}`],
+    const push = await t.step(["-c", `core.hooksPath=${hooksDir}`, "push", "--quiet", made.origin_url, `refs/land/head:refs/heads/${made.branch}`],
       "the push", { credential: true, transports: d.transports });
     if ("error" in push) return { ...push, tree, head };
     return { shape: "gitLand", cwd, repo: made.repo, branch: made.branch, head, tree, changed, needs_person, verdict_ref: verdict.id,
@@ -149,4 +165,27 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
     if (asked.length === 1 && (asked[0].role === "person" || asked[0].role === "owner")) return { id: v.id };
   }
   return { error: "no verdict approves this tree: a person's r 1, or a grader's r 1 from exactly the request and this tree's gitDiff" };
+}
+
+// What a grader reads to judge a change: the diff that would land, with the tree it lands as. A diff bigger than this
+// is cut and says so, so a grader never judges a part it was not shown as if it were the whole.
+const DIFF_MAX = 64 * 1024;
+
+export type DiffResult =
+  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean }
+  | { error: string; stderr?: string };
+
+/** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
+export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports): Promise<DiffResult> {
+  const work = mkdtempSync(join(tmpdir(), "diff-"));
+  try {
+    const t = await intoTrusted(cwd, made, work, transports);
+    if ("error" in t) return t;
+    const base = await t.out(["rev-parse", t.origin]);
+    const diff = await t.out(["diff", "--no-renames", t.origin, "refs/land/head"]);
+    if (base === null || diff === null) return { error: "the change's diff could not be read" };
+    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX };
+  } finally {
+    try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
+  }
 }

@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
-import { landClone } from "./git-land";
+import { diffClone, landClone } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
 
@@ -172,5 +172,17 @@ describe("git_land", () => {
       expect("pushed" in (await landClone(cwd, deps))).toBe(true);
     } finally { if (keep === undefined) delete process.env.GIT_CONFIG_SYSTEM; else process.env.GIT_CONFIG_SYSTEM = keep; }
     expect(await Bun.file(join(T, "PRE_PUSH_RAN")).exists()).toBe(false);
+  });
+
+  it("[MUST-FAIL] git_diff of a made clone answers the committed change with the tree it would land as", async () => {
+    const { cwd, tree } = await change("j.txt", "j\n");
+    g(cwd, "config", "diff.external", "/bin/false"); // the clone's config is never read
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.tree).toBe(tree);
+    expect(r.base).toBe(originHead());
+    expect(r.diff).toContain("+j");
+    expect(r.truncated).toBe(false);
+    expect(r.repo).toBe("demo");
   });
 });
