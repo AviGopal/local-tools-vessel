@@ -2,29 +2,41 @@
 // it, checked by the super-repo's hooks as of that making, without this vessel's credentials and without a shell.
 // Everything runs against throwaway repositories; records is a stub answering the walk's rows.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
 import { makeWorktree } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
 
+// Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
+// fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
 const T = mkdtempSync(join(tmpdir(), "git-commit-test-"));
+chmodSync(T, 0o755);
+const OUT = join(T, "out");
+mkdirSync(OUT);
+chmodSync(OUT, 0o777);
 const PAT = "pat-value-that-must-not-reach-a-hook";
 const ENV_KEYS = ["DISCOVERY_ENDPOINT", "GITHUB_PUSH_TOKEN", "SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const realFetch = globalThis.fetch;
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const g = (cwd: string, ...args: string[]) => {
-  const r = Bun.spawnSync(["git", ...args], { cwd, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["git", ...args], { cwd, env: { ...gitEnv, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*" }, stdout: "pipe", stderr: "pipe" });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
   return r.stdout.toString().trim();
+};
+// A node gives commits their author from its system git config; a test clone gets one of its own. And what this test
+// writes into a clone as itself is handed back to the clone's owner, the shell user when the test runs as root.
+const asOwner = (cwd: string) => {
+  g(cwd, "config", "user.name", "t"); g(cwd, "config", "user.email", "t@t");
+  if (process.getuid?.() === 0) Bun.spawnSync(["chown", "-R", "65534:65534", cwd]);
 };
 const commitAll = (cwd: string, m: string) => { g(cwd, "add", "-A"); g(cwd, "commit", "-q", "-m", m); };
 
 // Each hook records which one ran and the env it ran with, and refuses while a BLOCK file is in the change.
 const hook = (name: string, extra = "") =>
-  `#!/bin/sh\necho ${name} >> "${T}/hooks-ran.txt"\nenv > "${T}/hook-env.txt"\n${extra}[ -e BLOCK ] && { echo blocked >&2; exit 1; }\nexit 0\n`;
+  `#!/bin/sh\necho ${name} >> "${OUT}/hooks-ran.txt"\nenv > "${OUT}/hook-env.txt"\n${extra}[ -e BLOCK ] && { echo blocked >&2; exit 1; }\nexit 0\n`;
 const SUPER = join(T, "super");
 const CLONES = join(T, "clones");
 
@@ -34,6 +46,7 @@ const clone = async (repo: string): Promise<string> => {
   const w = await makeWorktree(repo);
   if ("error" in w) throw new Error(w.error);
   made.set(w.cwd, w);
+  asOwner(w.cwd);
   return w.cwd;
 };
 
@@ -94,6 +107,7 @@ describe("git_commit", () => {
     mkdirSync(join(cwd, ".git-hooks"));
     writeFileSync(join(cwd, ".git-hooks", "pre-commit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     g(cwd, "config", "core.hooksPath", ".git-hooks");
+    asOwner(cwd);
     writeFileSync(join(cwd, "BLOCK"), "x\n");
     const r = await commitInClone(cwd, "weaken the gate", undefined, find);
     expect("error" in r && r.error).toContain("refused");
@@ -104,7 +118,7 @@ describe("git_commit", () => {
     const cwd = await clone("demo");
     writeFileSync(join(cwd, "a.txt"), "three\n");
     expect("sha" in (await commitInClone(cwd, "an ordinary change", undefined, find))).toBe(true);
-    const seen = readFileSync(join(T, "hook-env.txt"), "utf8");
+    const seen = readFileSync(join(OUT, "hook-env.txt"), "utf8");
     expect(seen).toContain("PATH=");
     expect(seen).not.toContain(PAT);
     expect(seen).not.toContain("GITHUB_PUSH_TOKEN");
@@ -115,6 +129,7 @@ describe("git_commit", () => {
     mkdirSync(join(cwd, "scripts", "substrate", "gate"), { recursive: true });
     writeFileSync(join(cwd, "scripts", "substrate", "gate", "x.sh"), "x\n");
     commitAll(cwd, "slipped in by hand"); // the clone's own HEAD now carries the gate change
+    asOwner(cwd)
     writeFileSync(join(cwd, "a.txt"), "four\n");
     const r = await commitInClone(cwd, "an ordinary-looking change", undefined, find);
     if (!("sha" in r)) throw new Error(JSON.stringify(r));
@@ -153,14 +168,14 @@ describe("git_commit", () => {
   });
 
   it("a vessel change runs the vessel hook and a super-repo change the super hook; a skipped secrets scan is reported", async () => {
-    const before = existsSync(join(T, "hooks-ran.txt")) ? readFileSync(join(T, "hooks-ran.txt"), "utf8").split("\n").length : 1;
+    const before = existsSync(join(OUT, "hooks-ran.txt")) ? readFileSync(join(OUT, "hooks-ran.txt"), "utf8").split("\n").length : 1;
     const v = await clone("demo");
     writeFileSync(join(v, "a.txt"), "six\n");
     const rv = await commitInClone(v, "vessel change", undefined, find);
     const s = await clone("super");
     writeFileSync(join(s, "README.md"), "x\n");
     const rs = await commitInClone(s, "super change", undefined, find);
-    const ran = readFileSync(join(T, "hooks-ran.txt"), "utf8").split("\n").slice(before - 1).filter(Boolean);
+    const ran = readFileSync(join(OUT, "hooks-ran.txt"), "utf8").split("\n").slice(before - 1).filter(Boolean);
     expect(ran).toEqual(["vessel-hook", "super-hook"]);
     expect("scan" in rv && rv.scan).toBe("skipped");
     expect("scan" in rs && rs.scan).toBe("ran");
@@ -168,7 +183,7 @@ describe("git_commit", () => {
 
   it("[MUST-FAIL] keeps the node's record-only hooks, but never its pre-commit, which would chain to the clone's own", async () => {
     const ledger = mkdtempSync(join(tmpdir(), "ledger-hooks-"));
-    writeFileSync(join(ledger, "post-commit"), `#!/bin/sh\necho recorded >> "${T}/ledger.txt"\n`, { mode: 0o755 });
+    writeFileSync(join(ledger, "post-commit"), `#!/bin/sh\necho recorded >> "${OUT}/ledger.txt"\n`, { mode: 0o755 });
     writeFileSync(join(ledger, "pre-commit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const sys = join(T, "gitconfig-system");
     writeFileSync(sys, `[core]\n\thooksPath = ${ledger}\n`);
@@ -178,7 +193,7 @@ describe("git_commit", () => {
       const cwd = await clone("demo");
       writeFileSync(join(cwd, "a.txt"), "eight\n");
       expect("sha" in (await commitInClone(cwd, "recorded", undefined, find))).toBe(true);
-      expect(readFileSync(join(T, "ledger.txt"), "utf8")).toContain("recorded");
+      expect(readFileSync(join(OUT, "ledger.txt"), "utf8")).toContain("recorded");
       writeFileSync(join(cwd, "BLOCK"), "x\n"); // the ledger's permissive pre-commit must not replace the super-repo's
       expect("error" in (await commitInClone(cwd, "blocked", undefined, find))).toBe(true);
     } finally {

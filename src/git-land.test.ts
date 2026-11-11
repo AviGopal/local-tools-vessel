@@ -2,7 +2,7 @@
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
@@ -10,14 +10,26 @@ import { diffClone, landClone } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
 
+// Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
+// fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
 const T = mkdtempSync(join(tmpdir(), "git-land-test-"));
+chmodSync(T, 0o755);
+const OUT = join(T, "out");
+mkdirSync(OUT);
+chmodSync(OUT, 0o777);
 const ENV_KEYS = ["SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const g = (cwd: string, ...args: string[]) => {
-  const r = Bun.spawnSync(["git", ...args], { cwd, env: gitEnv, stdout: "pipe", stderr: "pipe" });
+  const r = Bun.spawnSync(["git", ...args], { cwd, env: { ...gitEnv, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "*" }, stdout: "pipe", stderr: "pipe" });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
   return r.stdout.toString().trim();
+};
+// A node gives commits their author from its system git config; a test clone gets one of its own. And what this test
+// writes into a clone as itself is handed back to the clone's owner, the shell user when the test runs as root.
+const asOwner = (cwd: string) => {
+  g(cwd, "config", "user.name", "t"); g(cwd, "config", "user.email", "t@t");
+  if (process.getuid?.() === 0) Bun.spawnSync(["chown", "-R", "65534:65534", cwd]);
 };
 const commitAll = (cwd: string, m: string) => { g(cwd, "add", "-A"); g(cwd, "commit", "-q", "-m", m); };
 const SUPER = join(T, "super");
@@ -39,6 +51,7 @@ const change = async (file: string, text: string): Promise<{ cwd: string; tree: 
   const w = await makeWorktree("demo");
   if ("error" in w) throw new Error(w.error);
   made.set(w.cwd, w);
+  asOwner(w.cwd);
   mkdirSync(join(w.cwd, file, ".."), { recursive: true });
   writeFileSync(join(w.cwd, file), text);
   const c = await commitInClone(w.cwd, `change ${file}`, undefined, find);
@@ -152,6 +165,7 @@ describe("git_land", () => {
     writeFileSync(join(m.cwd, "g.txt"), "g\n"); commitAll(m.cwd, "side");
     g(m.cwd, "checkout", "-q", "-");
     g(m.cwd, "merge", "-q", "--no-edit", "side");
+    asOwner(m.cwd);
     table = [{ id: "v12", shape: "land_verdict", repo: "demo", tree: g(m.cwd, "rev-parse", "HEAD^{tree}"), role: "person", r: 1 }];
     expect(String((await landClone(m.cwd, deps) as { error: string }).error)).toContain("merge");
   });
@@ -172,6 +186,7 @@ describe("git_land", () => {
     mkdirSync(join(cwd, "evil"));
     writeFileSync(join(cwd, "evil", "pre-push"), `#!/bin/sh\ntouch "${T}/PRE_PUSH_RAN"\n`, { mode: 0o755 });
     g(cwd, "config", "core.hooksPath", join(cwd, "evil"));
+    asOwner(cwd);
     // and the node's own system hooks path (where the attempt ledger's hooks live) is not used beside the credential
     const sys = join(T, "gitconfig-system");
     writeFileSync(sys, `[core]\n\thooksPath = ${join(cwd, "evil")}\n`);

@@ -54,6 +54,8 @@ export type Trusted = {
  * shell user writes (data, no config), so nothing of the clone's config, refs or index is read here.
  */
 export async function intoTrusted(cwd: string, made: Made, work: string, transports: string[]): Promise<Trusted | { error: string; stderr?: string }> {
+  // The shell user must reach the directory handed to it, so `work` can be passed through (not listed or written).
+  chmodSync(work, 0o711);
   const drop = agentWritableDir(join(work, "drop"));
   const bundle = join(drop, "change.bundle");
   const b = await git(["bundle", "create", bundle, `${made.base}..HEAD`], cwd);
