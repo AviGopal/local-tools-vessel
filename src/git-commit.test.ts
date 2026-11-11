@@ -85,6 +85,23 @@ describe("git_worktree", () => {
     expect(readFileSync(join(w.cwd, "a.txt"), "utf8")).toBe("one\n");
   });
 
+  it("[MUST-FAIL] a clone nothing has changed is handed out again, not made again; one holding a change never is", async () => {
+    const trees = join(T, "trees");
+    const first = await makeWorktree("demo");
+    if ("error" in first) throw new Error(first.error);
+    const before = readdirSync(trees).length;
+    const again = await makeWorktree("demo");
+    if ("error" in again) throw new Error(again.error);
+    expect(again.cwd).toBe(first.cwd);
+    expect(readdirSync(trees).length).toBe(before);
+    // a change (an edit, or an untracked file) makes it someone's work: the next call gets a fresh clone
+    writeFileSync(join(first.cwd, "new.txt"), "x\n");
+    const fresh = await makeWorktree("demo");
+    if ("error" in fresh) throw new Error(fresh.error);
+    expect(fresh.cwd).not.toBe(first.cwd);
+    expect(readdirSync(trees).length).toBe(before + 1);
+  });
+
   it("refuses a name that is not a repo's, and a repo this node has no copy of", async () => {
     expect("error" in (await makeWorktree("../etc"))).toBe(true);
     expect(String((await makeWorktree("no-such-vessel") as { error: string }).error)).toContain("no copy");
@@ -139,7 +156,7 @@ describe("git_commit", () => {
     expect(r.tree).toBe(g(cwd, "rev-parse", "HEAD^{tree}"));
   });
 
-  it("[MUST-FAIL] a clone the walk's rows do not name exactly once, or that has landed, is refused", async () => {
+  it("[MUST-FAIL] a clone no walk row names, rows naming different clones there, or one that has landed, is refused", async () => {
     const cwd = await clone("demo");
     writeFileSync(join(cwd, "a.txt"), "five\n");
     const row = (id: string, pointer_type: string, output: object) => ({ id, role: "walk", shape: "hop", phase: "ended", pointer_type, output });
@@ -151,11 +168,14 @@ describe("git_commit", () => {
     };
     const w = made.get(cwd)!;
     answer({ git_worktree: [] });
-    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("0 walk rows");
-    answer({ git_worktree: [row("h1", "git_worktree", w), row("h2", "git_worktree", w)] });
-    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("2 walk rows");
+    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no walk row");
+    answer({ git_worktree: [row("h1", "git_worktree", w), row("h2", "git_worktree", { ...w, base: "0".repeat(40) })] });
+    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("2 walk rows record different clones");
     answer({ git_worktree: [{ ...row("h1", "git_worktree", w), role: "person" }] });
-    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("0 walk rows");
+    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no walk row");
+    // the same clone handed out twice: both rows agree, and the later one's super_base holds
+    answer({ git_worktree: [{ ...row("h1", "git_worktree", w), seq: 1 }, { ...row("h2", "git_worktree", { ...w, super_base: "f".repeat(40) }), seq: 2 }] });
+    expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: "f".repeat(40), origin_url: w.origin_url });
     answer({ git_worktree: [row("h1", "git_worktree", w)], git_land: [row("h3", "git_land", { cwd })] });
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("already landed");
     delete process.env.DISCOVERY_ENDPOINT;

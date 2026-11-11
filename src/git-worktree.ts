@@ -5,7 +5,7 @@
 // landing pushes. The answer names the clone, its base (the copy's HEAD it was cloned at) and the super-repo's HEAD,
 // whose hooks judge a commit in it. The walk records that answer in its hop row, and a commit or landing reads it back
 // from there (walk-rows.ts).
-import { mkdirSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
@@ -42,6 +42,11 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
 
   const trees = walkTreesDir(env);
   mkdirSync(trees, { recursive: true, mode: 0o755 });
+  // A clone nothing has changed yet (its own branch, at this base, from this origin, with no change and no commit) is
+  // exactly what a new one would be: it is handed out again, not made again. Every clone is a whole repository, and one
+  // made per call, with nothing removing them, filled a node's disk. A clone holding any change is never handed out.
+  const reused = await unchangedClone(trees, repo, base, origin);
+  if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin };
   const id = `${repo}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const cwd = agentWritableDir(join(trees, id));
   const steps: string[][] = [
@@ -56,4 +61,22 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
     if (r.exit_code !== 0) return { error: `git ${args.find((a) => !a.startsWith("-") && a !== cwd)} failed: ${r.stderr.slice(-500)}` };
   }
   return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin };
+}
+
+// The newest clone under `trees` of this repo that is still as made: its own walk/<name> branch, HEAD at `base`, origin
+// `origin`, nothing changed or untracked. Read as the shell user, who owns the clones.
+async function unchangedClone(trees: string, repo: string, base: string, origin: string): Promise<string | null> {
+  let names: string[];
+  try { names = readdirSync(trees).filter((n) => n.startsWith(`${repo}-`)).sort().reverse(); } catch { return null; }
+  for (const name of names) {
+    const dir = join(trees, name);
+    if (!isRepo(dir)) continue;
+    const out = async (args: string[]) => { const r = await git(["-C", dir, ...args], tmpdir()); return r.exit_code === 0 ? r.stdout.trim() : null; };
+    if ((await out(["rev-parse", "--abbrev-ref", "HEAD"])) !== `walk/${name}`) continue;
+    if ((await out(["rev-parse", "HEAD"])) !== base) continue;
+    if ((await out(["config", "--get", "remote.origin.url"])) !== origin) continue;
+    if ((await out(["status", "--porcelain", "--untracked-files=all"])) !== "") continue;
+    return dir;
+  }
+  return null;
 }
