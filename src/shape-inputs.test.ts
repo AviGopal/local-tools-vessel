@@ -40,7 +40,9 @@ describe("declared shape inputs", () => {
     })
     it(`${shape}: its handler, given exactly the required fields, does not ask for more`, async () => {
       const pointer = Object.fromEntries(schema.required.map((f) => [f, sample(f)]))
-      const out = await call(shape, pointer)
+      // A handler may refuse the request for another reason (a directory this host lacks is answered 422): only a demand
+      // for a field the schema does not declare fails this.
+      const out = await call(shape, pointer).catch((e: Error) => ({ error: e.message }))
       expect(String(out?.error ?? "")).not.toMatch(/required/i)
     }, 60_000)
   }

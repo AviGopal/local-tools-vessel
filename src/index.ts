@@ -20,6 +20,7 @@ import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
+import { existsSync } from "node:fs";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
 import { containShell } from "./shell-containment.js";
@@ -226,7 +227,25 @@ export function groupBounded(command: string, timeoutSec: number): string {
   ].join("\n");
 }
 
+// The directory a command runs in. A relative one is the workspace's, as every tool path is, never this vessel's own;
+// one that does not exist is named, because Bun reports a spawn in a missing directory as a missing setpriv, which
+// sent the walk to repeat the same call (a git_status in "repos/walk-vessel" failed five times so).
+// The request's own fault, answered with 422 (the resolver server passes a thrown 4xx status through), so the walk's
+// credit can tell it from an outage; a handler that turns its errors into a 200 body passes these through instead.
+const refusal = (message: string): Error => Object.assign(new Error(message), { status: 422 });
+const refusedOrError = (e: unknown): { error: string } => {
+  if (typeof (e as { status?: unknown } | null)?.status === "number") throw e;
+  return { error: (e as Error).message };
+};
+
+export function runDir(cwd: string | undefined): string {
+  const dir = resolvePath(DEFAULT_CWD, cwd ?? DEFAULT_CWD);
+  if (!existsSync(dir)) throw refusal(`no such directory: ${cwd ?? dir} (resolved to ${dir})`);
+  return dir;
+}
+
 export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, extraEnv?: Record<string, string>, callerTag?: string) {
+  cwd = runDir(cwd);
   // The shell resolver spawns bash WITHOUT inheriting an env, so `bun` (only at
   // /root/.bun/bin/bun) wasn't on PATH → `bun run typecheck` exited 127 →
   // every code-class feature_compose returned UNFAVORABLE and nothing landed.
@@ -328,7 +347,7 @@ const shell: ResolverHandler = async (ctx) => {
   // [sh-instrument] line; logged only when it is a short plain identifier.
   const callerTag = str(ctx.body, "impulse", "pointer", "caller_tag") ?? str(ctx.body, "caller_tag");
   return sh(command, str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd"), Number.isFinite(timeoutSec) ? timeoutSec : undefined, execution_id ? { SUBSTRATE_EXECUTION_ID: execution_id } : undefined, callerTag).then(r => ({ shape: "shellResult", ...r }))
-    .catch(e => ({ error: (e as Error).message }));
+    .catch(refusedOrError);
 };
 
 const fsRead: ResolverHandler = async (ctx) => {
@@ -380,7 +399,7 @@ const fsWrite: ResolverHandler = async (ctx) => {
     }
   } catch { /* existence probe is advisory — never block a legitimate write on a stat failure */ }
   return Bun.write(path, content).then(() => ({ shape: "fileWriteResult", path, ok: true }))
-    .catch(e => ({ error: (e as Error).message }));
+    .catch(refusedOrError);
 };
 
 const fsEdit: ResolverHandler = async (ctx) => {
@@ -481,7 +500,8 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
   const timeoutSec = Number((ctx.body as Record<string, unknown>)?.timeout ?? 10);
   if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) return { error: "timeout must be a positive number" };
   // The default cwd is owned by the shell's user, so the unprivileged child can write it.
-  const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? ((): string => { const d = "/workspace/tmp/bounded-shell"; try { agentWritableDir(d); } catch { /* spawn will report it */ } return d; })();
+  // Resolved once, as sh() does: a relative directory is the workspace's, a missing one refused 422 by name.
+  const cwd = runDir(str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd") ?? ((): string => { const d = "/workspace/tmp/bounded-shell"; try { agentWritableDir(d); } catch { /* spawn will report it */ } return d; })());
   // Same allowlisted env as sh() (agent-shell-env.ts): no inherited credentials.
   // Same reasoning as sh(): the in-shell watchdog kills the process GROUP at
   // timeoutSec, and Bun's own timeout trails it as a backstop.
@@ -527,18 +547,18 @@ const scriptRun: ResolverHandler = async (ctx) => {
 
 const gitStatus: ResolverHandler = async (ctx) =>
   sh("git status --porcelain", str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd")).then(r => ({ shape: "gitStatus", ...r }))
-    .catch(e => ({ error: (e as Error).message }));
+    .catch(refusedOrError);
 
 const gitDiff: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   // A clone git_worktree made answers its committed change, with the tree it would land as: what a grader judges.
   if (cwd) {
     const made = await madeClone(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
-    if (made && !("error" in made)) return diffClone(made.cwd, made).catch(e => ({ error: (e as Error).message }));
+    if (made && !("error" in made)) return diffClone(made.cwd, made).catch(refusedOrError);
   }
   const staged = (ctx.body as Record<string,unknown>)?.staged === true;
   return sh(staged ? "git diff --staged" : "git diff", cwd)
-    .then(r => ({ shape: "gitDiff", ...r })).catch(e => ({ error: (e as Error).message }));
+    .then(r => ({ shape: "gitDiff", ...r })).catch(refusedOrError);
 };
 
 const gitCommit: ResolverHandler = async (ctx) => {
@@ -564,19 +584,19 @@ const gitCommit: ResolverHandler = async (ctx) => {
   }
   const id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
   return commitInClone(resolvePath(DEFAULT_CWD, cwd ?? "."), message, id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)
-    .catch(e => ({ error: (e as Error).message }));
+    .catch(refusedOrError);
 };
 
 const gitLand: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   if (!cwd) return { error: "cwd is required" };
-  return landClone(resolvePath(DEFAULT_CWD, cwd)).catch(e => ({ error: (e as Error).message }));
+  return landClone(resolvePath(DEFAULT_CWD, cwd)).catch(refusedOrError);
 };
 
 const gitWorktree: ResolverHandler = async (ctx) => {
   const repo = str(ctx.body, "impulse", "pointer", "repo") ?? str(ctx.body, "repo");
   if (!repo) return { error: "repo is required" };
-  return makeWorktree(repo).catch(e => ({ error: (e as Error).message }));
+  return makeWorktree(repo).catch(refusedOrError);
 };
 
 // ── code-tool primitives (2026-06-10) ─────────────────────────────────────────
