@@ -11,7 +11,7 @@ import { madeClone, type Made } from "./walk-rows";
 
 const T = mkdtempSync(join(tmpdir(), "git-commit-test-"));
 const PAT = "pat-value-that-must-not-reach-a-hook";
-const ENV_KEYS = ["GITHUB_PUSH_TOKEN", "SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
+const ENV_KEYS = ["DISCOVERY_ENDPOINT", "GITHUB_PUSH_TOKEN", "SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const realFetch = globalThis.fetch;
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -38,7 +38,7 @@ const clone = async (repo: string): Promise<string> => {
 };
 
 beforeAll(() => {
-  Object.assign(process.env, { GITHUB_PUSH_TOKEN: PAT, SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: CLONES, WALK_TREES_DIR: join(T, "trees") });
+  Object.assign(process.env, { DISCOVERY_ENDPOINT: "http://discovery.test", GITHUB_PUSH_TOKEN: PAT, SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: CLONES, WALK_TREES_DIR: join(T, "trees") });
   for (const [k, v] of Object.entries(gitEnv)) if (k.startsWith("GIT_")) process.env[k] = v;
   mkdirSync(join(SUPER, "scripts", "git-hooks"), { recursive: true });
   g(SUPER, "init", "-q", "-b", "dev");
@@ -143,6 +143,9 @@ describe("git_commit", () => {
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("0 walk rows");
     answer({ git_worktree: [row("h1", "git_worktree", w)], git_land: [row("h3", "git_land", { cwd })] });
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("already landed");
+    delete process.env.DISCOVERY_ENDPOINT;
+    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no discovery endpoint");
+    process.env.DISCOVERY_ENDPOINT = "http://discovery.test";
     answer({ git_worktree: [row("h1", "git_worktree", w)] });
     expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: w.super_base, origin_url: w.origin_url });
     globalThis.fetch = realFetch;

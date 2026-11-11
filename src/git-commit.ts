@@ -13,6 +13,11 @@
 // accepted fixtures, tests the pinned hook runs from the change's own tree, this vessel's containment and landing code,
 // the records writer code, the walk's owner seed) is committed but marked needs_person: a landing then takes only a
 // person's verdict for it. Whether the hook's secrets scan ran is reported as scan, for the landing to require.
+//
+// NOT A TRUST BOUNDARY. git here runs as the shell user, in a clone the shell user owns, so the shell user could commit
+// without the pinned hook, or make this answer wrong (replace refs on the base, an fsmonitor, a rewritten index). That
+// gains it nothing it does not already have, but every value answered here (changed, needs_person, tree, scan) is
+// advisory: a landing recomputes all of it in a repository of its own before anything is pushed.
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

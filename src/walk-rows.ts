@@ -1,16 +1,22 @@
 // The walk's record of a change clone, read from records through discovery. git_worktree's answer is the output of the
 // walk's ended hop for that call, so what a clone's base is lives in a row the shell user cannot write (it holds no
 // records key), not in a file beside the clone. A commit or a landing in a clone takes its base from that row.
-
-const DISCOVERY = process.env.DISCOVERY_ENDPOINT ?? "http://127.0.0.1:8100";
+//
+// The read goes through discovery, the one configured endpoint, and under METABOB_API_KEY, which on a node is the node
+// key every vessel there holds: the same identity and route as every other service. With no discovery endpoint
+// configured the read is refused rather than sent to an address written here (index.ts and script-runner.ts still carry
+// such a fallback: named debt). A row with role walk is trusted as far as the node key is: any vessel on the node could
+// write one, a person key or the shell user (which holds no key) cannot.
 
 export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string };
 type Row = { id: string; role?: string; pointer_type?: string; phase?: string; output?: Record<string, unknown> };
 
 const readHops = async (pointerType: string): Promise<Row[] | { error: string }> => {
+  const discovery = process.env.DISCOVERY_ENDPOINT?.trim();
+  if (!discovery) return { error: "no discovery endpoint is configured: the walk's rows cannot be read" };
   const key = process.env.METABOB_API_KEY ?? "";
   try {
-    const r = await fetch(new URL("/resolve", DISCOVERY).href, {
+    const r = await fetch(new URL("/resolve", discovery).href, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(key ? { Authorization: `ApiKey ${key}` } : {}) },
       body: JSON.stringify({ pointer: { type: "record_read", shape: "hop", where: { pointer_type: pointerType, phase: "ended" } } }),
