@@ -7,8 +7,7 @@
 //
 // Declared only for fields a handler reads from the POINTER. Some handlers also read the request body's top level
 // (bounded_shell's timeout, git_diff's staged, code_search's limit); a walk's call sends a pointer, so those are not
-// offered. Not declared at all: git_commit (its message reaches a shell command line), shell and bash (bounded_shell
-// covers them), and code_verify_typecheck's bun_cmd and script: the handler splices both into `<bun_cmd> run <script>`
+// offered. Not declared at all: shell and bash (bounded_shell covers them), and code_verify_typecheck's bun_cmd and script: the handler splices both into `<bun_cmd> run <script>`
 // and runs it without the shell containment check, so either field would run any command (agf_m40aao3ttwpx).
 type Schema = Record<string, unknown>
 
@@ -41,6 +40,10 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
   }),
   git_status: object([], { cwd: { type: "string", description: "The repository; default the workspace." } }),
   git_diff: object([], { cwd: { type: "string", description: "The repository; default the workspace." } }),
+  git_commit: object(["cwd", "message"], {
+    cwd: { type: "string", minLength: 1, description: "A worktree made for the change; never a main clone." },
+    message: { type: "string", minLength: 1, description: "The commit message: a subject line, a blank line, then why." },
+  }),
 }
 
 export const SHAPE_DESCRIPTIONS: Record<string, string> = {
@@ -55,4 +58,6 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code.",
   git_status: "Lists a repository's changed files (git status --porcelain).",
   git_diff: "Shows a repository's unstaged changes (git diff).",
+  git_commit: "Commits every change in a worktree, checked by the hooks of the commit it was made from; answers the " +
+    "sha, tree and changed paths, and needs_person: the changed paths that judge changes, which only a person may approve.",
 }

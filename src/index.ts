@@ -24,6 +24,7 @@ import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
 import { containShell } from "./shell-containment.js";
 import { runAllowlistedScript } from "./script-runner.js";
+import { commitInWorktree } from "./git-commit.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
@@ -532,7 +533,8 @@ const gitDiff: ResolverHandler = async (ctx) => {
 };
 
 const gitCommit: ResolverHandler = async (ctx) => {
-  const message = str(ctx.body, "message");
+  // The walk sends a pointer; a direct caller may send message at the top level.
+  const message = str(ctx.body, "impulse", "pointer", "message") ?? str(ctx.body, "message");
   if (!message) return { error: "message is required" };
   // A commit is a write too, and the one pull-sync trusts most: it installs from
   // HEAD. The default cwd is WORKSPACE_ROOT — the live super-repo clone — so the
@@ -551,8 +553,9 @@ const gitCommit: ResolverHandler = async (ctx) => {
     console.error(`[local-tools] git_commit ${reason}`);
     return { error: reason, cwd: cwd ?? DEFAULT_CWD };
   }
-  return sh(`git commit -m ${JSON.stringify(message)}`, cwd, undefined, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id")))
-    .then(r => ({ shape: "gitCommitResult", ...r })).catch(e => ({ error: (e as Error).message }));
+  const id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
+  return commitInWorktree(resolvePath(DEFAULT_CWD, cwd ?? "."), message, id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)
+    .catch(e => ({ error: (e as Error).message }));
 };
 
 // ── code-tool primitives (2026-06-10) ─────────────────────────────────────────
