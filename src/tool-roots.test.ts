@@ -190,15 +190,23 @@ describe("every in-process path tool confines before touching the filesystem", (
     expect(w).toContain("OUTSIDE_ROOTS_ERROR");
   });
 
+  it("readPath confines through toolPath and refuses with OUTSIDE_ROOTS_ERROR, thrown as the request's fault", () => {
+    const start = src.indexOf("const readPath = ");
+    expect(start).toBeGreaterThan(-1);
+    const r = src.slice(start, src.indexOf("\n};\n", start));
+    expect(r).toContain("toolPath(rawPath)");
+    expect(r).toContain("throw refusal(`${OUTSIDE_ROOTS_ERROR}: ${rawPath}`)");
+  });
+
   for (const name of PATH_TOOLS) {
     it(`${name} calls toolPath() before any Bun.file / Bun.write`, () => {
       const b = body(name);
       // A WRITER resolves its target through writePath (toolPath + write containment,
-      // pinned below and in write-containment.test.ts); a reader through toolPath.
+      // pinned below and in write-containment.test.ts); a reader through readPath
+      // (toolPath, refusing with OUTSIDE_ROOTS_ERROR: pinned above).
       const writer = b.includes("writePath(ctx, rawPath)");
-      const guard = writer ? b.indexOf("writePath(ctx, rawPath)") : b.indexOf("toolPath(");
+      const guard = writer ? b.indexOf("writePath(ctx, rawPath)") : b.indexOf("readPath(rawPath)");
       expect(guard).toBeGreaterThan(-1);
-      if (!writer) expect(b).toContain("OUTSIDE_ROOTS_ERROR");
       const firstFs = Math.min(...["Bun.file(", "Bun.write("].map((t) => b.indexOf(t)).filter((i) => i >= 0));
       expect(Number.isFinite(firstFs)).toBe(true);
       expect(guard).toBeLessThan(firstFs);

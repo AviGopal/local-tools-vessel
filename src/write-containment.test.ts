@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { refusedWrite } from "./index";
 import { containWrite, readCommittedScope, signWriteGrant, WRITE_CONTAINMENT_ERROR } from "./write-containment";
 
 const KEY = "test-fleet-key-0123456789";
@@ -72,6 +73,42 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(() => { child?.kill(); rmSync(base, { recursive: true, force: true }); });
+
+describe("a refused path is the request's fault: answered 422, so the move that sent it is debited", () => {
+  const status = async (type: string, pointer: Record<string, unknown>): Promise<[number, string]> => {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ impulse: { pointer: { type, ...pointer } } }) });
+    return [r.status, await r.text()];
+  };
+
+  it("[MUST-FAIL] a write containment refuses is 422, naming why, and the file is untouched", async () => {
+    const [code, text] = await status("fs_edit", { path: "docs/x.md", old_string: "one", new_string: "two" });
+    expect(code).toBe(422);
+    expect(text).toContain("the live super-repo clone");
+    expect(readFileSync(join(superRepo, "docs", "x.md"), "utf8")).toBe("doc one\n");
+  });
+
+  it("[MUST-FAIL] a read outside the tool roots is 422, naming the path, absolute or relative", async () => {
+    for (const path of ["/etc/hostname", "../../../etc/hostname"]) {
+      const [code, text] = await status("fs_read", { path });
+      expect(`${path}: ${code}`).toBe(`${path}: 422`);
+      expect(text).toContain("path outside the tool roots");
+    }
+  });
+
+  it("a read inside the roots still answers its content (a guard)", async () => {
+    const [code, text] = await status("fs_read", { path: join(data, "report.md") });
+    expect(code).toBe(200);
+    expect(text).toContain("fileContent");
+  });
+
+  it("an unreadable autonomy scope is the node's fault, not the request's: it stays a 200 {error} (a pin)", () => {
+    const why = `${WRITE_CONTAINMENT_ERROR}: autonomy scope unreadable (no file); /x is in the vessel runtime /vessels, which fails closed`;
+    expect(refusedWrite(why, "/x")).toEqual({ error: why, path: "/x" });
+    let thrown: { status?: number } = {};
+    try { refusedWrite(`${WRITE_CONTAINMENT_ERROR}: /x is in the live super-repo clone`, "/x"); } catch (e) { thrown = e as typeof thrown; }
+    expect(thrown.status).toBe(422);
+  });
+});
 
 describe("the 10-01 breach: a walk's fs_edit of an excluded path in the live clone", () => {
   it("refuses the relative incident form with a scope reason, and leaves the file untouched", async () => {

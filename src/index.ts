@@ -238,6 +238,22 @@ const refusedOrError = (e: unknown): { error: string } => {
   return { error: (e as Error).message };
 };
 
+// A path the tools may not touch is the request's fault too, as a missing directory is: a path outside the tool roots,
+// or a write containment refuses. Answered 422 so the move that sent it is debited, not left at a 200 nothing counts.
+// One refusal is the node's, not the request's: containment fails closed while the autonomy scope cannot be read, and
+// that keeps the {error} body, so an unreadable scope never lowers a move.
+const readPath = (rawPath: string | undefined): string | undefined => {
+  let path: string | undefined | null;
+  try { path = toolPath(rawPath); } catch { path = null; }
+  if (path === null) throw refusal(`${OUTSIDE_ROOTS_ERROR}: ${rawPath}`);
+  return path;
+};
+const SCOPE_UNREADABLE = "autonomy scope unreadable";
+export const refusedWrite = (refused: string, rawPath: string | undefined): { error: string; path: string | undefined } => {
+  if (refused.includes(SCOPE_UNREADABLE)) return { error: refused, path: rawPath };
+  throw refusal(refused);
+};
+
 export function runDir(cwd: string | undefined): string {
   const dir = resolvePath(DEFAULT_CWD, cwd ?? DEFAULT_CWD);
   if (!existsSync(dir)) throw refusal(`no such directory: ${cwd ?? dir} (resolved to ${dir})`);
@@ -354,8 +370,7 @@ const shell: ResolverHandler = async (ctx) => {
 
 const fsRead: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const path = readPath(rawPath);
   if (!path) return { error: "path is required" };
   for (let attempt = 0; ; attempt++) {
     try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content }; }
@@ -373,7 +388,7 @@ const fsWrite: ResolverHandler = async (ctx) => {
   // made every such call fail with "required". Mirrors fsEdit / fsRead.
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   const w = writePath(ctx, rawPath);
-  if ("refused" in w) return { error: w.refused, path: rawPath };
+  if ("refused" in w) return refusedWrite(w.refused, rawPath);
   const path = w.path;
   const content = str(ctx.body, "impulse", "pointer", "content") ?? str(ctx.body, "content");
   if (!path || content === undefined) return { error: "path and content are required" };
@@ -410,7 +425,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // fail with "required". Mirrors code_replace_lines' fix.
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   const w = writePath(ctx, rawPath);
-  if ("refused" in w) return { error: w.refused, path: rawPath };
+  if ("refused" in w) return refusedWrite(w.refused, rawPath);
   const path = w.path;
   const old_string = str(ctx.body, "impulse", "pointer", "old_string") ?? str(ctx.body, "old_string");
   const new_string = str(ctx.body, "impulse", "pointer", "new_string") ?? str(ctx.body, "new_string");
@@ -619,8 +634,7 @@ function lineNumber(text: string, idx: number): number {
 
 const codeSearch: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const path = readPath(rawPath);
   const pattern = str(ctx.body, "impulse", "pointer", "pattern") ?? str(ctx.body, "pattern");
   const flags = str(ctx.body, "impulse", "pointer", "flags") ?? str(ctx.body, "flags") ?? "g";
   const limit = Number((ctx.body as Record<string, unknown>)?.limit ?? 50);
@@ -655,8 +669,7 @@ const codeSearch: ResolverHandler = async (ctx) => {
 
 const codeFindFunction: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const path = readPath(rawPath);
   const name = str(ctx.body, "impulse", "pointer", "name") ?? str(ctx.body, "name");
   if (!path || !name) return { error: "path and name are required" };
   try {
@@ -693,8 +706,7 @@ const codeFindFunction: ResolverHandler = async (ctx) => {
 
 const codeFindImport: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const path = readPath(rawPath);
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   if (!path || !moduleName) return { error: "path and module are required" };
   try {
@@ -718,7 +730,7 @@ const codeFindImport: ResolverHandler = async (ctx) => {
 const codeInsertAfterLine: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   const w = writePath(ctx, rawPath);
-  if ("refused" in w) return { error: w.refused, path: rawPath };
+  if ("refused" in w) return refusedWrite(w.refused, rawPath);
   const path = w.path;
   const ptr = ((ctx.body as Record<string, unknown>)?.impulse as Record<string, unknown> | undefined)?.pointer as Record<string, unknown> | undefined;
   const afterLine = Number((ctx.body as Record<string, unknown>)?.after_line ?? ptr?.after_line ?? 0);
@@ -738,7 +750,7 @@ const codeInsertAfterLine: ResolverHandler = async (ctx) => {
 const codeReplaceLines: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   const w = writePath(ctx, rawPath);
-  if ("refused" in w) return { error: w.refused, path: rawPath };
+  if ("refused" in w) return refusedWrite(w.refused, rawPath);
   const path = w.path;
   // BUG FIX (2026-06-14): start_line/end_line were read ONLY from top-level
   // ctx.body, but patch_with_tools (and any impulse-envelope caller) nests args
@@ -764,7 +776,7 @@ const codeReplaceLines: ResolverHandler = async (ctx) => {
 const codeAddImport: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   const w = writePath(ctx, rawPath);
-  if ("refused" in w) return { error: w.refused, path: rawPath };
+  if ("refused" in w) return refusedWrite(w.refused, rawPath);
   const path = w.path;
   const moduleName = str(ctx.body, "impulse", "pointer", "module") ?? str(ctx.body, "module");
   const specifier = str(ctx.body, "impulse", "pointer", "specifier") ?? str(ctx.body, "specifier");
@@ -843,8 +855,7 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
 // exact text>). This is the capability lever for non-trivial surgical edits.
 const codeReadLines: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
-  const path = toolPath(rawPath);
-  if (path === null) return { error: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}`, path: rawPath };
+  const path = readPath(rawPath);
   const ptr = ((ctx.body as Record<string, unknown>)?.["impulse"] as Record<string, unknown> | undefined)?.["pointer"] as Record<string, unknown> | undefined;
   const startLine = Number((ctx.body as Record<string, unknown>)?.start_line ?? ptr?.["start_line"] ?? 0);
   const endLineRaw = Number((ctx.body as Record<string, unknown>)?.end_line ?? ptr?.["end_line"] ?? 0);
