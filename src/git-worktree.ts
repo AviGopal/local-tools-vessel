@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
+import { withClones } from "./clones-lock.js";
 import { walkTreesDir } from "./tool-roots.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
@@ -42,6 +43,11 @@ export async function makeWorktree(repo: string, env: Env = process.env): Promis
 
   const trees = walkTreesDir(env);
   mkdirSync(trees, { recursive: true, mode: 0o755 });
+  return withClones(() => chooseOrClone(trees, repo, base, superBase, origin, branch, source));
+}
+
+// Under the clones lock (clones-lock.ts): hand out an unchanged clone, or make one.
+async function chooseOrClone(trees: string, repo: string, base: string, superBase: string, origin: string, branch: string, source: string): Promise<Worktree> {
   // A clone nothing has changed yet (its own branch, at this base, from this origin, with no change and no commit) is
   // exactly what a new one would be: it is handed out again, not made again. Every clone is a whole repository, and one
   // made per call, with nothing removing them, filled a node's disk. A clone holding any change is never handed out.

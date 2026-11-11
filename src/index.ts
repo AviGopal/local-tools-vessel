@@ -27,6 +27,7 @@ import { containShell } from "./shell-containment.js";
 import { runAllowlistedScript } from "./script-runner.js";
 import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
+import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { diffClone, landClone } from "./git-land.js";
 import { madeClone } from "./walk-rows.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
@@ -606,6 +607,9 @@ const gitCommit: ResolverHandler = async (ctx) => {
     .catch(refusedOrError);
 };
 
+// The clones nothing will use again, removed (walk-trees-reclaim.ts). Its refusals (an unreadable record) are answers.
+const walkTreesReclaim: ResolverHandler = async () => reclaimWalkTrees().catch(refusedOrError);
+
 const gitLand: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   if (!cwd) return { error: "cwd is required" };
@@ -939,6 +943,7 @@ export const resolvers = new Map<string, ResolverHandler>([
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
   ["bounded_shell", boundedShellResolver],
   ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit], ["git_worktree", gitWorktree], ["git_land", gitLand],
+  ["walk_trees_reclaim", walkTreesReclaim],
   ["code_search", codeSearch],
   ["code_find_function", codeFindFunction],
   ["code_find_import", codeFindImport],
@@ -984,7 +989,7 @@ if (import.meta.main) {
     // reach. Advertising them costs nothing; they already resolve.
     "shell", "bash", "bounded_shell",
     "fs_read", "fs_write", "fs_edit",
-    "git_status", "git_diff", "git_commit", "git_worktree", "git_land",
+    "git_status", "git_diff", "git_commit", "git_worktree", "git_land", "walk_trees_reclaim",
     "code_search", "code_find_function", "code_find_import",
     "code_insert_after_line", "code_replace_lines", "code_read_lines",
     "code_add_import", "code_verify_typecheck", "web_search",

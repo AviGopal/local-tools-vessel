@@ -13,6 +13,11 @@ type Schema = { required: string[]; properties: Record<string, { type?: string }
 
 // A file under tmp (a tool root) with three lines, and a value for every field a schema can require.
 const dir = mkdtempSync(join(tmpdir(), "shape-inputs-"))
+// Every handler is called below, walk_trees_reclaim among them, which removes clones. Its clones directory and the
+// records it decides from are pointed at a temporary directory and an address nothing answers, so this file can never
+// reach a node's live clones, whatever environment it runs in.
+process.env.WALK_TREES_DIR = join(dir, "walk-trees")
+process.env.DISCOVERY_ENDPOINT = "http://127.0.0.1:9"
 const sample = (field: string): unknown => {
   const file = join(dir, `f-${Math.random().toString(36).slice(2)}.ts`)
   writeFileSync(file, "line1\nline2\nline3\n")
@@ -51,6 +56,11 @@ describe("declared shape inputs", () => {
     const typecheck = SHAPE_INPUTS.code_verify_typecheck as unknown as Schema
     expect(Object.keys(typecheck.properties)).not.toContain("script")
     expect(Object.keys(typecheck.properties)).not.toContain("bun_cmd")
+  })
+
+  it("the clone-removing handler called here can reach only a temporary clones directory and no records (a guard)", () => {
+    expect(String(process.env.WALK_TREES_DIR).startsWith(dir)).toBe(true)
+    expect(process.env.DISCOVERY_ENDPOINT).toBe("http://127.0.0.1:9")
   })
 
   it("every described shape is declared, and the other way round", () => {
