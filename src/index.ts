@@ -591,6 +591,8 @@ const gitCommit: ResolverHandler = async (ctx) => {
   // told "no grant" would go looking for one that cannot exist. Landings there are
   // commits the lane makes itself.
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
+  // A directory that does not exist is the request's fault, refused 422 by name, as every command's is (runDir).
+  if (cwd) runDir(cwd);
   const cv = containWrite(resolvePath(DEFAULT_CWD, cwd ?? "."), { env: process.env, raw: cwd ?? DEFAULT_CWD });
   if (!cv.ok) {
     const reason = cv.zone && cv.zone !== "secret"
@@ -607,6 +609,7 @@ const gitCommit: ResolverHandler = async (ctx) => {
 const gitLand: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   if (!cwd) return { error: "cwd is required" };
+  runDir(cwd); // a directory that does not exist: 422 by name
   return landClone(resolvePath(DEFAULT_CWD, cwd)).catch(refusedOrError);
 };
 

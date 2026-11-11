@@ -24,6 +24,17 @@ describe("the directory a command runs in", () => {
     expect(fromHandler.status).toBe(422); // thrown through, not turned into a 200 body
   });
 
+  it("[MUST-FAIL] every git tool given a directory that does not exist refuses it 422, by name", async () => {
+    for (const [type, extra] of [["git_status", {}], ["git_diff", {}], ["git_commit", { message: "m" }], ["git_land", {}]] as const) {
+      let err: { status?: number; message?: string } = {};
+      try {
+        await resolvers.get(type)!({ body: { impulse: { pointer: { type, cwd: "repos/no-such-vessel", ...extra } } } } as never);
+      } catch (e) { err = e as typeof err; }
+      expect(`${type}: ${err.status}`).toBe(`${type}: 422`);
+      expect(err.message).toContain("no such directory: repos/no-such-vessel");
+    }
+  });
+
   it("an existing directory is used as given", () => {
     const d = mkdtempSync(join(tmpdir(), "run-dir-"));
     expect(runDir(d)).toBe(d);
