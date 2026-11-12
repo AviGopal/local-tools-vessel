@@ -303,7 +303,9 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   // the call left alive. The probe swallows its own errors; nothing below changes behaviour.
   const probe = openShProbe({ cmd, requestedTimeoutSec: timeoutSec, effectiveTimeoutSec: requestTimeoutSec, testClass, executionId: extraEnv?.SUBSTRATE_EXECUTION_ID, callerTag });
   let abort: AbortSignal | undefined;
-  let proc: { signalCode: string | null } | undefined;
+  // What ended the process, as the runtime says it: a signal's name, a number, or nothing (its type differs across bun
+  // versions, and a node's installed types need not match the lockfile's).
+  let proc: { signalCode: unknown } | undefined;
   let result: { stdout: string; stderr: string; exit_code: number } | undefined;
   let threw = false;
   try {
@@ -334,7 +336,7 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
     threw = true;
     throw e;
   } finally {
-    probe.done({ result, threw, aborted: abort?.aborted ?? false, signal: proc?.signalCode ?? null });
+    probe.done({ result, threw, aborted: abort?.aborted ?? false, signal: proc?.signalCode == null ? null : String(proc.signalCode) });
   }
 }
 
