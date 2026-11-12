@@ -175,6 +175,9 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
     if (refs.length !== 2) continue;
     const diff = diffs.find((x) => x.role === "walk" && x.repo === made.repo && refs.includes(x.id));
     if (!diff) continue;
+    // What the grader saw must say the tree typechecks (git_diff's own check of it): a grader told a tree does not
+    // compile may still answer r 1, and a diff made before the check existed says nothing.
+    if ((diff.typecheck as { passed?: unknown } | undefined)?.passed !== true) continue;
     const asked = await d.rows({ ids: refs.filter((id) => id !== diff.id) });
     if (!Array.isArray(asked)) return asked;
     const request = asked.length === 1 ? asked[0] : undefined;
@@ -182,7 +185,7 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
     if (![diff.input_refs].flat().map(String).includes(request.id)) continue;
     return { id: v.id, by: String(v.writer ?? "") };
   }
-  return { error: "no verdict approves this tree: a person's r 1, or a grader's r 1 from exactly the request and this tree's gitDiff" };
+  return { error: "no verdict approves this tree: a person's r 1, or a grader's r 1 from exactly the request and this tree's gitDiff, which says the tree typechecks" };
 }
 
 // What a grader reads to judge a change: the diff that would land, with the tree it lands as. A diff bigger than this
@@ -192,10 +195,15 @@ const DIFF_MAX = 64 * 1024;
 // What the typecheck said, cut like the diff: a grader reads errors, not a whole log.
 const CHECK_OUT_MAX = 4 * 1024;
 
-/** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or could not be run, and why. */
+/** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or did not run, and why. passed is
+ * what git_land reads: true only when the compiler passed, or when the base has no TypeScript config to check by. */
 export type Typecheck =
   | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean }
-  | { ran: false; why: string };
+  | { ran: false; passed: boolean; why: string };
+
+// What the typecheck reads besides the source: a change to any of these would choose how it is checked, so a tree that
+// changes one is not checked under it, and does not pass.
+const CHECK_CONFIG = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.json|package\.json|bunfig\.toml|bun\.lockb?|package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/;
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck }
@@ -203,24 +211,32 @@ export type DiffResult =
 
 /**
  * Typechecks exactly the tree the diff names, in the same call, so a pass can never belong to another tree: the walk can
- * edit its clone between calls, never inside this one. Nothing of the clone runs and none of its config is read: the
- * tree is written out of the trusted repository by this vessel into a directory of its own, its node_modules (if the
- * change carried one) is replaced by the repository's installed one on this node, and the TypeScript compiler is that
- * install's, run by this vessel's bun. Only the compiler runs as the shell user, with nothing in its env but PATH, so a
- * tsconfig that names a file only root may read cannot show it in the row.
+ * edit its clone between calls, never inside this one. The check is the base's, never the change's: the tree is
+ * compiled under origin's tsconfig.json (none there, nothing to check), and a change to anything that chooses how it is
+ * checked (CHECK_CONFIG) does not pass, since otherwise a change could pass by deleting or loosening its own check.
+ * Nothing of the clone runs: the tree is written out of the trusted repository by this vessel into a directory of its
+ * own, its node_modules (if the change carried one) is replaced by the repository's installed one on this node, and the
+ * TypeScript compiler is that install's, run by this vessel's bun. Only the compiler runs as the shell user, with
+ * nothing in its env but PATH, so a config that names a file only root may read cannot show it in the row.
  */
 async function typecheckTree(t: Trusted, made: Made, work: string): Promise<Typecheck> {
+  const config = await t.out(["show", `${t.origin}:tsconfig.json`]);
+  if (config === null) return { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" };
   const installed = join(containmentZones(process.env).runtime, made.repo, "node_modules");
   const tsc = join(installed, "typescript", "bin", "tsc");
-  if (!existsSync(tsc)) return { ran: false, why: `no TypeScript is installed for ${made.repo} on this node` };
-  if (await t.out(["cat-file", "-e", "refs/land/head:tsconfig.json"]) === null) return { ran: false, why: "the tree has no tsconfig.json" };
+  if (!existsSync(tsc)) return { ran: false, passed: false, why: `no TypeScript is installed for ${made.repo} on this node` };
+  const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
+  if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
+  const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
+  if (chosen.length > 0) return { ran: false, passed: false, why: `the change edits what chooses how it is checked: ${chosen.join(", ")}` };
   const tar = join(work, "tree.tar");
   const a = await trusted(["archive", "--format=tar", "-o", tar, "refs/land/head"], t.repo, work);
-  if (a.exit_code !== 0) return { ran: false, why: "the tree could not be written out" };
+  if (a.exit_code !== 0) return { ran: false, passed: false, why: "the tree could not be written out" };
   const dir = join(work, "check");
   mkdirSync(dir, { mode: 0o755 });
   const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore" });
-  if (x.exitCode !== 0) return { ran: false, why: "the tree could not be written out" };
+  if (x.exitCode !== 0) return { ran: false, passed: false, why: "the tree could not be written out" };
+  writeFileSync(join(dir, "tsconfig.json"), config);
   rmSync(join(dir, "node_modules"), { recursive: true, force: true });
   symlinkSync(installed, join(dir, "node_modules"));
   const s = agentShellSpawn([realpathSync(process.execPath), tsc, "--noEmit", "-p", dir], { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir());

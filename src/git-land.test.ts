@@ -60,6 +60,8 @@ const change = async (file: string, text: string): Promise<{ cwd: string; tree: 
 };
 const originHead = () => g(ORIGIN, "rev-parse", "dev");
 const ask = { id: "ask1", shape: "world_changed", role: "person" } as Row;
+// What git_diff says of a tree that typechecks: a grader's verdict counts only from a diff that says so.
+const TC_OK = { ran: true, passed: true, exit_code: 0, out: "", truncated: false };
 
 beforeAll(() => {
   Object.assign(process.env, { SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
@@ -116,7 +118,7 @@ describe("git_land", () => {
 
   scanned("[MUST-FAIL] a grader's r 1 lands only from exactly the request and the walk's gitDiff of this tree", async () => {
     const { cwd, tree } = await change("b.txt", "b\n");
-    const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
+    const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
     const other = { id: "x1", shape: "fileContent", role: "described" } as Row;
     table = [ask, diff, other, { id: "v3", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1", "x1"] }];
     expect("error" in (await landClone(cwd, deps))).toBe(true);
@@ -130,6 +132,11 @@ describe("git_land", () => {
     const ask2 = { id: "ask2", shape: "world_changed", role: "person" } as Row;
     table = [ask, ask2, { ...diff, input_refs: ["ask2"] }, { id: "v16", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1"] }];
     expect("error" in (await landClone(cwd, deps))).toBe(true)
+    // the diff the grader saw must say the tree typechecks: one saying it does not, or saying nothing, lands nothing
+    for (const typecheck of [{ ...TC_OK, passed: false, exit_code: 2 }, undefined]) {
+      table = [ask, { ...diff, typecheck }, { id: "v17", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1"] }];
+      expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("which says the tree typechecks");
+    }
     table = [ask, diff, { id: "v5", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, writer: "described-x", input_refs: ["ask1", "d1"] }];
     const r = await landClone(cwd, deps);
     expect("pushed" in r && r.verdict_ref).toBe("v5");
@@ -138,7 +145,7 @@ describe("git_land", () => {
 
   scanned("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
     const { cwd, tree } = await change("c.txt", "c\n");
-    const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
+    const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
     const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, input_refs: ["ask1", "d2"] } as Row;
     const yes = { id: "v7", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d2"] } as Row;
     table = [ask, diff, no, yes];
@@ -150,7 +157,7 @@ describe("git_land", () => {
 
   scanned("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
     const { cwd, tree } = await change("scripts/substrate/gate/x.sh", "x\n");
-    const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"] } as Row;
+    const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
     table = [ask, diff, { id: "v9", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d3"] }];
     const r = await landClone(cwd, deps);
     expect(String((r as { error: string }).error)).toContain("only a person's verdict");
@@ -224,16 +231,17 @@ describe("git_land", () => {
     expect(r.diff).toContain("+j");
     expect(r.truncated).toBe(false);
     expect(r.repo).toBe("demo");
-    expect(r.typecheck).toEqual({ ran: false, why: "the tree has no tsconfig.json" });
+    expect(r.typecheck).toEqual({ ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" });
   });
 
-  /** A clone with these files committed as one change; its cwd and tree. */
-  const changeOf = async (files: Record<string, string>): Promise<{ cwd: string; tree: string }> => {
+  /** A clone with these files committed as one change (null deletes one); its cwd and tree. */
+  const changeOf = async (files: Record<string, string | null>): Promise<{ cwd: string; tree: string }> => {
     g(COPY, "pull", "-q", "origin", "dev");
     const w = await makeWorktree("demo");
     if ("error" in w) throw new Error(w.error);
     made.set(w.cwd, w);
     for (const [f, text] of Object.entries(files)) {
+      if (text === null) { rmSync(join(w.cwd, f)); continue; }
       mkdirSync(join(w.cwd, f, ".."), { recursive: true });
       writeFileSync(join(w.cwd, f), text);
     }
@@ -243,22 +251,30 @@ describe("git_land", () => {
     return { cwd: w.cwd, tree: c.tree };
   };
   const TSCONFIG = JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"] }, include: ["*.ts"] });
+  // From here on the base has a TypeScript config, as a vessel's does: a change is checked under it.
+  const baseConfig = () => {
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "tsconfig.json"), TSCONFIG);
+    commitAll(seed, "base config"); g(seed, "push", "-q", "origin", "HEAD:dev");
+  };
 
   it("[MUST-FAIL] git_diff says whether the exact tree it names typechecks", async () => {
-    const bad = await changeOf({ "tsconfig.json": TSCONFIG, "m.ts": 'export const n: number = "not a number";\n' });
+    baseConfig();
+    const bad = await changeOf({ "m.ts": 'export const n: number = "not a number";\n' });
     const r = await diffClone(bad.cwd, made.get(bad.cwd)!, ["file"]);
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     expect(r.tree).toBe(bad.tree);
     expect(r.typecheck).toMatchObject({ ran: true, passed: false });
     expect((r.typecheck as { out: string }).out).toContain("m.ts");
     expect((r.typecheck as { out: string }).out).not.toContain(T); // paths are the tree's own
-    const good = await changeOf({ "tsconfig.json": TSCONFIG, "m.ts": "export const n: number = 1;\n" });
+    const good = await changeOf({ "m.ts": "export const n: number = 1;\n" });
     const ok = await diffClone(good.cwd, made.get(good.cwd)!, ["file"]);
     expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true, exit_code: 0 });
   });
 
   it("[MUST-FAIL] a fix the clone has not committed does not make its tree pass", async () => {
-    const { cwd } = await changeOf({ "tsconfig.json": TSCONFIG, "m.ts": 'export const n: number = "x";\n' });
+    const { cwd } = await changeOf({ "m.ts": 'export const n: number = "x";\n' });
     writeFileSync(join(cwd, "m.ts"), "export const n: number = 1;\n"); // fixed in the clone, not in the tree that lands
     const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
     expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false });
@@ -268,13 +284,27 @@ describe("git_land", () => {
     const marker = join(OUT, "CLONE_TSC_RAN");
     const evil = `require("fs").writeFileSync(${JSON.stringify(marker)}, "x");\n`;
     const { cwd } = await changeOf({
-      "tsconfig.json": TSCONFIG, "m.ts": "export const n: number = 1;\n", "node_modules/typescript/bin/tsc": evil,
+      "m.ts": "export const n: number = 1;\n", "node_modules/typescript/bin/tsc": evil,
     });
     mkdirSync(join(cwd, "node_modules", "typescript", "bin"), { recursive: true });
     writeFileSync(join(cwd, "node_modules", "typescript", "bin", "tsc"), evil, { mode: 0o755 });
     const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
     expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: true });
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("[MUST-FAIL] a change cannot pass by deleting or loosening its own check: the base's config decides", async () => {
+    const red = 'export const n: number = "x";\n';
+    const cases: Array<Record<string, string | null>> = [
+      { "m.ts": red, "tsconfig.json": null },
+      { "m.ts": red, "tsconfig.json": JSON.stringify({ compilerOptions: { noEmit: true, types: [] }, include: [], files: [] }) },
+      { "m.ts": "export const n: number = 1;\n", "package.json": "{}" },
+    ];
+    for (const files of cases) {
+      const { cwd } = await changeOf(files);
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+      expect("tree" in r && r.typecheck).toMatchObject({ passed: false });
+    }
   });
 
   it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {
