@@ -2,7 +2,7 @@
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
@@ -17,7 +17,7 @@ chmodSync(T, 0o755);
 const OUT = join(T, "out");
 mkdirSync(OUT);
 chmodSync(OUT, 0o777);
-const ENV_KEYS = ["SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
+const ENV_KEYS = ["SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "MITOSIS_RUNTIME_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const g = (cwd: string, ...args: string[]) => {
@@ -62,7 +62,10 @@ const originHead = () => g(ORIGIN, "rev-parse", "dev");
 const ask = { id: "ask1", shape: "world_changed", role: "person" } as Row;
 
 beforeAll(() => {
-  Object.assign(process.env, { SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), WALK_TREES_DIR: join(T, "trees") });
+  Object.assign(process.env, { SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
+  // demo's install on this node: this vessel's own, which carries the TypeScript compiler
+  mkdirSync(join(T, "runtime", "demo"), { recursive: true });
+  symlinkSync(join(import.meta.dir, "..", "node_modules"), join(T, "runtime", "demo", "node_modules"));
   for (const [k, v] of Object.entries(gitEnv)) if (k.startsWith("GIT_")) process.env[k] = v;
   mkdirSync(join(SUPER, "scripts", "git-hooks"), { recursive: true });
   g(SUPER, "init", "-q", "-b", "dev");
@@ -221,6 +224,57 @@ describe("git_land", () => {
     expect(r.diff).toContain("+j");
     expect(r.truncated).toBe(false);
     expect(r.repo).toBe("demo");
+    expect(r.typecheck).toEqual({ ran: false, why: "the tree has no tsconfig.json" });
+  });
+
+  /** A clone with these files committed as one change; its cwd and tree. */
+  const changeOf = async (files: Record<string, string>): Promise<{ cwd: string; tree: string }> => {
+    g(COPY, "pull", "-q", "origin", "dev");
+    const w = await makeWorktree("demo");
+    if ("error" in w) throw new Error(w.error);
+    made.set(w.cwd, w);
+    for (const [f, text] of Object.entries(files)) {
+      mkdirSync(join(w.cwd, f, ".."), { recursive: true });
+      writeFileSync(join(w.cwd, f), text);
+    }
+    asOwner(w.cwd);
+    const c = await commitInClone(w.cwd, "change", undefined, find);
+    if (!("tree" in c)) throw new Error(JSON.stringify(c));
+    return { cwd: w.cwd, tree: c.tree };
+  };
+  const TSCONFIG = JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"] }, include: ["*.ts"] });
+
+  it("[MUST-FAIL] git_diff says whether the exact tree it names typechecks", async () => {
+    const bad = await changeOf({ "tsconfig.json": TSCONFIG, "m.ts": 'export const n: number = "not a number";\n' });
+    const r = await diffClone(bad.cwd, made.get(bad.cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.tree).toBe(bad.tree);
+    expect(r.typecheck).toMatchObject({ ran: true, passed: false });
+    expect((r.typecheck as { out: string }).out).toContain("m.ts");
+    expect((r.typecheck as { out: string }).out).not.toContain(T); // paths are the tree's own
+    const good = await changeOf({ "tsconfig.json": TSCONFIG, "m.ts": "export const n: number = 1;\n" });
+    const ok = await diffClone(good.cwd, made.get(good.cwd)!, ["file"]);
+    expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true, exit_code: 0 });
+  });
+
+  it("[MUST-FAIL] a fix the clone has not committed does not make its tree pass", async () => {
+    const { cwd } = await changeOf({ "tsconfig.json": TSCONFIG, "m.ts": 'export const n: number = "x";\n' });
+    writeFileSync(join(cwd, "m.ts"), "export const n: number = 1;\n"); // fixed in the clone, not in the tree that lands
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false });
+  });
+
+  it("[MUST-FAIL] the typecheck runs nothing of the clone's: not a compiler it carries, committed or not", async () => {
+    const marker = join(OUT, "CLONE_TSC_RAN");
+    const evil = `require("fs").writeFileSync(${JSON.stringify(marker)}, "x");\n`;
+    const { cwd } = await changeOf({
+      "tsconfig.json": TSCONFIG, "m.ts": "export const n: number = 1;\n", "node_modules/typescript/bin/tsc": evil,
+    });
+    mkdirSync(join(cwd, "node_modules", "typescript", "bin"), { recursive: true });
+    writeFileSync(join(cwd, "node_modules", "typescript", "bin", "tsc"), evil, { mode: 0o755 });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: true });
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {

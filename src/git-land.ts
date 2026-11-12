@@ -14,11 +14,11 @@
 //     Any grader's r 0 on the tree blocks it unless a person approves.
 // Only then is the change pushed: from that repository, no force, with no hooks, and the only command here that
 // carries the push credential (the node's system credential helper reads it from this vessel's env).
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, judgesOf, vesselGit } from "./git-commit.js";
-import { agentWritableDir } from "./shell-privilege.js";
+import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
 
@@ -31,13 +31,17 @@ export type Deps = {
 };
 const DEFAULTS: Deps = { find: madeClone, rows: readRows, transports: ["https"] };
 
+// How long one step here (a git command, the secrets scan, the typecheck) may take before it is stopped and counted as
+// not passed.
+const STEP_MS = 300_000;
+
 /** git as this vessel, in a repository it owns, with a HOME of its own (no user config) and, unless asked, no credential. */
 async function trusted(args: string[], cwd: string, home: string, opts: { credential?: boolean; transports?: string[] } = {}): Promise<Run> {
   const base = opts.credential ? process.env : { PATH: process.env.PATH ?? "/usr/bin:/bin" };
   const env = { ...base, HOME: home, GIT_TERMINAL_PROMPT: "0" } as Record<string, string>;
   const allow = (opts.transports ?? []).flatMap((t) => ["-c", `protocol.${t}.allow=always`]);
   const pre = ["-c", "protocol.allow=never", ...allow, ...(opts.credential ? [] : ["-c", "credential.helper="])];
-  const p = Bun.spawn(["git", ...pre, ...args], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(300_000) });
+  const p = Bun.spawn(["git", ...pre, ...args], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(STEP_MS) });
   const [stdout, stderr, exit_code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { stdout, stderr, exit_code };
 }
@@ -119,7 +123,7 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     const report = join(work, "leaks.json");
     const scan = Bun.spawn([gitleaks, "detect", "--source", repo, "--log-opts", range, "--config", join(work, "gitleaks.toml"),
       "--redact", "--no-banner", "--exit-code", "3", "--report-format", "json", "--report-path", report, "--ignore-gitleaks-allow"],
-    { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: work }, stdout: "ignore", stderr: "ignore", signal: AbortSignal.timeout(300_000) });
+    { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: work }, stdout: "ignore", stderr: "ignore", signal: AbortSignal.timeout(STEP_MS) });
     const sc = await scan.exited;
     if (sc === 3) {
       let rules: string[] = [];
@@ -185,9 +189,51 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
 // is cut and says so, so a grader never judges a part it was not shown as if it were the whole.
 const DIFF_MAX = 64 * 1024;
 
+// What the typecheck said, cut like the diff: a grader reads errors, not a whole log.
+const CHECK_OUT_MAX = 4 * 1024;
+
+/** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or could not be run, and why. */
+export type Typecheck =
+  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean }
+  | { ran: false; why: string };
+
 export type DiffResult =
-  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean }
+  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck }
   | { error: string; stderr?: string };
+
+/**
+ * Typechecks exactly the tree the diff names, in the same call, so a pass can never belong to another tree: the walk can
+ * edit its clone between calls, never inside this one. Nothing of the clone runs and none of its config is read: the
+ * tree is written out of the trusted repository by this vessel into a directory of its own, its node_modules (if the
+ * change carried one) is replaced by the repository's installed one on this node, and the TypeScript compiler is that
+ * install's, run by this vessel's bun. Only the compiler runs as the shell user, with nothing in its env but PATH, so a
+ * tsconfig that names a file only root may read cannot show it in the row.
+ */
+async function typecheckTree(t: Trusted, made: Made, work: string): Promise<Typecheck> {
+  const installed = join(containmentZones(process.env).runtime, made.repo, "node_modules");
+  const tsc = join(installed, "typescript", "bin", "tsc");
+  if (!existsSync(tsc)) return { ran: false, why: `no TypeScript is installed for ${made.repo} on this node` };
+  if (await t.out(["cat-file", "-e", "refs/land/head:tsconfig.json"]) === null) return { ran: false, why: "the tree has no tsconfig.json" };
+  const tar = join(work, "tree.tar");
+  const a = await trusted(["archive", "--format=tar", "-o", tar, "refs/land/head"], t.repo, work);
+  if (a.exit_code !== 0) return { ran: false, why: "the tree could not be written out" };
+  const dir = join(work, "check");
+  mkdirSync(dir, { mode: 0o755 });
+  const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore" });
+  if (x.exitCode !== 0) return { ran: false, why: "the tree could not be written out" };
+  rmSync(join(dir, "node_modules"), { recursive: true, force: true });
+  symlinkSync(installed, join(dir, "node_modules"));
+  const s = agentShellSpawn([realpathSync(process.execPath), tsc, "--noEmit", "-p", dir], { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir());
+  try {
+    const p = Bun.spawn(s.argv, { cwd: dir, env: s.env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(STEP_MS) });
+    const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    const out = `${stdout}${stderr}`.split(dir).join(".");
+    const exit_code = typeof code === "number" ? code : -1;
+    return { ran: true, passed: exit_code === 0 && !p.signalCode, exit_code, out: out.slice(0, CHECK_OUT_MAX), truncated: out.length > CHECK_OUT_MAX };
+  } finally {
+    void s.done();
+  }
+}
 
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
 export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports): Promise<DiffResult> {
@@ -198,7 +244,8 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const base = await t.out(["rev-parse", t.origin]);
     const diff = await t.out(["diff", "--no-renames", t.origin, "refs/land/head"]);
     if (base === null || diff === null) return { error: "the change's diff could not be read" };
-    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX };
+    const typecheck = await typecheckTree(t, made, work);
+    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX, typecheck };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
   }
