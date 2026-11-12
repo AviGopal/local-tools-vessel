@@ -16,7 +16,7 @@
 // carries the push credential (the node's system credential helper reads it from this vessel's env).
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { git, judgesOf, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
@@ -236,9 +236,10 @@ function silenced(patch: string, added: string[]): string[] {
 export type GapRef = { gap_id: string; test_file: string; only_tests: string[] };
 
 /** Whether that gap's check passes on the tree: the named tests pass when the test file runs alone, as the detector's
- * closer runs it. passed is what git_land reads; anything that keeps the check from running does not pass. */
+ * closer runs it, and no test of the file that passed on the base fails on the tree (regressed names them). passed is
+ * what git_land reads; anything that keeps the check from running does not pass. */
 export type GapCheck =
-  | { gap_id: string; test_file: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean }
+  | { gap_id: string; test_file: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
   | { gap_id?: string; test_file?: string; ran: false; passed: false; why: string };
 
 export type DiffResult =
@@ -350,11 +351,11 @@ async function asShellUser(argv: string[], dir: string): Promise<{ exit_code: nu
  * read, with the repository's installed node_modules on this node in place of any the change carried: what both checks
  * run on, so nothing of the clone's is run and nothing it installed is resolved.
  */
-async function writeOut(t: Trusted, made: Made, work: string): Promise<string | { why: string }> {
-  const tar = join(work, "tree.tar");
-  const a = await trusted(["archive", "--format=tar", "-o", tar, "refs/land/head"], t.repo, work);
+async function writeOut(t: Trusted, made: Made, work: string, ref = "refs/land/head", name = "check"): Promise<string | { why: string }> {
+  const tar = join(work, `${name}.tar`);
+  const a = await trusted(["archive", "--format=tar", "-o", tar, ref], t.repo, work);
   if (a.exit_code !== 0) return { why: "the tree could not be written out" };
-  const dir = join(work, "check");
+  const dir = join(work, name);
   mkdirSync(dir, { mode: 0o755 });
   const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore" });
   if (x.exitCode !== 0) return { why: "the tree could not be written out" };
@@ -363,16 +364,32 @@ async function writeOut(t: Trusted, made: Made, work: string): Promise<string | 
   return dir;
 }
 
+/** The gap's test file run alone in a written-out tree as the shell user, judged from the runner's report into a
+ * directory made for this run: the tests the report says passed, or null when the run wrote no report. */
+async function runCheck(dir: string, testFile: string): Promise<{ passed: Set<string> | null; exit_code: number; signalled: boolean; out: string }> {
+  // Judged from the runner's own report, not from its output, which the tested code shares: a run that exits before the
+  // runner reports leaves no report, and does not pass.
+  const report = join(agentWritableDir(`${dir}-report`), "junit.xml");
+  const r = await asShellUser([realpathSync(process.execPath), "test", `./${testFile}`, "--timeout", "20000",
+    "--reporter=junit", `--reporter-outfile=${report}`], dir);
+  return { ...r, passed: existsSync(report) ? passedIn(readFileSync(report, "utf8")) : null };
+}
+
 /**
  * Whether the gap's own check passes on exactly this tree, in the same call: its test file run alone, as the detector's
- * closer runs it, every named test passing. The check is the base's: a change to its test file, to what tests lean on
+ * closer runs it, every named test passing and no test of the file that passed on the base failing (a fix that turns a
+ * sibling red, a confinement test say, does not pass). The base is run first, in the same call, from origin's branch:
+ * when no named test fails there, the gap's check has nothing to tell, so it does not run, and the detector's closer,
+ * which runs the same test file on that branch, decides the gap. The base's result is read before anything of the
+ * change runs. The check is the base's: a change to its test file, to what tests lean on
  * (TEST_SUPPORT) or to what chooses how code is checked (CHECK_CONFIG) does not pass, so a change cannot pass by editing
  * the check. It runs as the shell user, in the tree written out with the installed node_modules.
  */
-async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef | { error: string }): Promise<GapCheck> {
+async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef | { error: string }, base: string | { why: string }): Promise<GapCheck> {
   if ("error" in gap) return { ran: false, passed: false, why: gap.error };
   const id = { gap_id: gap.gap_id, test_file: gap.test_file };
   if (typeof dir !== "string") return { ...id, ran: false, passed: false, why: dir.why };
+  if (typeof base !== "string") return { ...id, ran: false, passed: false, why: base.why };
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return { ...id, ran: false, passed: false, why: "the change's paths could not be read" };
   const edits = changed.split("\n").filter((p) => p === gap.test_file || TEST_SUPPORT.test(p) || CHECK_CONFIG.test(p));
@@ -382,17 +399,18 @@ async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef |
   if (patch === null) return { ...id, ran: false, passed: false, why: "the change's lines could not be read" };
   const forged = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++") && FORGES.test(l));
   if (forged.length > 0) return { ...id, ran: false, passed: false, why: `the change writes what the check reads: ${forged[0].slice(1, 200)}` };
-  // Judged from the runner's own report, written into a directory made for this run, not from its output, which the
-  // tested code shares: a run that exits before the runner reports leaves no report, and does not pass.
-  const report = join(agentWritableDir(join(dirname(dir), "report")), "junit.xml");
-  const r = await asShellUser([realpathSync(process.execPath), "test", `./${gap.test_file}`, "--timeout", "20000",
-    "--reporter=junit", `--reporter-outfile=${report}`], dir);
-  const xml = existsSync(report) ? readFileSync(report, "utf8") : null;
+  const b = await runCheck(base, gap.test_file);
+  if (b.passed === null) return { ...id, ran: false, passed: false, why: "the test run on the base wrote no report" };
+  const before = b.passed;
+  const red = gap.only_tests.length === 0 ? b.exit_code !== 0 : gap.only_tests.some((n) => !before.has(n));
+  if (!red) return { ...id, ran: false, passed: false, why: "the gap's test already passes on the base" };
+  const r = await runCheck(dir, gap.test_file);
   const tail = { exit_code: r.exit_code, out: r.out.slice(-CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
-  if (xml === null) return { ...id, ran: true, passed: false, ...tail, out: `the test run wrote no report\n${tail.out}` };
-  const passed = passedIn(xml);
+  if (r.passed === null) return { ...id, ran: true, passed: false, ...tail, out: `the test run wrote no report\n${tail.out}`, regressed: [] };
+  const passed = r.passed;
   const named = gap.only_tests.length === 0 ? r.exit_code === 0 : gap.only_tests.every((n) => passed.has(n));
-  return { ...id, ran: true, passed: named && !r.signalled, ...tail };
+  const regressed = [...before].filter((n) => !passed.has(n)).sort();
+  return { ...id, ran: true, passed: named && regressed.length === 0 && !r.signalled, ...tail, regressed };
 }
 
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
@@ -415,7 +433,8 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const behind = "the clone's base is behind origin's branch: this change cannot land as it is; ask for a fresh clone and make the edits again";
     const dir = ff ? await writeOut(t, made, work) : { why: behind };
     const typecheck: Typecheck = ff ? await typecheckTree(t, made, dir) : { ran: false, passed: false, why: behind };
-    const check = gap === null ? {} : { check: await gapCheck(t, dir, gap) };
+    const baseDir = gap === null || "error" in gap ? { why: "no gap" } : ff ? await writeOut(t, made, work, t.origin, "base") : { why: behind };
+    const check = gap === null ? {} : { check: await gapCheck(t, dir, gap, baseDir) };
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
       fast_forward: ff, typecheck, ...check };
   } finally {

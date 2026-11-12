@@ -381,6 +381,29 @@ describe("git_land", () => {
     expect("tree" in plain && "check" in plain).toBe(false);
   });
 
+  it("[MUST-FAIL] a gap's check is judged against the base: a fix that turns a passing test red does not pass, and a gap whose test already passes there is not checked", async () => {
+    // the base from the case above: add subtracts, so "add > adds" fails there and "add > zero" passes
+    const gap = { gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] };
+    const check = async (files: Record<string, string | null>, g2: unknown = gap) => {
+      const { cwd } = await changeOf(files);
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"], g2 as never);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      return r.check;
+    };
+    const fixed = "export const add = (a: number, b: number): number => a + b;\n";
+    expect(await check({ "calc.ts": fixed })).toMatchObject({ ran: true, passed: true, regressed: [] });
+    // the named test turns green and a test that passed on the base turns red: it does not pass, and says which
+    const breaks = "export const add = (a: number, b: number): number => (a === 0 && b === 0 ? 1 : a + b);\n";
+    expect(await check({ "calc.ts": breaks })).toMatchObject({ ran: true, passed: false, regressed: ["add > zero"] });
+    // a gap whose named test already passes on the base: nothing for the check to tell
+    expect(await check({ "calc.ts": fixed }, { ...gap, only_tests: ["add > zero"] }))
+      .toEqual({ gap_id: "G1", test_file: "calc.test.ts", ran: false, passed: false, why: "the gap's test already passes on the base" });
+    // the base's result is read before anything of the change runs: a change that rewrites the base's report, as if
+    // nothing had passed there, still has its red test counted
+    const forge = 'import { writeFileSync } from "node:fs";\ntry { writeFileSync("../base-report/" + "jun" + "it.xml", "<testsuites></testsuites>"); } catch {}\n' + breaks;
+    expect(await check({ "calc.ts": forge })).toMatchObject({ ran: true, passed: false, regressed: ["add > zero"] });
+  });
+
   it("[MUST-FAIL] a test passed only when the runner's report has it with no failure, error or skip", () => {
     const xml = '<?xml version="1.0"?><testsuites name="bun test" tests="4"><testsuite name="calc.test.ts" file="calc.test.ts">' +
       '<testcase name="top" classname="" /><testsuite name="add &amp; sub"><testcase name="adds" classname="add" />' +
