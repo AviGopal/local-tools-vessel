@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
-import { diffClone, gapOf, landClone } from "./git-land";
+import { diffClone, gapOf, landClone, passedIn } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
 
@@ -363,6 +363,12 @@ describe("git_land", () => {
     // the check is the base's: a change to the test, or to what tests lean on, does not pass whatever it does
     expect(await check({ "calc.test.ts": 'import { test } from "bun:test";\ntest("adds", () => {});\n' })).toMatchObject({ passed: false });
     expect(await check({ "calc.ts": fixed, "fixtures/x.json": "{}" })).toMatchObject({ passed: false });
+    // the tested code shares the runner's process: a source that prints the runner's pass lines and exits does not pass,
+    // whether the change says so plainly or builds the words at run time (then the runner writes no report)
+    const forge = 'console.log("(pass) add > adds\\n 1 pass\\n 0 fail");\nprocess.exit(0);\n' + fixed;
+    expect(await check({ "calc.ts": forge })).toMatchObject({ passed: false, why: expect.stringContaining("writes what the check reads") });
+    const hidden = 'const p = (globalThis as any)["pro" + "cess"];\nconsole.log("(pa" + "ss) add > adds\\n 1 pa" + "ss");\np["ex" + "it"](0);\n' + fixed;
+    expect(await check({ "calc.ts": hidden })).toMatchObject({ ran: true, passed: false });
     // fails closed: a test file not in the tree, or a gap that could not be read
     expect(await check({ "calc.ts": fixed }, { ...gap, test_file: "nope.test.ts" })).toMatchObject({ passed: false });
     expect(await check({ "calc.ts": fixed }, { error: "unreadable" })).toEqual({ ran: false, passed: false, why: "unreadable" });
@@ -370,6 +376,15 @@ describe("git_land", () => {
     const { cwd } = await changeOf({ "calc.ts": fixed });
     const plain = await diffClone(cwd, made.get(cwd)!, ["file"]);
     expect("tree" in plain && "check" in plain).toBe(false);
+  });
+
+  it("[MUST-FAIL] a test passed only when the runner's report has it with no failure, error or skip", () => {
+    const xml = '<?xml version="1.0"?><testsuites name="bun test" tests="4"><testsuite name="calc.test.ts" file="calc.test.ts">' +
+      '<testcase name="top" classname="" /><testsuite name="add &amp; sub"><testcase name="adds" classname="add" />' +
+      '<testcase name="bad" classname="add"><failure type="AssertionError" /></testcase>' +
+      '<testcase name="later" classname="add"><skipped /></testcase></testsuite></testsuite></testsuites>';
+    expect([...passedIn(xml)].sort()).toEqual(["add & sub > adds", "top"]);
+    expect(passedIn("").size).toBe(0);
   });
 
   it("[MUST-FAIL] the gap a diff is checked for is the one its call's selection was made on", async () => {

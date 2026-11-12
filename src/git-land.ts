@@ -16,7 +16,7 @@
 // carries the push credential (the node's system credential helper reads it from this vessel's env).
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { git, judgesOf, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
@@ -245,6 +245,36 @@ export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck; check?: GapCheck }
   | { error: string; stderr?: string };
 
+// What a change could write to make a check it fails read as passing: the runner's own result words, an exit before the
+// runner reports, where its report goes. A change adding any of these does not pass the gap's check, whatever else it
+// does. A pattern, so it raises the cost of forging a result rather than closing it (the tested code runs in the
+// runner's process); the grader and the typecheck stand in front of it.
+const FORGES = /\((pass|fail)\)|\bprocess\s*\.\s*(exit|reallyExit|abort|kill)\b|\bBun\s*\.\s*exit\b|\/proc\/self|reporter-outfile|junit/;
+
+/** The tests a junit report says passed, by their "describe > test" names: a test case with no failure, error or skip. */
+export function passedIn(xml: string): Set<string> {
+  const text = (v: string) => v.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  const out = new Set<string>();
+  const suites: string[] = [];
+  let open: string | null = null;
+  let bad = false;
+  for (const m of xml.matchAll(/<(\/?)(testsuite|testcase|failure|error|skipped)\b([^>]*?)(\/?)>/g)) {
+    const [, close, tag, attrs, self] = m;
+    const name = text(/\bname="([^"]*)"/.exec(attrs)?.[1] ?? "");
+    if (tag === "testsuite") {
+      if (close) suites.pop();
+      else if (!self) suites.push(name);
+    } else if (tag === "testcase") {
+      if (close) { if (open !== null && !bad) out.add(open); open = null; continue; }
+      // the outermost suite is the file: the name starts at the first describe
+      const full = [...suites.slice(1), name].join(" > ");
+      if (self) out.add(full);
+      else { open = full; bad = false; }
+    } else if (!close) bad = true;
+  }
+  return out;
+}
+
 // What a test leans on besides the source it tests: a change to any of these could make the check pass without fixing
 // anything, so a tree that changes one does not pass the gap's check.
 const TEST_SUPPORT = /(^|\/)(tests?|__tests__|fixtures?|__fixtures__|__mocks__)\/|\.(test|spec)\.[^/]+$/;
@@ -347,13 +377,21 @@ async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef |
   const edits = changed.split("\n").filter((p) => p === gap.test_file || TEST_SUPPORT.test(p) || CHECK_CONFIG.test(p));
   if (edits.length > 0) return { ...id, ran: false, passed: false, why: `the change edits the check: ${edits.join(", ")}` };
   if (!existsSync(join(dir, gap.test_file))) return { ...id, ran: false, passed: false, why: `${gap.test_file} is not in the tree` };
-  const r = await asShellUser([realpathSync(process.execPath), "test", `./${gap.test_file}`, "--timeout", "20000"], dir);
-  const lines = r.out.split("\n");
-  const counted = lines.some((l) => /^ *[0-9]+ (pass|fail)$/.test(l));
-  const named = gap.only_tests.length === 0 ? r.exit_code === 0
-    : gap.only_tests.every((n) => lines.some((l) => l.includes(`(pass) ${n}`)) && !lines.some((l) => l.includes(`(fail) ${n}`)));
-  // judged on the whole output; a test run's summary ends it: keep the end
-  return { ...id, ran: true, passed: counted && named && !r.signalled, exit_code: r.exit_code, out: r.out.slice(-CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+  const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);
+  if (patch === null) return { ...id, ran: false, passed: false, why: "the change's lines could not be read" };
+  const forged = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++") && FORGES.test(l));
+  if (forged.length > 0) return { ...id, ran: false, passed: false, why: `the change writes what the check reads: ${forged[0].slice(1, 200)}` };
+  // Judged from the runner's own report, written into a directory made for this run, not from its output, which the
+  // tested code shares: a run that exits before the runner reports leaves no report, and does not pass.
+  const report = join(agentWritableDir(join(dirname(dir), "report")), "junit.xml");
+  const r = await asShellUser([realpathSync(process.execPath), "test", `./${gap.test_file}`, "--timeout", "20000",
+    "--reporter=junit", `--reporter-outfile=${report}`], dir);
+  const xml = existsSync(report) ? readFileSync(report, "utf8") : null;
+  const tail = { exit_code: r.exit_code, out: r.out.slice(-CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+  if (xml === null) return { ...id, ran: true, passed: false, ...tail, out: `the test run wrote no report\n${tail.out}` };
+  const passed = passedIn(xml);
+  const named = gap.only_tests.length === 0 ? r.exit_code === 0 : gap.only_tests.every((n) => passed.has(n));
+  return { ...id, ran: true, passed: named && !r.signalled, ...tail };
 }
 
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
