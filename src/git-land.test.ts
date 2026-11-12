@@ -402,6 +402,24 @@ describe("git_land", () => {
     expect(await gapOf(rowsOf([{ id: "s1", shape: "selection" } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no root") });
   });
 
+  it("[MUST-FAIL] a clone origin has moved past shows its own change, says it cannot fast-forward, and does not pass", async () => {
+    const { cwd } = await changeOf({ "own.txt": "mine\n" });
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "later.txt"), "pushed after the clone\n");
+    commitAll(seed, "origin moves on"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"], { gap_id: "G1", test_file: "calc.test.ts", only_tests: [] });
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.fast_forward).toBe(false);
+    expect(r.diff).toContain("+mine");
+    expect(r.diff).not.toContain("later.txt"); // origin's later commit is not shown undone
+    expect(r.typecheck).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
+    expect(r.check).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
+    const fresh = await changeOf({ "own2.txt": "mine\n" });
+    const ok = await diffClone(fresh.cwd, made.get(fresh.cwd)!, ["file"]);
+    expect("tree" in ok && ok.fast_forward).toBe(true);
+  });
+
   it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {
     const { judgesOf } = await import("./git-commit");
     const judges = await judgesOf(async () => null, { repo: "local-tools-vessel" });

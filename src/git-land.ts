@@ -242,7 +242,8 @@ export type GapCheck =
   | { gap_id?: string; test_file?: string; ran: false; passed: false; why: string };
 
 export type DiffResult =
-  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck; check?: GapCheck }
+  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
+      fast_forward: boolean; typecheck: Typecheck; check?: GapCheck }
   | { error: string; stderr?: string };
 
 // What a change could write to make a check it fails read as passing: the runner's own result words, an exit before the
@@ -401,12 +402,22 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const t = await intoTrusted(cwd, made, work, transports);
     if ("error" in t) return t;
     const base = await t.out(["rev-parse", t.origin]);
-    const diff = await t.out(["diff", "--no-renames", t.origin, "refs/land/head"]);
-    if (base === null || diff === null) return { error: "the change's diff could not be read" };
-    const dir = await writeOut(t, made, work);
-    const typecheck = await typecheckTree(t, made, dir);
+    // The change is what the clone's commits do: diffed from where they leave origin's branch. When origin has moved on
+    // since the clone was made, a diff from origin's tip would show every later commit on it undone, as if the change
+    // made it (a gate's own tightening shown as loosened). Such a change cannot land as it is (git_land takes a
+    // fast-forward only), so it is shown as it is, said not to fast-forward, and checked as not passing: what makes it
+    // land is a fresh clone with the edits made again.
+    const from = await t.out(["merge-base", t.origin, "refs/land/head"]);
+    if (base === null || from === null) return { error: "the change's diff could not be read" };
+    const ff = from === base;
+    const diff = await t.out(["diff", "--no-renames", from, "refs/land/head"]);
+    if (diff === null) return { error: "the change's diff could not be read" };
+    const behind = "the clone's base is behind origin's branch: this change cannot land as it is; ask for a fresh clone and make the edits again";
+    const dir = ff ? await writeOut(t, made, work) : { why: behind };
+    const typecheck: Typecheck = ff ? await typecheckTree(t, made, dir) : { ran: false, passed: false, why: behind };
     const check = gap === null ? {} : { check: await gapCheck(t, dir, gap) };
-    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX, typecheck, ...check };
+    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
+      fast_forward: ff, typecheck, ...check };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
   }
