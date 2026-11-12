@@ -30,6 +30,7 @@ import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { diffClone, gapOf, landClone } from "./git-land.js";
 import { madeClone, readRows } from "./walk-rows.js";
+import { behind, cloneOf } from "./clone-freshness.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
@@ -973,6 +974,21 @@ export const resolvers = new Map<string, ResolverHandler>([
   ["codeTypecheckResult", codeVerifyTypecheck],
   ["scriptRunResult", scriptRun],
 ]);
+
+// Every answer about a path in a walk clone says when that clone can no longer land (clone-freshness.ts), so the walk
+// learns it the moment it touches the clone, not only at the diff before landing. Not for the calls that hand clones
+// out or remove them.
+for (const [name, handler] of resolvers) {
+  if (name === "git_worktree" || name === "walk_trees_reclaim") continue;
+  resolvers.set(name, async (ctx) => {
+    const out = await handler(ctx);
+    const body = ctx.body as Record<string, unknown> | undefined;
+    const clone = cloneOf((body?.impulse as { pointer?: unknown } | undefined)?.pointer ?? body, process.env);
+    if (clone === null || typeof out !== "object" || out === null) return out;
+    const why = await behind(clone, process.env).catch(() => null);
+    return why === null ? out : { ...out, clone_behind: why };
+  });
+}
 
 const runtime = new ExecutionRuntime({
   attachedVessels: [{ id: VESSEL_ID, kind: "local-tools" as never, resolverIds: Array.from(resolvers.keys()) }],
