@@ -11,3 +11,17 @@ export const walkCall = (n: string, pointerType: string, selectionRef: string, o
 export const recordRead = (rows: Array<Record<string, unknown>>, p: { shape?: string; ids?: string[]; where?: Record<string, unknown> }) =>
   rows.filter((r) => (p.shape === undefined || r.shape === p.shape) && (p.ids === undefined || p.ids.includes(String(r.id)))
     && Object.entries(p.where ?? {}).every(([k, v]) => String(r[k]) === String(v)));
+
+// records' episode answer ({episode: w, roots: "all"}), as records builds it (records-vessel store.ts rootRows): each open
+// root with the rows descended from it, which are the root, the walk's selections (writer w) whose pool_refs or input_refs
+// hold it, and the walk's rows (writer w) whose selection_ref names one of those selections.
+type R = Record<string, unknown>;
+export const episodeRead = (rows: R[], w: string, open: string[]) => ({
+  shared: [],
+  roots: open.map((id) => {
+    const held = (r: R) => [r.pool_refs, r.input_refs].flat().map(String).includes(id);
+    const sels = new Set(rows.filter((r) => r.shape === "selection" && r.writer === w && held(r)).map((r) => String(r.id)));
+    const root = rows.find((r) => r.id === id) ?? { id };
+    return { root, rows: [root, ...rows.filter((r) => r.writer === w && (sels.has(String(r.id)) || sels.has(String(r.selection_ref))))], awaits: true };
+  }),
+});

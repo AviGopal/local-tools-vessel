@@ -85,16 +85,28 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   return { cwd, repo: s("repo"), branch: s("branch"), base: s("base"), super_base: s("super_base"), origin_url: s("origin_url") };
 }
 
-/** The roots records lists as open for each walk (by its arm rows), or why they could not be read. */
-export async function openRoots(walks: string[]): Promise<Set<string> | { error: string }> {
-  const open = new Set<string>();
+/**
+ * The roots records lists as open for each walk (by its arm rows), each with the rows descended from it (its selections,
+ * their hops and failures: records' episode), or why they could not be read. A reader that needs the walk's rows of open
+ * work reads them here: bounded by the work open now, where a read of every row of a shape grows with all work ever done.
+ */
+export async function openEpisodes(walks: string[]): Promise<Array<{ root: string; rows: Row[] }> | { error: string }> {
+  const out: Array<{ root: string; rows: Row[] }> = [];
   for (const episode of walks) {
     const r = await resolveRecords({ episode, roots: "all" });
     if ("error" in r) return { error: `${r.error} (the open roots)` };
     const body = r.body as { roots?: unknown; content?: { roots?: unknown } };
     const roots = Array.isArray(body?.roots) ? body.roots : body?.content?.roots;
     if (!Array.isArray(roots)) return { error: "records answered no list of open roots" };
-    for (const x of roots as Array<{ root?: { id?: unknown } }>) if (typeof x?.root?.id === "string") open.add(x.root.id);
+    for (const x of roots as Array<{ root?: { id?: unknown }; rows?: unknown }>) {
+      if (typeof x?.root?.id === "string") out.push({ root: x.root.id, rows: Array.isArray(x.rows) ? (x.rows as Row[]) : [] });
+    }
   }
-  return open;
+  return out;
+}
+
+/** The roots records lists as open for each walk (by its arm rows), or why they could not be read. */
+export async function openRoots(walks: string[]): Promise<Set<string> | { error: string }> {
+  const eps = await openEpisodes(walks);
+  return Array.isArray(eps) ? new Set(eps.map((e) => e.root)) : eps;
 }

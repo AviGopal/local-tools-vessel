@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { commitInClone } from "./git-commit";
 import { makeWorktree } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
-import { recordRead, walkCall } from "./walk-call-rows.test-helper";
+import { episodeRead, recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 // Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
 // fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
@@ -86,54 +86,106 @@ describe("git_worktree", () => {
     expect(readFileSync(join(w.cwd, "a.txt"), "utf8")).toBe("one\n");
   });
 
-  it("[MUST-FAIL] two open requests never share a clone; a request gets its own unchanged clone again, and a closed one's", async () => {
-    const trees = join(T, "trees");
-    // records, stubbed: selections name their request; git_worktree's ended hops say which clone went to which selection
-    const sels: Record<string, string> = { "sel-a": "R-A", "sel-a2": "R-A", "sel-b": "R-B", "sel-b2": "R-B", "sel-c": "R-C" };
-    const hops: Array<Record<string, unknown>> = [];
-    let open = ["R-A", "R-B", "R-C"];
-    let down = false;
-    // records answers 401 to a request that does not say who is asking, as the live one does
-    process.env.METABOB_API_KEY = "test-node-key";
+  // records, stubbed as records answers: selections name their request (root, and the root in pool_refs, which is how
+  // records' episode finds them), and the walk's hops carry its writer. It counts the bytes it sends.
+  const stubRecords = () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const st = { open: [] as string[], down: false, bytes: 0, reads: [] as string[] };
+    const sel = (id: string, root: string) => rows.push({ id, shape: "selection", role: "walk", writer: "walk-1", root, pool_refs: [root], cands: "x".repeat(40_000) });
     globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
       if ((init?.headers as Record<string, string> | undefined)?.Authorization !== "ApiKey test-node-key") return new Response("no key", { status: 401 });
-      if (down) return new Response("down", { status: 503 });
+      if (st.down) return new Response("down", { status: 503 });
       const p = JSON.parse(String(init?.body)).pointer;
-      if (p.episode !== undefined) return Response.json({ shared: [], roots: open.map((id) => ({ root: { id }, rows: [] })) });
-      if (p.ids) return Response.json(p.ids.filter((id: string) => id in sels).map((id: string) => ({ id, shape: "selection", role: "walk", root: sels[id] })));
-      if (p.shape === "hop") return Response.json(recordRead(hops, p));
-      if (p.shape === "selection") return Response.json(Object.entries(sels).map(([id, root]) => ({ id, shape: "selection", role: "walk", root })));
-      if (p.shape === "arm") return Response.json([{ id: "arm-1", shape: "arm", vessel_id: "walk-1" }]);
-      return Response.json([]);
+      st.reads.push(JSON.stringify({ ...p, type: undefined }));
+      const body = p.episode !== undefined ? episodeRead(rows, String(p.episode), st.open)
+        : p.shape === "arm" ? [{ id: "arm-1", shape: "arm", role: "owner", vessel_id: "walk-1" }]
+        : recordRead(rows, p);
+      const text = JSON.stringify(body);
+      st.bytes += text.length;
+      return new Response(text, { headers: { "Content-Type": "application/json" } });
     }) as typeof fetch;
-    const ask = async (sel?: string) => {
-      const w = await makeWorktree("demo", process.env, sel);
+    const ask = async (s?: string) => {
+      const w = await makeWorktree("demo", process.env, s);
       if ("error" in w) throw new Error(w.error);
-      if (sel) hops.push(...walkCall(String(hops.length), "git_worktree", sel, { cwd: w.cwd }));
-      return w.cwd;
+      if (s) rows.push(...walkCall(String(rows.length), "git_worktree", s, { cwd: w.cwd, repo: w.repo, branch: w.branch, base: w.base, origin_url: w.origin_url }).map((h) => ({ ...h, writer: "walk-1" })));
+      return w;
     };
-    const a = await ask("sel-a");
-    const b = await ask("sel-b");
+    return { rows, st, sel, ask };
+  };
+
+  it("[MUST-FAIL] two open requests never share a clone; a request gets its own clone again, and a closed one's unchanged clone", async () => {
+    const trees = join(T, "trees");
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    for (const [id, root] of [["sel-a", "R-A"], ["sel-a2", "R-A"], ["sel-b", "R-B"], ["sel-b2", "R-B"], ["sel-c", "R-C"], ["sel-d", "R-D"]]) sel(id, root);
+    st.open = ["R-A", "R-B", "R-C", "R-D"];
+    const cwd = async (s?: string) => (await ask(s)).cwd;
+    const a = await cwd("sel-a");
+    const b = await cwd("sel-b");
     expect(b).not.toBe(a); // two open requests: two clones
-    expect(await ask("sel-a2")).toBe(a); // the same request: its own clone again
-    expect(await ask("sel-b2")).toBe(b);
-    open = ["R-B", "R-C"]; // R-A closes: its unchanged clone may go to another request
-    expect(await ask("sel-c")).toBe(a);
-    writeFileSync(join(b, "edit.txt"), "x\n"); // a change makes it someone's work: never handed out again
-    expect(await ask("sel-b2")).not.toBe(b);
+    expect(await cwd("sel-a2")).toBe(a); // the same request: its own clone again
+    expect(await cwd("sel-b2")).toBe(b);
+    st.open = ["R-B", "R-C", "R-D"]; // R-A closes: its unchanged clone may go to another request
+    expect(await cwd("sel-c")).toBe(a);
+    writeFileSync(join(b, "edit.txt"), "x\n"); // a change is its request's work: it goes back to that request, as recorded
+    const again = await ask("sel-b2");
+    expect(again.cwd).toBe(b);
+    expect(readFileSync(join(again.cwd, "edit.txt"), "utf8")).toBe("x\n");
+    st.open = ["R-D"]; // R-B closes: a changed clone never goes to another request
+    expect(await cwd("sel-d")).not.toBe(b);
     // nothing read, nothing shared: no selection named, or records down, gets a fresh clone
     const before = readdirSync(trees).length;
     await ask(undefined);
-    down = true;
+    st.down = true;
     await ask("sel-a");
-    down = false;
+    st.down = false;
     expect(readdirSync(trees).length).toBe(before + 2);
     // without the node key records refuses every read, and nothing is shared: a fresh clone (a pin)
     delete process.env.METABOB_API_KEY;
-    expect(await ask("sel-a2")).not.toBe(a);
+    expect(await cwd("sel-a2")).not.toBe(a);
     globalThis.fetch = realFetch;
   });
 
+  it("[MUST-FAIL] a handout reads only the open work: unrelated selections and hops of closed requests add no bytes", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { rows, st, sel, ask } = stubRecords();
+    sel("sel-x", "R-X");
+    st.open = ["R-X"];
+    await ask("sel-x");
+    const measure = async () => { st.bytes = 0; st.reads = []; await ask("sel-x"); return st.bytes; };
+    const quiet = await measure();
+    // 200 more selections (40 KB each, as live ones run) and their calls, all of requests now closed
+    for (let i = 0; i < 200; i++) {
+      sel(`old-${i}`, `R-old-${i}`);
+      rows.push(...walkCall(`old-${i}`, "git_worktree", `old-${i}`, { cwd: `/nowhere/${i}`, out: "y".repeat(8_000) }).map((h) => ({ ...h, writer: "walk-1" })));
+    }
+    const busy = await measure();
+    expect(st.reads.some((r) => JSON.parse(r).shape === "selection" && JSON.parse(r).ids === undefined)).toBe(false); // never every selection
+    expect(busy).toBeLessThan(quiet + 2_000); // flat: what was done before adds nothing to the read
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] once the copy has moved on, a request's own clone, changed or not, is not handed back: a clone at the new tip is", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-e", "R-E"], ["sel-e2", "R-E"], ["sel-f", "R-F"], ["sel-f2", "R-F"]]) sel(id, root);
+    st.open = ["R-E", "R-F"];
+    const e = await ask("sel-e"); // R-E's clone, which it then changes
+    writeFileSync(join(e.cwd, "edit.txt"), "x\n");
+    const f = await ask("sel-f"); // R-F's clone, left unchanged
+    writeFileSync(join(demo, "b.txt"), "two\n");
+    commitAll(demo, "a push landed"); // the copy moves on
+    const tip = g(demo, "rev-parse", "HEAD");
+    // each case on its own line: the changed clone, then the unchanged one
+    const got: string[] = [];
+    for (const [s, old, what] of [["sel-e2", e, "changed"], ["sel-f2", f, "unchanged"]] as const) {
+      const w = await ask(s);
+      got.push(`${what}: ${w.cwd !== old.cwd ? "new clone" : "same clone"}, base ${w.base === tip ? "tip" : "old"}, HEAD ${g(w.cwd, "rev-parse", "HEAD") === tip ? "tip" : "old"}`);
+    }
+    expect(got).toEqual(["changed: new clone, base tip, HEAD tip", "unchanged: new clone, base tip, HEAD tip"]);
+    globalThis.fetch = realFetch;
+  });
 
   it("refuses a name that is not a repo's, and a repo this node has no copy of", async () => {
     expect("error" in (await makeWorktree("../etc"))).toBe(true);
