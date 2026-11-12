@@ -149,9 +149,14 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
 }
 
 // A request is what a person or the owner asked: an exogenous row that is not a grade and not the owner's configuration.
+// Or a gap a detector opened: records refuses a gap row under any key but the node's own, so a gap is the node's own
+// observation, trusted as the owner is; a change made for one lands on a grader's verdict only when the gap's own check
+// passes on its tree (approved, below). Named debt: these shape and role names are literals here, not read from the
+// owner's rows.
 const OWNER_CONFIG = new Set(["channel", "shape_schema", "arm", "prior"]);
+const isGap = (r: Row): boolean => r.role === "detector" && r.shape === "gap";
 const isRequest = (r: Row): boolean =>
-  (r.role === "person" || r.role === "owner") && r.shape !== "outcome" && !OWNER_CONFIG.has(String(r.shape));
+  ((r.role === "person" || r.role === "owner") && r.shape !== "outcome" && !OWNER_CONFIG.has(String(r.shape))) || isGap(r);
 
 /** The verdict row that lets this tree land, or why none does. */
 // The verdict's writer (records stamps it: a person row's writer is its key id) goes into the answer, so a count of
@@ -161,15 +166,19 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
   const verdicts = await d.rows({ shape: "land_verdict", where: { tree } });
   if (!Array.isArray(verdicts)) return verdicts;
   const mine = verdicts.filter((v) => v.repo === made.repo);
-  const person = mine.find((v) => v.role === "person" && Number(v.r) === 1);
+  const diffs = await d.rows({ shape: "gitDiff", where: { tree } });
+  if (!Array.isArray(diffs)) return diffs;
+  // A person's r 1 counts only when it was given on the walk's own diff of this tree, shown whole: a diff row anyone
+  // else wrote could name this tree and show another change.
+  const shown = (v: Row): boolean => diffs.some((x) => x.role === "walk" && x.repo === made.repo && x.truncated !== true
+    && [v.input_refs].flat().map(String).includes(x.id));
+  const person = mine.find((v) => v.role === "person" && Number(v.r) === 1 && shown(v));
   if (person) return { id: person.id, by: String(person.writer ?? "") };
   if (mine.some((v) => v.role === "described" && Number(v.r) === 0)) return { error: "a grader judged this tree r 0, and no person has approved it" };
   if (needsPerson.length > 0) return { error: `the change touches what judges changes (${needsPerson.join(", ")}): only a person's verdict lands it` };
   // A grader's r 1 counts only when it was made from exactly two rows: the request, and the walk's record of this tree's
   // diff made for that request (its input_refs hold the request). Anything more and what it judged is not only the
   // change; anything less and it did not see the change; a diff made for another request is not this request's change.
-  const diffs = await d.rows({ shape: "gitDiff", where: { tree } });
-  if (!Array.isArray(diffs)) return diffs;
   for (const v of mine.filter((x) => x.role === "described" && Number(x.r) === 1)) {
     const refs = [...new Set([v.input_refs].flat().map(String))];
     if (refs.length !== 2) continue;
@@ -183,9 +192,12 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
     const request = asked.length === 1 ? asked[0] : undefined;
     if (!request || !isRequest(request)) continue;
     if (![diff.input_refs].flat().map(String).includes(request.id)) continue;
+    // A gap's change lands on a grader's verdict only when the gap's own check passed on this tree, for this gap.
+    const check = diff.check as { passed?: unknown; gap_id?: unknown } | undefined;
+    if (isGap(request) && (check?.passed !== true || String(check.gap_id) !== String(request.gap_id))) continue;
     return { id: v.id, by: String(v.writer ?? "") };
   }
-  return { error: "no verdict approves this tree: a person's r 1, or a grader's r 1 from exactly the request and this tree's gitDiff, which says the tree typechecks" };
+  return { error: "no verdict approves this tree: a person's r 1 on the walk's whole diff of it, or a grader's r 1 from exactly the request and this tree's gitDiff, which says the tree typechecks (and, for a gap, that its check passes)" };
 }
 
 // What a grader reads to judge a change: the diff that would land, with the tree it lands as. A diff bigger than this
@@ -220,9 +232,42 @@ function silenced(patch: string, added: string[]): string[] {
   return [...out].sort();
 }
 
+/** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). */
+export type GapRef = { gap_id: string; test_file: string; only_tests: string[] };
+
+/** Whether that gap's check passes on the tree: the named tests pass when the test file runs alone, as the detector's
+ * closer runs it. passed is what git_land reads; anything that keeps the check from running does not pass. */
+export type GapCheck =
+  | { gap_id: string; test_file: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean }
+  | { gap_id?: string; test_file?: string; ran: false; passed: false; why: string };
+
 export type DiffResult =
-  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck }
+  | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck; check?: GapCheck }
   | { error: string; stderr?: string };
+
+// What a test leans on besides the source it tests: a change to any of these could make the check pass without fixing
+// anything, so a tree that changes one does not pass the gap's check.
+const TEST_SUPPORT = /(^|\/)(tests?|__tests__|fixtures?|__fixtures__|__mocks__)\/|\.(test|spec)\.[^/]+$/;
+
+/**
+ * The gap the call was made for, when its selection's root is a detector's gap: read from records by the selection the
+ * walk names on every call (its root is the request the clone is for). No selection: not the walk's call, no gap. A row
+ * that cannot be read, or a gap row naming no test file, is an error: the check then does not pass.
+ */
+export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined): Promise<GapRef | null | { error: string }> {
+  if (!selectionRef) return null;
+  const sel = await rows({ ids: [selectionRef] });
+  if (!Array.isArray(sel)) return sel;
+  const root = sel[0]?.root;
+  if (typeof root !== "string") return { error: "the call's selection names no root" };
+  const r = await rows({ ids: [root] });
+  if (!Array.isArray(r)) return r;
+  const g = r[0];
+  if (!g || g.shape !== "gap" || g.role !== "detector") return null;
+  const input = ((g.meta as { evidence_resolve?: { input?: Record<string, unknown> } } | undefined)?.evidence_resolve?.input ?? {});
+  if (typeof input.test_file !== "string" || input.test_file === "") return { error: `gap ${String(g.gap_id)} names no test file` };
+  return { gap_id: String(g.gap_id), test_file: input.test_file, only_tests: [input.only_tests ?? []].flat().map(String) };
+}
 
 /**
  * Typechecks exactly the tree the diff names, in the same call, so a pass can never belong to another tree: the walk can
@@ -234,7 +279,7 @@ export type DiffResult =
  * TypeScript compiler is that install's, run by this vessel's bun. Only the compiler runs as the shell user, with
  * nothing in its env but PATH, so a config that names a file only root may read cannot show it in the row.
  */
-async function typecheckTree(t: Trusted, made: Made, work: string): Promise<Typecheck> {
+async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string }): Promise<Typecheck> {
   const config = await t.out(["show", `${t.origin}:tsconfig.json`]);
   if (config === null) return { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" };
   const installed = join(containmentZones(process.env).runtime, made.repo, "node_modules");
@@ -249,30 +294,70 @@ async function typecheckTree(t: Trusted, made: Made, work: string): Promise<Type
   if (patch === null || added === null) return { ran: false, passed: false, why: "the change's lines could not be read" };
   const quiet = silenced(patch, added.split("\n").filter(Boolean));
   if (quiet.length > 0) return { ran: false, passed: false, why: `the change silences the check in ${quiet.join(", ")}` };
-  const tar = join(work, "tree.tar");
-  const a = await trusted(["archive", "--format=tar", "-o", tar, "refs/land/head"], t.repo, work);
-  if (a.exit_code !== 0) return { ran: false, passed: false, why: "the tree could not be written out" };
-  const dir = join(work, "check");
-  mkdirSync(dir, { mode: 0o755 });
-  const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore" });
-  if (x.exitCode !== 0) return { ran: false, passed: false, why: "the tree could not be written out" };
+  if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
   writeFileSync(join(dir, "tsconfig.json"), config);
-  rmSync(join(dir, "node_modules"), { recursive: true, force: true });
-  symlinkSync(installed, join(dir, "node_modules"));
-  const s = agentShellSpawn([realpathSync(process.execPath), tsc, "--noEmit", "-p", dir], { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir());
+  const r = await asShellUser([realpathSync(process.execPath), tsc, "--noEmit", "-p", dir], dir);
+  // the compiler's errors lead its output: keep the start
+  return { ran: true, passed: r.exit_code === 0 && !r.signalled, exit_code: r.exit_code, out: r.out.slice(0, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+}
+
+/** A command run in `dir` as the shell user, env PATH only, within the step time; its output, with dir shown as ".". */
+async function asShellUser(argv: string[], dir: string): Promise<{ exit_code: number; signalled: boolean; out: string }> {
+  const s = agentShellSpawn(argv, { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir());
   try {
     const p = Bun.spawn(s.argv, { cwd: dir, env: s.env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(STEP_MS) });
     const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     const out = `${stdout}${stderr}`.split(dir).join(".");
-    const exit_code = typeof code === "number" ? code : -1;
-    return { ran: true, passed: exit_code === 0 && !p.signalCode, exit_code, out: out.slice(0, CHECK_OUT_MAX), truncated: out.length > CHECK_OUT_MAX };
+    return { exit_code: typeof code === "number" ? code : -1, signalled: Boolean(p.signalCode), out };
   } finally {
     void s.done();
   }
 }
 
+/**
+ * The tree, written out of the trusted repository by this vessel into a directory of its own that the shell user can
+ * read, with the repository's installed node_modules on this node in place of any the change carried: what both checks
+ * run on, so nothing of the clone's is run and nothing it installed is resolved.
+ */
+async function writeOut(t: Trusted, made: Made, work: string): Promise<string | { why: string }> {
+  const tar = join(work, "tree.tar");
+  const a = await trusted(["archive", "--format=tar", "-o", tar, "refs/land/head"], t.repo, work);
+  if (a.exit_code !== 0) return { why: "the tree could not be written out" };
+  const dir = join(work, "check");
+  mkdirSync(dir, { mode: 0o755 });
+  const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore" });
+  if (x.exitCode !== 0) return { why: "the tree could not be written out" };
+  rmSync(join(dir, "node_modules"), { recursive: true, force: true });
+  symlinkSync(join(containmentZones(process.env).runtime, made.repo, "node_modules"), join(dir, "node_modules"));
+  return dir;
+}
+
+/**
+ * Whether the gap's own check passes on exactly this tree, in the same call: its test file run alone, as the detector's
+ * closer runs it, every named test passing. The check is the base's: a change to its test file, to what tests lean on
+ * (TEST_SUPPORT) or to what chooses how code is checked (CHECK_CONFIG) does not pass, so a change cannot pass by editing
+ * the check. It runs as the shell user, in the tree written out with the installed node_modules.
+ */
+async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef | { error: string }): Promise<GapCheck> {
+  if ("error" in gap) return { ran: false, passed: false, why: gap.error };
+  const id = { gap_id: gap.gap_id, test_file: gap.test_file };
+  if (typeof dir !== "string") return { ...id, ran: false, passed: false, why: dir.why };
+  const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
+  if (changed === null) return { ...id, ran: false, passed: false, why: "the change's paths could not be read" };
+  const edits = changed.split("\n").filter((p) => p === gap.test_file || TEST_SUPPORT.test(p) || CHECK_CONFIG.test(p));
+  if (edits.length > 0) return { ...id, ran: false, passed: false, why: `the change edits the check: ${edits.join(", ")}` };
+  if (!existsSync(join(dir, gap.test_file))) return { ...id, ran: false, passed: false, why: `${gap.test_file} is not in the tree` };
+  const r = await asShellUser([realpathSync(process.execPath), "test", `./${gap.test_file}`, "--timeout", "20000"], dir);
+  const lines = r.out.split("\n");
+  const counted = lines.some((l) => /^ *[0-9]+ (pass|fail)$/.test(l));
+  const named = gap.only_tests.length === 0 ? r.exit_code === 0
+    : gap.only_tests.every((n) => lines.some((l) => l.includes(`(pass) ${n}`)) && !lines.some((l) => l.includes(`(fail) ${n}`)));
+  // judged on the whole output; a test run's summary ends it: keep the end
+  return { ...id, ran: true, passed: counted && named && !r.signalled, exit_code: r.exit_code, out: r.out.slice(-CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+}
+
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
-export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports): Promise<DiffResult> {
+export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports, gap: GapRef | null | { error: string } = null): Promise<DiffResult> {
   const work = mkdtempSync(join(tmpdir(), "diff-"));
   try {
     const t = await intoTrusted(cwd, made, work, transports);
@@ -280,8 +365,10 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const base = await t.out(["rev-parse", t.origin]);
     const diff = await t.out(["diff", "--no-renames", t.origin, "refs/land/head"]);
     if (base === null || diff === null) return { error: "the change's diff could not be read" };
-    const typecheck = await typecheckTree(t, made, work);
-    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX, typecheck };
+    const dir = await writeOut(t, made, work);
+    const typecheck = await typecheckTree(t, made, dir);
+    const check = gap === null ? {} : { check: await gapCheck(t, dir, gap) };
+    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX, typecheck, ...check };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
   }

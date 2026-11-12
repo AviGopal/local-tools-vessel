@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
-import { diffClone, landClone } from "./git-land";
+import { diffClone, gapOf, landClone } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
 
@@ -62,6 +62,11 @@ const originHead = () => g(ORIGIN, "rev-parse", "dev");
 const ask = { id: "ask1", shape: "world_changed", role: "person" } as Row;
 // What git_diff says of a tree that typechecks: a grader's verdict counts only from a diff that says so.
 const TC_OK = { ran: true, passed: true, exit_code: 0, out: "", truncated: false };
+/** A person's r 1 on the walk's whole diff of a tree: the rows a person's approval is given on. */
+const personOn = (tree: string, id: string, extra: Record<string, unknown> = {}): Row[] => [
+  { id: `pd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: false, typecheck: TC_OK } as Row,
+  { id, shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, input_refs: [`pd-${id}`], ...extra } as Row,
+];
 
 beforeAll(() => {
   Object.assign(process.env, { SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
@@ -94,7 +99,7 @@ afterAll(() => {
 const SCANNER = Bun.which("gitleaks", { PATH: process.env.PATH ?? "" });
 const scanned = (name: string, fn: () => Promise<void>) => it(SCANNER ? name : `${name} (no secrets scanner here: refused)`, SCANNER ? fn : async () => {
   const { cwd, tree } = await change(`noscan-${Math.random().toString(36).slice(2)}.txt`, "x\n");
-  table = [{ id: "vp", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+  table = personOn(tree, "vp");
   const before = originHead();
   expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no secrets scanner");
   expect(originHead()).toBe(before);
@@ -106,10 +111,10 @@ describe("git_land", () => {
     const { cwd, tree } = await change("a.txt", "two\n");
     table = [];
     expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no verdict approves this tree");
-    table = [{ id: "v1", shape: "land_verdict", repo: "demo", tree: "0".repeat(40), role: "person", r: 1 }];
+    table = personOn("0".repeat(40), "v1");
     expect("error" in (await landClone(cwd, deps))).toBe(true);
     expect(originHead()).toBe(before);
-    table = [{ id: "v2", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+    table = personOn(tree, "v2");
     const r = await landClone(cwd, deps);
     if (!("pushed" in r)) throw new Error(JSON.stringify(r));
     expect(originHead()).toBe(r.head);
@@ -143,6 +148,32 @@ describe("git_land", () => {
     expect("pushed" in r && r.verdict_by).toBe("described-x");
   });
 
+  scanned("[MUST-FAIL] a person's r 1 counts only on the walk's whole diff of the tree", async () => {
+    const { cwd, tree } = await change("p.txt", "p\n");
+    const verdict = (refs: string[]) => ({ id: "vq", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, input_refs: refs } as Row);
+    const forged = { id: "fd", shape: "gitDiff", role: "person", repo: "demo", tree, truncated: false } as Row;
+    const cut = { id: "cd", shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: true } as Row;
+    for (const t of [[forged, verdict(["fd"])], [cut, verdict(["cd"])], [verdict([])]]) {
+      table = t;
+      expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no verdict approves this tree");
+    }
+    table = personOn(tree, "vq2");
+    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+  });
+
+  scanned("[MUST-FAIL] on a gap, a grader's r 1 lands only when the gap's own check passed on the tree, for that gap", async () => {
+    const { cwd, tree } = await change("q.txt", "q\n");
+    const gap = { id: "gr1", shape: "gap", role: "detector", gap_id: "G1" } as Row;
+    const diff = (check: unknown) => ({ id: "dg", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["gr1"], typecheck: TC_OK, check } as Row);
+    const v = { id: "vg", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["gr1", "dg"] } as Row;
+    for (const check of [undefined, { gap_id: "G1", passed: false }, { gap_id: "G2", passed: true }]) {
+      table = [gap, diff(check), v];
+      expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no verdict approves this tree");
+    }
+    table = [gap, diff({ gap_id: "G1", passed: true }), v];
+    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+  });
+
   scanned("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
     const { cwd, tree } = await change("c.txt", "c\n");
     const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
@@ -150,7 +181,7 @@ describe("git_land", () => {
     const yes = { id: "v7", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d2"] } as Row;
     table = [ask, diff, no, yes];
     expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("r 0");
-    table = [ask, diff, no, yes, { id: "v8", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, writer: "kid-person" }];
+    table = [ask, diff, no, yes, { id: "v8", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, writer: "kid-person", input_refs: ["d2"] }];
     const r = await landClone(cwd, deps);
     expect("pushed" in r && r.verdict_by).toBe("kid-person");
   });
@@ -167,7 +198,7 @@ describe("git_land", () => {
   scanned("[MUST-FAIL] a planted secret is refused by its rule, and the answer never carries its text", async () => {
     const secret = ["mb", "_", "Q".repeat(20), "z".repeat(20)].join("");
     const { cwd, tree } = await change("d.txt", `key = ${secret}\n`);
-    table = [{ id: "v10", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+    table = personOn(tree, "v10");
     const r = await landClone(cwd, deps);
     expect(String((r as { error: string }).error)).toContain("secrets scan found");
     expect((r as unknown as { rules: string[] }).rules).toContain("substrate-api-key");
@@ -179,7 +210,7 @@ describe("git_land", () => {
     const elsewhere = join(T, "elsewhere");
     g(T, "clone", "-q", "-b", "dev", ORIGIN, elsewhere);
     writeFileSync(join(elsewhere, "z.txt"), "z\n"); commitAll(elsewhere, "moved on"); g(elsewhere, "push", "-q", "origin", "HEAD:dev");
-    table = [{ id: "v11", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+    table = personOn(tree, "v11");
     expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("fast-forward");
 
     const m = await change("f.txt", "f\n");
@@ -188,13 +219,13 @@ describe("git_land", () => {
     g(m.cwd, "checkout", "-q", "-");
     g(m.cwd, "merge", "-q", "--no-edit", "side");
     asOwner(m.cwd);
-    table = [{ id: "v12", shape: "land_verdict", repo: "demo", tree: g(m.cwd, "rev-parse", "HEAD^{tree}"), role: "person", r: 1 }];
+    table = personOn(g(m.cwd, "rev-parse", "HEAD^{tree}"), "v12");
     expect(String((await landClone(m.cwd, deps) as { error: string }).error)).toContain("merge");
   });
 
   it("[MUST-FAIL] with no secrets scanner on the node, nothing lands", async () => {
     const { cwd, tree } = await change("h.txt", "h\n");
-    table = [{ id: "v13", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+    table = personOn(tree, "v13");
     const before = originHead();
     process.env.PATH = "/usr/bin:/bin";
     try {
@@ -214,7 +245,7 @@ describe("git_land", () => {
     writeFileSync(sys, `[core]\n\thooksPath = ${join(cwd, "evil")}\n`);
     const keep = process.env.GIT_CONFIG_SYSTEM;
     process.env.GIT_CONFIG_SYSTEM = sys;
-    table = [{ id: "v14", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1 }];
+    table = personOn(tree, "v14");
     try {
       expect("pushed" in (await landClone(cwd, deps))).toBe(true);
     } finally { if (keep === undefined) delete process.env.GIT_CONFIG_SYSTEM; else process.env.GIT_CONFIG_SYSTEM = keep; }
@@ -310,6 +341,47 @@ describe("git_land", () => {
       const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
       expect("tree" in r && r.typecheck).toMatchObject({ passed: false });
     }
+  });
+
+  it("[MUST-FAIL] git_diff runs the gap's own check on the exact tree: it passes only when the source is fixed", async () => {
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "calc.ts"), "export const add = (a: number, b: number): number => a - b;\n");
+    writeFileSync(join(seed, "calc.test.ts"), 'import { expect, test, describe } from "bun:test";\nimport { add } from "./calc";\n' +
+      'describe("add", () => { test("adds", () => { expect(add(1, 2)).toBe(3); }); test("zero", () => { expect(add(0, 0)).toBe(0); }); });\n');
+    commitAll(seed, "a failing check"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const gap = { gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] };
+    const check = async (files: Record<string, string | null>, g2: unknown = gap) => {
+      const { cwd } = await changeOf(files);
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"], g2 as never);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      return r.check;
+    };
+    const fixed = "export const add = (a: number, b: number): number => a + b;\n";
+    expect(await check({ "calc.ts": fixed })).toMatchObject({ gap_id: "G1", test_file: "calc.test.ts", ran: true, passed: true });
+    expect(await check({ "calc.ts": "export const add = (a: number, b: number): number => a * b;\n" })).toMatchObject({ ran: true, passed: false });
+    // the check is the base's: a change to the test, or to what tests lean on, does not pass whatever it does
+    expect(await check({ "calc.test.ts": 'import { test } from "bun:test";\ntest("adds", () => {});\n' })).toMatchObject({ passed: false });
+    expect(await check({ "calc.ts": fixed, "fixtures/x.json": "{}" })).toMatchObject({ passed: false });
+    // fails closed: a test file not in the tree, or a gap that could not be read
+    expect(await check({ "calc.ts": fixed }, { ...gap, test_file: "nope.test.ts" })).toMatchObject({ passed: false });
+    expect(await check({ "calc.ts": fixed }, { error: "unreadable" })).toEqual({ ran: false, passed: false, why: "unreadable" });
+    // not made for a gap: no check at all
+    const { cwd } = await changeOf({ "calc.ts": fixed });
+    const plain = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    expect("tree" in plain && "check" in plain).toBe(false);
+  });
+
+  it("[MUST-FAIL] the gap a diff is checked for is the one its call's selection was made on", async () => {
+    const rowsOf = (all: Row[]) => async (q: Query) => all.filter((r) => q.ids?.includes(r.id));
+    const gapRow = { id: "gr", shape: "gap", role: "detector", gap_id: "G1",
+      meta: { evidence_resolve: { input: { test_file: "calc.test.ts", only_tests: ["add > adds"] } } } } as Row;
+    const sel = (root: string) => ({ id: "s1", shape: "selection", role: "walk", root } as Row);
+    expect(await gapOf(rowsOf([sel("gr"), gapRow]), "s1")).toEqual({ gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] });
+    expect(await gapOf(rowsOf([sel("ask1"), ask]), "s1")).toBeNull();
+    expect(await gapOf(rowsOf([]), undefined)).toBeNull();
+    expect(await gapOf(rowsOf([sel("gr"), { ...gapRow, meta: {} } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no test file") });
+    expect(await gapOf(rowsOf([{ id: "s1", shape: "selection" } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no root") });
   });
 
   it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {

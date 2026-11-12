@@ -28,8 +28,8 @@ import { runAllowlistedScript } from "./script-runner.js";
 import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
-import { diffClone, landClone } from "./git-land.js";
-import { madeClone } from "./walk-rows.js";
+import { diffClone, gapOf, landClone } from "./git-land.js";
+import { madeClone, readRows } from "./walk-rows.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
@@ -572,7 +572,11 @@ const gitDiff: ResolverHandler = async (ctx) => {
   // A clone git_worktree made answers its committed change, with the tree it would land as: what a grader judges.
   if (cwd) {
     const made = await madeClone(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
-    if (made && !("error" in made)) return diffClone(made.cwd, made).catch(refusedOrError);
+    if (made && !("error" in made)) {
+      // the walk names its selection on every call: the gap the clone is for, if its root is one, is checked on the tree
+      const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref")).catch((e) => ({ error: String(e) }));
+      return diffClone(made.cwd, made, undefined, gap).catch(refusedOrError);
+    }
   }
   const staged = (ctx.body as Record<string,unknown>)?.staged === true;
   return sh(staged ? "git diff --staged" : "git diff", cwd)
