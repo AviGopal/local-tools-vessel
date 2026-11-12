@@ -474,6 +474,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // what tests lean on are the check the fix must pass: git_diff's gap check refuses a change to them, after the work is
   // done. Said here, at the edit, the walk can still choose the source instead; the refusal names where the gap row says
   // the fix belongs. A clone made for anything else edits tests as before.
+  // Fails open (a records that cannot be read refuses no edit): git_diff's gap check is the gate.
   const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref") ?? str(ctx.body, "selection_ref")).catch(() => null);
   if (gap && !("error" in gap)) {
     const rel = inRepo(path);

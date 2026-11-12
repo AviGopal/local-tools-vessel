@@ -22,7 +22,7 @@ const SRC = "export const add = (a: number, b: number): number => a - b;\n";
 const ROWS: Record<string, Record<string, unknown>> = {
   "sel-gap": { id: "sel-gap", shape: "selection", role: "walk", root: "gap-1" },
   "gap-1": { id: "gap-1", shape: "gap", role: "detector", gap_id: "G1",
-    meta: { edit_site: "src/calc.ts", evidence_resolve: { input: { test_file: "src/calc.test.ts", only_tests: ["adds"] } } } },
+    meta: { sources: ["src/calc.ts", "src/util.ts"], evidence_resolve: { input: { test_file: "src/calc.test.ts", only_tests: ["adds"] } } } },
   "sel-ask": { id: "sel-ask", shape: "selection", role: "walk", root: "ask-1" },
   "ask-1": { id: "ask-1", shape: "world_changed", role: "person", what: "fix the test" },
 };
@@ -47,7 +47,7 @@ describe("the gap's check at the edit", () => {
     const out = await edit(test, "toBe(3)", "toBe(-1)", "sel-gap");
     expect(out).toMatchObject({ refused: "gap_check" });
     expect(String(out.error)).toContain("src/calc.test.ts is the gap's check");
-    expect(String(out.error)).toContain("(src/calc.ts)");
+    expect(String(out.error)).toContain("edit the source it tests (src/calc.ts, src/util.ts)");
     expect(readFileSync(test, "utf8")).toBe(TEST);
   });
 

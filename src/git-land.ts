@@ -307,11 +307,10 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
   if (!g || g.shape !== "gap" || g.role !== "detector") return null;
   const input = ((g.meta as { evidence_resolve?: { input?: Record<string, unknown> } } | undefined)?.evidence_resolve?.input ?? {});
   if (typeof input.test_file !== "string" || input.test_file === "") return { error: `gap ${String(g.gap_id)} names no test file` };
-  // Where the fix belongs, as the gap row says it (its edit site, else what the check imports): named when an edit of
-  // the check itself is refused, so the refusal says where to edit instead.
-  const meta = (g.meta ?? {}) as { edit_site?: unknown; sources?: unknown };
-  const lever = typeof meta.edit_site === "string" && meta.edit_site ? meta.edit_site
-    : Array.isArray(meta.sources) && meta.sources.length > 0 ? meta.sources.map(String).join(", ") : undefined;
+  // Where the fix belongs, as the gap row says it (meta.sources: what the check imports, which the detector writes):
+  // named when an edit of the check itself is refused, so the refusal says where to edit instead.
+  const sources = ((g.meta ?? {}) as { sources?: unknown }).sources;
+  const lever = Array.isArray(sources) && sources.length > 0 ? sources.map(String).join(", ") : undefined;
   return { gap_id: String(g.gap_id), test_file: input.test_file, only_tests: [input.only_tests ?? []].flat().map(String), ...(lever ? { lever } : {}) };
 }
 
