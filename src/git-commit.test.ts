@@ -193,6 +193,25 @@ describe("git_worktree", () => {
     expect(q.cwd).not.toBe(p.cwd); // never another open request's clone
   });
 
+  it("[MUST-FAIL] a clone two open requests both hold goes back to neither, as it is or brought to a new base", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { rows, st, sel, ask } = stubRecords();
+    for (const [id, root] of [["sel-s", "R-S"], ["sel-s2", "R-S"], ["sel-t", "R-T"], ["sel-t2", "R-T"], ["sel-s3", "R-S"]]) sel(id, root);
+    st.open = ["R-S", "R-T"];
+    const shared = await ask("sel-s");
+    // a second open request is recorded as holding the same clone (as before the handout checked)
+    rows.push(...walkCall("shared-t", "git_worktree", "sel-t", { ...shared }).map((h) => ({ ...h, writer: "walk-1", seq: rows.length + 1 })));
+    expect((await ask("sel-s2")).cwd).not.toBe(shared.cwd); // not handed back as it is
+    expect((await ask("sel-t2")).cwd).not.toBe(shared.cwd);
+    const demo = join(CLONES, "demo");
+    writeFileSync(join(demo, "c.txt"), "three\n");
+    commitAll(demo, "another push"); // the copy moves on: not brought to the new base under the other request either
+    const moved = await ask("sel-s3");
+    expect(moved.cwd).not.toBe(shared.cwd);
+    expect(g(shared.cwd, "rev-parse", "HEAD")).toBe(shared.base); // the shared clone is untouched
+    globalThis.fetch = realFetch;
+  });
+
   it("[MUST-FAIL] once the copy has moved on, a request's own unchanged clone is brought to the new tip in place; a changed one is not handed back", async () => {
     process.env.METABOB_API_KEY = "test-node-key";
     const { st, sel, ask } = stubRecords();

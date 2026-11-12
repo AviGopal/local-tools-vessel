@@ -91,8 +91,10 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
   // git read: a commit or landing reads that same row back (walk-rows.ts madeClone), so the answer must agree with it.
   // Only while it was made at the copy's HEAD now, from the same origin: once the copy has moved on (a push landed), the
   // request is asking for a clone at the new tip, which is how it recovers from working in one that is behind.
-  const ownClone = h?.ours.find((o) => o.made.repo === repo && o.made.base === base && o.made.origin_url === origin && isRepo(o.cwd)
-    && typeof o.made.branch === "string" && o.made.branch !== "");
+  // Never one another open request also holds (may): a clone handed to two requests would carry one's edit into the
+  // other's commit, and a refresh would move its base under the other's change.
+  const ownClone = h?.ours.find((o) => o.made.repo === repo && o.made.base === base && o.made.origin_url === origin && h.may(o.cwd)
+    && isRepo(o.cwd) && typeof o.made.branch === "string" && o.made.branch !== "");
   if (ownClone) {
     const m = ownClone.made as Record<string, string>;
     return { shape: "gitWorktree", cwd: ownClone.cwd, repo, branch: m.branch, base: m.base, super_base: superBase, origin_url: m.origin_url };
@@ -102,7 +104,7 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
   // Making a fresh clone instead copies the whole repository again, and every push would do that for every request.
   // The answer says which base it moved from (refreshed_from), so a later commit reads the clone's rows as one clone.
   const stale = h?.ours.find((o) => o.made.repo === repo && o.made.origin_url === origin && typeof o.made.base === "string"
-    && o.made.base !== base && isRepo(o.cwd));
+    && o.made.base !== base && h.may(o.cwd) && isRepo(o.cwd));
   if (stale && await refreshed(stale.cwd, String(stale.made.base), base, branch, source)) {
     return { shape: "gitWorktree", cwd: stale.cwd, repo, branch, base, super_base: superBase, origin_url: origin, refreshed_from: String(stale.made.base) };
   }
