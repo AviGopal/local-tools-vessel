@@ -21,7 +21,7 @@ export { walkTreesDir };
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export type Worktree =
-  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string }
+  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string }
   | { error: string };
 
 const isRepo = (p: string): boolean => { try { return statSync(join(p, ".git")).isDirectory(); } catch { return false; } };
@@ -97,6 +97,15 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     const m = ownClone.made as Record<string, string>;
     return { shape: "gitWorktree", cwd: ownClone.cwd, repo, branch: m.branch, base: m.base, super_base: superBase, origin_url: m.origin_url };
   }
+  // The request's own clone made at an older base (the copy has moved on since: a push landed) is brought to the new base
+  // in place when nothing in it has changed: the new base is fetched from the copy into it and its own branch moved there.
+  // Making a fresh clone instead copies the whole repository again, and every push would do that for every request.
+  // The answer says which base it moved from (refreshed_from), so a later commit reads the clone's rows as one clone.
+  const stale = h?.ours.find((o) => o.made.repo === repo && o.made.origin_url === origin && typeof o.made.base === "string"
+    && o.made.base !== base && isRepo(o.cwd));
+  if (stale && await refreshed(stale.cwd, String(stale.made.base), base, branch, source)) {
+    return { shape: "gitWorktree", cwd: stale.cwd, repo, branch, base, super_base: superBase, origin_url: origin, refreshed_from: String(stale.made.base) };
+  }
   const reused = await unchangedClone(trees, repo, base, origin, h);
   if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin };
   const id = `${repo}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
@@ -113,6 +122,23 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     if (r.exit_code !== 0) return { error: `git ${args.find((a) => !a.startsWith("-") && a !== cwd)} failed: ${r.stderr.slice(-500)}` };
   }
   return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin };
+}
+
+// Bring an unchanged clone made at `from` to `to`: nothing modified or untracked, and no commit past `from`; then the copy's
+// branch is fetched into it (the same upload-pack form the clone was made with: never shared objects) and the clone's own
+// branch moved to `to`. False on anything else, and the caller makes a fresh clone as before.
+async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<boolean> {
+  const out = async (args: string[], timeoutMs?: number) => {
+    const r = await git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
+    return r.exit_code === 0 ? r.stdout.trim() : null;
+  };
+  const own = await out(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!own || !own.startsWith("walk/")) return false;
+  if ((await out(["status", "--porcelain", "--untracked-files=all"])) !== "") return false;
+  if ((await out(["rev-list", "HEAD", "--not", from])) !== "") return false;
+  if ((await out(["fetch", "--quiet", "--upload-pack=git -c 'safe.directory=*' upload-pack", source, branch], 300_000)) === null) return false;
+  if ((await out(["checkout", "--quiet", "-B", own, to])) === null) return false;
+  return (await out(["rev-parse", "HEAD"])) === to;
 }
 
 // The newest clone under `trees` of this repo, that this request may be handed (handouts), still as made: its own walk/<name> branch, HEAD at `base`, origin

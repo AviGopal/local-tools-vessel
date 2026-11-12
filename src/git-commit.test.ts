@@ -108,7 +108,8 @@ describe("git_worktree", () => {
     const ask = async (s?: string) => {
       const w = await makeWorktree("demo", process.env, s);
       if ("error" in w) throw new Error(w.error);
-      if (s) rows.push(...walkCall(String(rows.length), "git_worktree", s, { cwd: w.cwd, repo: w.repo, branch: w.branch, base: w.base, origin_url: w.origin_url }).map((h) => ({ ...h, writer: "walk-1" })));
+      // the walk records the whole answer in its ended hop (refreshed_from included, when a clone was brought to a new base)
+      if (s) rows.push(...walkCall(String(rows.length), "git_worktree", s, { ...w }).map((h) => ({ ...h, writer: "walk-1", seq: rows.length + 1 })));
       return w;
     };
     return { rows, st, sel, ask };
@@ -192,7 +193,7 @@ describe("git_worktree", () => {
     expect(q.cwd).not.toBe(p.cwd); // never another open request's clone
   });
 
-  it("[MUST-FAIL] once the copy has moved on, a request's own clone, changed or not, is not handed back: a clone at the new tip is", async () => {
+  it("[MUST-FAIL] once the copy has moved on, a request's own unchanged clone is brought to the new tip in place; a changed one is not handed back", async () => {
     process.env.METABOB_API_KEY = "test-node-key";
     const { st, sel, ask } = stubRecords();
     const demo = join(CLONES, "demo");
@@ -205,12 +206,21 @@ describe("git_worktree", () => {
     commitAll(demo, "a push landed"); // the copy moves on
     const tip = g(demo, "rev-parse", "HEAD");
     // each case on its own line: the changed clone, then the unchanged one
+    const trees = join(T, "trees");
+    const before = readdirSync(trees).length;
     const got: string[] = [];
+    const answers: Record<string, unknown>[] = [];
     for (const [s, old, what] of [["sel-e2", e, "changed"], ["sel-f2", f, "unchanged"]] as const) {
       const w = await ask(s);
+      answers.push(w as unknown as Record<string, unknown>);
       got.push(`${what}: ${w.cwd !== old.cwd ? "new clone" : "same clone"}, base ${w.base === tip ? "tip" : "old"}, HEAD ${g(w.cwd, "rev-parse", "HEAD") === tip ? "tip" : "old"}`);
     }
-    expect(got).toEqual(["changed: new clone, base tip, HEAD tip", "unchanged: new clone, base tip, HEAD tip"]);
+    expect(got).toEqual(["changed: new clone, base tip, HEAD tip", "unchanged: same clone, base tip, HEAD tip"]);
+    expect(answers[1].refreshed_from).toBe(f.base); // says which base it moved from
+    expect(readdirSync(trees).length).toBe(before + 1); // only the changed one's fresh clone was made
+    // a commit in the refreshed clone reads its rows as one clone, at the new base
+    const madeThere = await madeClone(f.cwd);
+    expect("error" in madeThere ? madeThere.error : madeThere.base).toBe(tip);
     globalThis.fetch = realFetch;
   });
 
@@ -285,6 +295,12 @@ describe("git_commit", () => {
     answer(call("1", "git_worktree", w, { role: "person" }));
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no walk row");
     // the same clone handed out twice: both rows agree, and the later one's super_base holds
+    // a refresh moves one clone's base, and says from which: its rows read as one clone, at the newest base
+    answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, base: "1".repeat(40), refreshed_from: w.base }, { seq: 2 })]);
+    expect((await madeClone(cwd) as { base: string }).base).toBe("1".repeat(40));
+    // a refresh claiming a base the rows never held is a collision still
+    answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, base: "1".repeat(40), refreshed_from: "2".repeat(40) }, { seq: 2 })]);
+    expect(String((await madeClone(cwd) as { error: string }).error)).toContain("different clones");
     answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, super_base: "f".repeat(40) }, { seq: 2 })]);
     expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: "f".repeat(40), origin_url: w.origin_url });
     answer([...call("1", "git_worktree", w), ...call("3", "git_land", { cwd })]);

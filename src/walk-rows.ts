@@ -71,7 +71,10 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   const mine = made.filter((r) => r.role === "walk" && r.output?.cwd === cwd).sort((a, b) => Number(a.seq) - Number(b.seq))
   if (mine.length === 0) return { error: `no walk row records a clone made at ${cwd}: a commit or landing needs one` };
   const same = (k: string) => new Set(mine.map((r) => String(r.output?.[k] ?? ""))).size === 1;
-  if (!["repo", "branch", "base", "origin_url"].every(same)) {
+  // One clone's base moves only by a refresh, which says the base it moved from: each row keeps the one before's base or
+  // was refreshed from it. Any other difference is two clones at one place, a collision.
+  const chained = mine.every((r, i) => i === 0 || r.output?.base === mine[i - 1].output?.base || r.output?.refreshed_from === mine[i - 1].output?.base);
+  if (!["repo", "branch", "origin_url"].every(same) || !chained) {
     return { error: `${mine.length} walk rows record different clones made at ${cwd}: a commit or landing needs one` };
   }
   const landed = await endedCalls("git_land");
