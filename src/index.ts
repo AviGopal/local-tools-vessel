@@ -423,6 +423,10 @@ const fsWrite: ResolverHandler = async (ctx) => {
     .catch(refusedOrError);
 };
 
+// How much of the file a missed edit's answer leads with, JSON-escaped: it must sit inside the 1000 characters of a
+// refusal the walk keeps, with the field's name and the start of the next one.
+const CURRENT_MAX = 800;
+
 const fsEdit: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools) dispatch via the
   // impulse envelope, so top-level-only reads (the prior bug) made every call
@@ -502,16 +506,25 @@ const fsEdit: ResolverHandler = async (ctx) => {
       }
       if (bestScore < 2) idx = -1;
     }
-    const hint = idx !== -1
-      ? (() => {
-          const from = Math.max(0, idx - 2), to = Math.min(lines.length, idx + 4);
-          return ` The closest real text is lines ${from + 1}-${to} of ${lines.length}, VERBATIM:\n` +
-            lines.slice(from, to).map((l, i) => `${from + i + 1}: ${l}`).join("\n") +
-            `\nCopy old_string from THIS text exactly, including indentation.`;
-        })()
-      : ` NOTHING resembling your anchor occurs in this ${lines.length}-line file — you are editing` +
-        ` from memory, not from the file. Call fs_read on ${path} and copy an EXACT substring.`;
-    return { error: `old_string not found in file.${hint}`, path };
+    if (idx === -1) {
+      return { error: `old_string not found in file. NOTHING resembling your anchor occurs in this ${lines.length}-line file — you are` +
+        ` editing from memory, not from the file. Call fs_read on ${path} and copy an EXACT substring.`, path };
+    }
+    // The file's own lines over the span the anchor claims (its first line's match, and as many lines as the anchor has,
+    // with two around), VERBATIM and FIRST in the answer: the walk keeps only the start of a refusal (1000 characters of
+    // its failure row), and a long file read is cut, so the region the next try must copy is put where it is kept, as
+    // much of it as fits there.
+    const from = Math.max(0, idx - 2);
+    const want = Math.min(lines.length, idx + old_string.split("\n").length + 2);
+    let to = from + 1;
+    while (to < want && JSON.stringify(lines.slice(from, to + 1).join("\n")).length <= CURRENT_MAX) to++;
+    const current = lines.slice(from, to).join("\n");
+    return {
+      current,
+      error: `old_string not found in file. current is lines ${from + 1}-${to} of ${lines.length} of ${path} as they are now,` +
+        ` verbatim: copy old_string from it exactly, including indentation.`,
+      path,
+    };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
