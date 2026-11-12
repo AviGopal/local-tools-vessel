@@ -82,6 +82,46 @@ describe("declared shape inputs", () => {
     expect(src).toContain("shapeAnswers: SHAPE_ANSWERS")
   })
 
+  // Read from the source, not from a call: a call answers only where the handler can run (bounded_shell's default
+  // directory is absent outside a node), and a refusal names no shape, so a check on what a call answered passed
+  // wherever the handler was refused. Each declared answer is every shape the tool's handler returns, or any function it
+  // hands the call to (in its own module or one it imports) returns.
+  it("[MUST-FAIL] each declared answer is the shape its handler answers with (bounded_shell answers boundedShellResult)", () => {
+    const read = (m: string) => readFileSync(join(import.meta.dir, `${m}.ts`), "utf8")
+    const importsOf = (text: string) => {
+      const out = new Map<string, string>()
+      for (const m of text.matchAll(/^import \{([^}]*)\} from "\.\/([\w-]+)(?:\.js)?"/gm))
+        for (const name of m[1].split(",").map((n) => n.trim().split(/\s+as\s+/).pop()!).filter(Boolean)) out.set(name, m[2])
+      return out
+    }
+    // A top-level definition's text, from its name to the next top-level definition.
+    const definition = (text: string, name: string): string => {
+      const start = text.search(new RegExp(`^(?:export )?(?:const ${name}\\b|(?:async )?function ${name}\\b)`, "m"))
+      if (start === -1) return ""
+      const end = text.slice(start + 1).search(/\n(?:export |const |let |function |async function |class )/)
+      return text.slice(start, end === -1 ? undefined : start + 1 + end)
+    }
+    const answers = (module: string, name: string, seen: Set<string>): string[] => {
+      if (seen.has(`${module}:${name}`)) return []
+      seen.add(`${module}:${name}`)
+      const text = read(module)
+      const body = definition(text, name)
+      const imports = importsOf(text)
+      const called = [...new Set([...body.matchAll(/\b(\w+)\(/g)].map((m) => m[1]))].filter((f) => f !== name)
+      return [
+        ...[...body.matchAll(/(?:return|=>)\s*\(?\{\s*shape: "(\w+)"/g)].map((m) => m[1]),
+        ...called.flatMap((f) => imports.has(f) ? answers(imports.get(f)!, f, seen) : definition(text, f) ? answers(module, f, seen) : []),
+      ]
+    }
+    const index = read("index")
+    for (const [tool, declared] of Object.entries(SHAPE_ANSWERS)) {
+      const handler = index.match(new RegExp(`\\["${tool}", (\\w+)\\]`))?.[1] ?? ""
+      const found = answers("index", handler, new Set())
+      expect({ tool, answers: found.length > 0 }).toEqual({ tool, answers: true })
+      for (const shape of found) expect({ tool, shape }).toEqual({ tool, shape: declared })
+    }
+  })
+
   it("every described shape is declared, and the other way round", () => {
     expect(Object.keys(SHAPE_DESCRIPTIONS).sort()).toEqual(Object.keys(SHAPE_INPUTS).sort())
   })

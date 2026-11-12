@@ -103,5 +103,5 @@ export const SHAPE_ANSWERS: Record<string, string> = {
   code_replace_lines: "codeReplaceResult",
   code_read_lines: "codeReadResult",
   code_verify_typecheck: "codeTypecheckResult",
-  bounded_shell: "shellResult",
+  bounded_shell: "boundedShellResult",
 }
