@@ -379,9 +379,9 @@ async function runCheck(dir: string, testFile: string): Promise<{ passed: Set<st
  * Whether the gap's own check passes on exactly this tree, in the same call: its test file run alone, as the detector's
  * closer runs it, every named test passing and no test of the file that passed on the base failing (a fix that turns a
  * sibling red, a confinement test say, does not pass). The base is run first, in the same call, from origin's branch:
- * when no named test fails there, the gap's check has nothing to tell, so it does not run, and the detector's closer,
- * which runs the same test file on that branch, decides the gap. The base's result is read before anything of the
- * change runs. The check is the base's: a change to its test file, to what tests lean on
+ * when no named test fails there, the gap's check has nothing to tell, so it does not run, and says so. That is all it
+ * says of the gap: the closer that closes gaps judges the same file elsewhere, and may still read it red. The base's
+ * result is read before anything of the change runs. The check is the base's: a change to its test file, to what tests lean on
  * (TEST_SUPPORT) or to what chooses how code is checked (CHECK_CONFIG) does not pass, so a change cannot pass by editing
  * the check. It runs as the shell user, in the tree written out with the installed node_modules.
  */
