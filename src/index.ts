@@ -986,7 +986,9 @@ for (const [name, handler] of resolvers) {
     const clone = cloneOf((body?.impulse as { pointer?: unknown } | undefined)?.pointer ?? body, process.env);
     if (clone === null || typeof out !== "object" || out === null) return out;
     const why = await behind(clone, process.env).catch(() => null);
-    return why === null ? out : { ...out, clone_behind: why };
+    // First: the walk keeps the start of a long answer (a cut hop) and of a refusal (its failure row), so a note at the
+    // end would be lost on exactly the long reads and refusals a stale clone draws.
+    return why === null ? out : { clone_behind: why, ...out };
   });
 }
 

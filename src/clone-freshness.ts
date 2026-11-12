@@ -32,7 +32,8 @@ export async function behind(clone: { dir: string; repo: string }, env: Env): Pr
   if (head.exit_code !== 0) return null;
   const at = head.stdout.trim();
   // As the shell user, who owns the clone. A copy's commit the clone does not have, or one it has but not under its HEAD,
-  // is a copy that moved on.
+  // is a copy that moved on. So is any other failure of this check (a timeout, a clone removed meanwhile): the cost of
+  // reading it as behind is one fresh clone asked for needlessly.
   const has = await git(["-C", clone.dir, "merge-base", "--is-ancestor", at, "HEAD"], tmpdir());
   if (has.exit_code === 0) return null;
   return `${clone.dir} was made before this node's copy of ${clone.repo} moved on (to ${at.slice(0, 10)}): a change made in ` +

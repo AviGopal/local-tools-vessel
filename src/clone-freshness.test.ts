@@ -50,5 +50,11 @@ describe("clone freshness", () => {
     const outside = (await read(ctx(join(copy, "a.ts")))) as Record<string, unknown>;
     expect("clone_behind" in outside).toBe(false);
     expect(resolvers.get("git_worktree")).toBeDefined();
+    // a long answer is cut by the walk to its start (a hop keeps 16 KiB, a refusal 1000 characters): the note leads it
+    writeFileSync(join(clone, "big.ts"), `${"// filler line\n".repeat(2000)}`);
+    const big = (await read(ctx(join(clone, "big.ts")))) as Record<string, unknown>;
+    expect(Object.keys(big)[0]).toBe("clone_behind");
+    expect(JSON.stringify(big).length).toBeGreaterThan(16 * 1024);
+    expect(JSON.stringify(big).slice(0, 1000)).toContain("for a fresh clone");
   });
 });
