@@ -204,6 +204,21 @@ export type Typecheck =
 // What the typecheck reads besides the source: a change to any of these would choose how it is checked, so a tree that
 // changes one is not checked under it, and does not pass.
 const CHECK_CONFIG = /(^|\/)(tsconfig[^/]*\.json|jsconfig[^/]*\.json|package\.json|bunfig\.toml|bun\.lockb?|package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/;
+// What tells the compiler not to check: a directive on a line the change adds, or a declaration file it adds (an
+// ambient module declares anything into existence). Such a change passes only by silencing the check, so it does not pass.
+const SUPPRESS = /@ts-(nocheck|ignore|expect-error)\b/;
+const DECLARATIONS = /\.d\.[cm]?ts$/;
+
+/** The files where a change silences the check: lines it adds with a suppression directive, and declaration files it adds. */
+function silenced(patch: string, added: string[]): string[] {
+  const out = new Set(added.filter((p) => DECLARATIONS.test(p)));
+  let file = "";
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("+++ ")) file = line.slice(4).replace(/^b\//, "");
+    else if (line.startsWith("+") && SUPPRESS.test(line)) out.add(file);
+  }
+  return [...out].sort();
+}
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean; typecheck: Typecheck }
@@ -229,6 +244,11 @@ async function typecheckTree(t: Trusted, made: Made, work: string): Promise<Type
   if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
   const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
   if (chosen.length > 0) return { ran: false, passed: false, why: `the change edits what chooses how it is checked: ${chosen.join(", ")}` };
+  const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);
+  const added = await t.out(["diff", "--no-renames", "--name-only", "--diff-filter=A", t.origin, "refs/land/head"]);
+  if (patch === null || added === null) return { ran: false, passed: false, why: "the change's lines could not be read" };
+  const quiet = silenced(patch, added.split("\n").filter(Boolean));
+  if (quiet.length > 0) return { ran: false, passed: false, why: `the change silences the check in ${quiet.join(", ")}` };
   const tar = join(work, "tree.tar");
   const a = await trusted(["archive", "--format=tar", "-o", tar, "refs/land/head"], t.repo, work);
   if (a.exit_code !== 0) return { ran: false, passed: false, why: "the tree could not be written out" };

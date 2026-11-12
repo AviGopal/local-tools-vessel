@@ -293,12 +293,17 @@ describe("git_land", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("[MUST-FAIL] a change cannot pass by deleting or loosening its own check: the base's config decides", async () => {
+  it("[MUST-FAIL] a change cannot pass by deleting, loosening or silencing its own check: the base's config decides", async () => {
     const red = 'export const n: number = "x";\n';
     const cases: Array<Record<string, string | null>> = [
       { "m.ts": red, "tsconfig.json": null },
       { "m.ts": red, "tsconfig.json": JSON.stringify({ compilerOptions: { noEmit: true, types: [] }, include: [], files: [] }) },
       { "m.ts": "export const n: number = 1;\n", "package.json": "{}" },
+      // or by silencing it in the source: a directive on a line it adds, or a declaration file it adds
+      { "m.ts": `// @ts-nocheck\n${red}` },
+      { "m.ts": `// @ts-ignore\n${red}` },
+      { "m.ts": `// @ts-expect-error\n${red}` },
+      { "m.ts": "import { q } from \"anything\";\nexport const n: number = q;\n", "anything.d.ts": "declare module \"anything\";\n" },
     ];
     for (const files of cases) {
       const { cwd } = await changeOf(files);
