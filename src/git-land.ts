@@ -233,7 +233,7 @@ function silenced(patch: string, added: string[]): string[] {
 }
 
 /** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). */
-export type GapRef = { gap_id: string; test_file: string; only_tests: string[] };
+export type GapRef = { gap_id: string; test_file: string; only_tests: string[]; lever?: string };
 
 /** Whether that gap's check passes on the tree: the named tests pass when the test file runs alone, as the detector's
  * closer runs it, and no test of the file that passed on the base fails on the tree (regressed names them). passed is
@@ -282,6 +282,15 @@ export function passedIn(xml: string): Set<string> {
 const TEST_SUPPORT = /(^|\/)(tests?|__tests__|fixtures?|__fixtures__|__mocks__)\/|\.(test|spec)\.[^/]+$/;
 
 /**
+ * Whether a path (relative to the repository) is part of a gap's check: its test file, what tests lean on
+ * (TEST_SUPPORT) or what chooses how code is checked (CHECK_CONFIG). The one rule for it: git_diff's gap check refuses
+ * a change that touches one, and fs_edit refuses the edit itself on a clone made for that gap.
+ */
+export function isGapCheckFile(path: string, gap: Pick<GapRef, "test_file">): boolean {
+  return path === gap.test_file || TEST_SUPPORT.test(path) || CHECK_CONFIG.test(path);
+}
+
+/**
  * The gap the call was made for, when its selection's root is a detector's gap: read from records by the selection the
  * walk names on every call (its root is the request the clone is for). No selection: not the walk's call, no gap. A row
  * that cannot be read, or a gap row naming no test file, is an error: the check then does not pass.
@@ -298,7 +307,12 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
   if (!g || g.shape !== "gap" || g.role !== "detector") return null;
   const input = ((g.meta as { evidence_resolve?: { input?: Record<string, unknown> } } | undefined)?.evidence_resolve?.input ?? {});
   if (typeof input.test_file !== "string" || input.test_file === "") return { error: `gap ${String(g.gap_id)} names no test file` };
-  return { gap_id: String(g.gap_id), test_file: input.test_file, only_tests: [input.only_tests ?? []].flat().map(String) };
+  // Where the fix belongs, as the gap row says it (its edit site, else what the check imports): named when an edit of
+  // the check itself is refused, so the refusal says where to edit instead.
+  const meta = (g.meta ?? {}) as { edit_site?: unknown; sources?: unknown };
+  const lever = typeof meta.edit_site === "string" && meta.edit_site ? meta.edit_site
+    : Array.isArray(meta.sources) && meta.sources.length > 0 ? meta.sources.map(String).join(", ") : undefined;
+  return { gap_id: String(g.gap_id), test_file: input.test_file, only_tests: [input.only_tests ?? []].flat().map(String), ...(lever ? { lever } : {}) };
 }
 
 /**
@@ -392,7 +406,7 @@ async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef |
   if (typeof base !== "string") return { ...id, ran: false, passed: false, why: base.why };
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return { ...id, ran: false, passed: false, why: "the change's paths could not be read" };
-  const edits = changed.split("\n").filter((p) => p === gap.test_file || TEST_SUPPORT.test(p) || CHECK_CONFIG.test(p));
+  const edits = changed.split("\n").filter((p) => p !== "" && isGapCheckFile(p, gap));
   if (edits.length > 0) return { ...id, ran: false, passed: false, why: `the change edits the check: ${edits.join(", ")}` };
   if (!existsSync(join(dir, gap.test_file))) return { ...id, ran: false, passed: false, why: `${gap.test_file} is not in the tree` };
   const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);

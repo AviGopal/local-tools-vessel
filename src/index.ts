@@ -19,7 +19,7 @@ import { agentShellEnv } from "./agent-shell-env.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
-import { resolve as resolvePath } from "node:path";
+import { dirname, join, relative, resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
 import { configuredToolRoots, OUTSIDE_ROOTS_ERROR, toolPathWithin } from "./tool-roots.js";
 import { containWrite, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD } from "./write-containment.js";
@@ -28,7 +28,7 @@ import { runAllowlistedScript } from "./script-runner.js";
 import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
-import { diffClone, gapOf, landClone } from "./git-land.js";
+import { diffClone, gapOf, isGapCheckFile, landClone } from "./git-land.js";
 import { madeClone, readRows } from "./walk-rows.js";
 import { behind, cloneOf } from "./clone-freshness.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
@@ -427,6 +427,14 @@ const fsWrite: ResolverHandler = async (ctx) => {
 // refusal the walk keeps, with the field's name and the start of the next one.
 const CURRENT_MAX = 800;
 
+/** A path relative to the repository it is in (the nearest directory above it holding .git), or the path itself. */
+function inRepo(path: string): string {
+  for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return relative(dir, path);
+  }
+  return path;
+}
+
 const fsEdit: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools) dispatch via the
   // impulse envelope, so top-level-only reads (the prior bug) made every call
@@ -462,6 +470,17 @@ const fsEdit: ResolverHandler = async (ctx) => {
   // so refusing it changes no file contents anywhere.
   if (old_string === new_string)
     return { error: "old_string and new_string are identical — this op is a no-op, not an edit", path };
+  // THE GAP'S CHECK IS NOT EDITED. On a clone made for a gap (the call's selection is on a gap root), its test file and
+  // what tests lean on are the check the fix must pass: git_diff's gap check refuses a change to them, after the work is
+  // done. Said here, at the edit, the walk can still choose the source instead; the refusal names where the gap row says
+  // the fix belongs. A clone made for anything else edits tests as before.
+  const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref") ?? str(ctx.body, "selection_ref")).catch(() => null);
+  if (gap && !("error" in gap)) {
+    const rel = inRepo(path);
+    if (isGapCheckFile(rel, gap)) {
+      return { error: `${rel} is the gap's check, so it is not changed: edit the source it tests${gap.lever ? ` (${gap.lever})` : ""}`, path, refused: "gap_check" };
+    }
+  }
   try {
     const text = await Bun.file(path).text();
     if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, () => new_string)); return { shape: "fileEditResult", path, ok: true }; }
@@ -475,6 +494,13 @@ const fsEdit: ResolverHandler = async (ctx) => {
     if (oi !== -1 && nOld.length > 0 && nText.indexOf(nOld, oi + 1) === -1) {
       await Bun.write(path, text.slice(0, oi) + new_string + text.slice(oi + nOld.length));
       return { shape: "fileEditResult", path, ok: true, normalized_match: true };
+    }
+    // AN EDIT ALREADY MADE. Asked again after it ended ok, its old_string is gone and its new_string is in the file:
+    // answering "not found" would say the edit failed when it is done. Said as it is, the next step is the one after
+    // the edit. Only when the new text is not blank and is there exactly once, so a deletion or a common line is never
+    // taken for this.
+    if (new_string.trim().length > 0 && text.split(new_string).length === 2) {
+      return { shape: "fileEditResult", path, ok: true, applied: false, why: "this edit is already in the file: its new_string is there and its old_string is not" };
     }
     // ANCHOR-MISS DIAGNOSTIC (2026-08-02). A bare "not found" tells the drafter
     // nothing, so it retries with another invented anchor — 120 misses in 24h, and
