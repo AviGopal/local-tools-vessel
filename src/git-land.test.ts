@@ -405,7 +405,9 @@ describe("git_land", () => {
   it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {
     const { judgesOf } = await import("./git-commit");
     const judges = await judgesOf(async () => null, { repo: "local-tools-vessel" });
-    for (const p of ["src/git-land.ts", "src/git-commit.ts", "src/git-worktree.ts", "src/walk-rows.ts"]) {
+    for (const p of ["src/git-land.ts", "src/git-commit.ts", "src/git-worktree.ts", "src/walk-rows.ts",
+      // and what bounds the tools: their roots, and the credentialed script runner
+      "src/tool-roots.ts", "src/script-runner.ts", "src/script-runner-reaper.ts"]) {
       expect(judges.some((g) => new Bun.Glob(g).match(p))).toBe(true);
     }
     expect(judges.some((g) => new Bun.Glob(g).match("src/fs-read.ts"))).toBe(false);

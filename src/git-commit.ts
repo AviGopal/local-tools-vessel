@@ -75,9 +75,13 @@ const JUDGES_EVERYWHERE = ["scripts/git-hooks/**", ".git-hooks/**", "scripts/sub
 const JUDGES_BY_REPO: Record<string, string[]> = {
   // The super-repo pre-commit runs the glue tests from the change's own tree.
   super: ["validation/scripts/**"],
-  // Every file on the landing path decides whether a change lands.
+  // Every file on the landing path decides whether a change lands; and every file that bounds what the walk's tools may
+  // reach (the file tools' roots, the shell's containment and privilege, the credentialed script runner) decides what any
+  // change can do. A gap whose check those bounds make fail (a test asking for a path they refuse) would otherwise be
+  // "fixed" by loosening them, on a grader's verdict alone.
   "local-tools-vessel": ["src/git-*.ts", "src/walk-rows.ts", "src/index.ts", "src/shell-containment.ts",
-    "src/write-containment.ts", "src/agent-shell-env.ts", "src/shell-privilege.ts"],
+    "src/write-containment.ts", "src/agent-shell-env.ts", "src/shell-privilege.ts", "src/tool-roots.ts",
+    "src/script-runner.ts", "src/script-runner-reaper.ts"],
   "records-vessel": ["src/**"],
 };
 // A repo without a gate policy names no accepted fixtures, so every fixture-like path counts.
