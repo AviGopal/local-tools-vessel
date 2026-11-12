@@ -1,7 +1,7 @@
 // git_land pushes a clone's change only when a verdict row approves its exact tree, the secrets scan is clean and it
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,9 @@ import type { Made, Query, Row } from "./walk-rows";
 
 // Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
 // fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
+// Each case makes clones, bundles and checks, and a diff now runs the compiler and a test run on its tree: several
+// seconds apiece on a loaded node (a gate runs suites side by side), past bun's default 5 s per test.
+setDefaultTimeout(120_000);
 const T = mkdtempSync(join(tmpdir(), "git-land-test-"));
 chmodSync(T, 0o755);
 const OUT = join(T, "out");
