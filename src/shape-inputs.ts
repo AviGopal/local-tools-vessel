@@ -84,3 +84,24 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   walk_trees_reclaim: "Removes the clones git_worktree made that nothing will use again (landed, or unchanged with no open " +
     "request), keeps the rest, and reports changed clones of closed requests; answers what it removed and reported.",
 }
+
+// What a call of each shape answers with: the shape of its answer row. Discovery serves it (shape_answers) beside the
+// descriptions and inputs, so a reader that needs a row of some shape can find the call that makes it (the walk's skip
+// names it) instead of reading it out of prose. shape-inputs.test.ts holds each to what its handler answers.
+export const SHAPE_ANSWERS: Record<string, string> = {
+  fs_read: "fileContent",
+  fs_write: "fileWriteResult",
+  fs_edit: "fileEditResult",
+  git_status: "gitStatus",
+  git_diff: "gitDiff",
+  git_commit: "gitCommitResult",
+  git_worktree: "gitWorktree",
+  git_land: "gitLand",
+  walk_trees_reclaim: "walkTreesReclaim",
+  code_search: "codeSearchResult",
+  code_insert_after_line: "codeInsertResult",
+  code_replace_lines: "codeReplaceResult",
+  code_read_lines: "codeReadResult",
+  code_verify_typecheck: "codeTypecheckResult",
+  bounded_shell: "shellResult",
+}

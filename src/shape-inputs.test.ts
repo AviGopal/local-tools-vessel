@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { resolvers } from "./index"
-import { SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs"
+import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs"
 
 type Schema = { required: string[]; properties: Record<string, { type?: string }> }
 
@@ -43,12 +43,16 @@ describe("declared shape inputs", () => {
       expect(SHAPE_DESCRIPTIONS[shape]?.length ?? 0).toBeGreaterThan(0)
       for (const f of schema.required) expect(Object.keys(schema.properties)).toContain(f)
     })
-    it(`${shape}: its handler, given exactly the required fields, does not ask for more`, async () => {
+    it(`${shape}: its handler, given exactly the required fields, does not ask for more, and answers with its declared shape`, async () => {
       const pointer = Object.fromEntries(schema.required.map((f) => [f, sample(f)]))
       // A handler may refuse the request for another reason (a directory this host lacks is answered 422): only a demand
       // for a field the schema does not declare fails this.
       const out = await call(shape, pointer).catch((e: Error) => ({ error: e.message }))
       expect(String(out?.error ?? "")).not.toMatch(/required/i)
+      // An answer that names its shape names the one declared for it (shape_answers), so what discovery says a call
+      // makes is what it makes.
+      const answered = (out as Record<string, unknown> | undefined)?.shape
+      if (typeof answered === "string") expect(answered).toBe(SHAPE_ANSWERS[shape])
     }, 60_000)
   }
 
@@ -69,6 +73,13 @@ describe("declared shape inputs", () => {
     expect(SHAPE_DESCRIPTIONS.fs_edit).toContain("read the file first")
     expect(String(edit.properties.old_string.description)).toContain("character for character")
     expect(String(edit.properties.old_string.description)).toContain("never words about the change")
+  })
+
+  it("[MUST-FAIL] each declared answer is for a declared shape, and the diff a landing is judged on comes from git_diff", () => {
+    for (const shape of Object.keys(SHAPE_ANSWERS)) expect(Object.keys(SHAPE_INPUTS)).toContain(shape)
+    expect(SHAPE_ANSWERS.git_diff).toBe("gitDiff")
+    const src = readFileSync(join(import.meta.dir, "index.ts"), "utf8")
+    expect(src).toContain("shapeAnswers: SHAPE_ANSWERS")
   })
 
   it("every described shape is declared, and the other way round", () => {

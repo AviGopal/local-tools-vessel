@@ -17,7 +17,7 @@ import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
-import { SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs.js";
+import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
@@ -1043,6 +1043,7 @@ if (import.meta.main) {
   // What a caller can fill: each shape's description and the pointer fields its handler reads (shape-inputs.ts).
   shapeDescriptions: SHAPE_DESCRIPTIONS,
   shapeInputs: SHAPE_INPUTS,
+  shapeAnswers: SHAPE_ANSWERS,
   }).start();
 
   console.log(`[local-tools-vessel] listening on http://127.0.0.1:${PORT}`);
