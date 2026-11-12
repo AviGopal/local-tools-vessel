@@ -27,14 +27,25 @@ const ROWS: Record<string, Record<string, unknown>> = {
   "ask-1": { id: "ask-1", shape: "world_changed", role: "person", what: "fix the test" },
 };
 const realFetch = globalThis.fetch;
+// Every test file runs in one process: what this one sets is put back as it was (or removed, if it was unset), or a
+// later file's tools would ask records at an address nothing answers.
+const ENV = { WALK_TREES_DIR: trees, MITOSIS_PUSH_CLONE_DIR: join(T, "vessels"), DISCOVERY_ENDPOINT: "http://discovery.test" };
+const before = Object.fromEntries(Object.keys(ENV).map((k) => [k, process.env[k]]));
 beforeAll(() => {
-  Object.assign(process.env, { WALK_TREES_DIR: trees, MITOSIS_PUSH_CLONE_DIR: join(T, "vessels"), DISCOVERY_ENDPOINT: "http://discovery.test" });
+  Object.assign(process.env, ENV);
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     const p = (JSON.parse(String(init?.body ?? "{}")) as { pointer?: { ids?: string[] } }).pointer ?? {};
     return Response.json((p.ids ?? []).map((id) => ROWS[id]).filter(Boolean));
   }) as typeof fetch;
 });
-afterAll(() => { globalThis.fetch = realFetch; rmSync(T, { recursive: true, force: true }); });
+afterAll(() => {
+  globalThis.fetch = realFetch;
+  for (const [k, v] of Object.entries(before)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  rmSync(T, { recursive: true, force: true });
+});
 
 const edit = async (path: string, old_string: string, new_string: string, selection_ref?: string) => {
   const { resolvers } = await import("./index");
