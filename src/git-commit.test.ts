@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { commitInClone } from "./git-commit";
 import { makeWorktree } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
-import { episodeRead, recordRead, walkCall } from "./walk-call-rows.test-helper";
+import { callsRead, episodeRead, recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 // Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
 // fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
@@ -97,7 +97,8 @@ describe("git_worktree", () => {
       if (st.down) return new Response("down", { status: 503 });
       const p = JSON.parse(String(init?.body)).pointer;
       st.reads.push(JSON.stringify({ ...p, type: undefined }));
-      const body = p.episode !== undefined ? episodeRead(rows, String(p.episode), st.open)
+      const body = p.episode !== undefined && Array.isArray(p.calls) ? callsRead(rows, st.open, p.calls)
+        : p.episode !== undefined ? episodeRead(rows, String(p.episode), st.open)
         : p.shape === "arm" ? [{ id: "arm-1", shape: "arm", role: "owner", vessel_id: "walk-1" }]
         : recordRead(rows, p);
       const text = JSON.stringify(body);
@@ -146,7 +147,7 @@ describe("git_worktree", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("[MUST-FAIL] a handout reads only the open work: unrelated selections and hops of closed requests add no bytes", async () => {
+  it("[MUST-FAIL] a handout reads only the calls: what the selections saw, of the asking request or any other, adds no bytes", async () => {
     process.env.METABOB_API_KEY = "test-node-key";
     const { rows, st, sel, ask } = stubRecords();
     sel("sel-x", "R-X");
@@ -154,15 +155,41 @@ describe("git_worktree", () => {
     await ask("sel-x");
     const measure = async () => { st.bytes = 0; st.reads = []; await ask("sel-x"); return st.bytes; };
     const quiet = await measure();
-    // 200 more selections (40 KB each, as live ones run) and their calls, all of requests now closed
+    // the open request itself works on: 100 more of its selections (40 KB each, as live ones run), and the calls they made
+    for (let i = 0; i < 100; i++) {
+      sel(`x-${i}`, "R-X");
+      rows.push(...walkCall(`x-${i}`, "fs_read", `x-${i}`, { content: "y".repeat(8_000) }).map((h) => ({ ...h, writer: "walk-1" })));
+    }
+    // and 200 requests now closed, with their selections and their reads
     for (let i = 0; i < 200; i++) {
       sel(`old-${i}`, `R-old-${i}`);
-      rows.push(...walkCall(`old-${i}`, "git_worktree", `old-${i}`, { cwd: `/nowhere/${i}`, out: "y".repeat(8_000) }).map((h) => ({ ...h, writer: "walk-1" })));
+      rows.push(...walkCall(`old-${i}`, "fs_read", `old-${i}`, { content: "y".repeat(8_000) }).map((h) => ({ ...h, writer: "walk-1" })));
     }
     const busy = await measure();
     expect(st.reads.some((r) => JSON.parse(r).shape === "selection" && JSON.parse(r).ids === undefined)).toBe(false); // never every selection
-    expect(busy).toBeLessThan(quiet + 2_000); // flat: what was done before adds nothing to the read
+    expect(busy).toBeLessThan(quiet + 2_000); // flat: what the selections saw is never read
+    // the calls that hand out clones are read: each adds what its answer holds, a few hundred bytes
+    for (let i = 0; i < 50; i++) {
+      rows.push(...walkCall(`wt-${i}`, "git_worktree", `old-${i}`, { cwd: `/nowhere/${i}`, repo: "demo", branch: "dev", base: "a".repeat(40), origin_url: "https://example.invalid/demo.git" }).map((h) => ({ ...h, writer: "walk-1" })));
+    }
+    expect(await measure()).toBeLessThan(busy + 50 * 400);
     globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] a records that answers the episode's rows instead of calls hands no clone out again: a fresh one is made", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { rows, st, sel, ask } = stubRecords();
+    sel("sel-p", "R-P"); sel("sel-q", "R-Q");
+    st.open = ["R-P", "R-Q"];
+    const p = await ask("sel-p"); // R-P's clone, unchanged
+    const answering = globalThis.fetch;
+    globalThis.fetch = (async (u: unknown, init?: RequestInit) => {
+      const q = JSON.parse(String(init?.body)).pointer;
+      return Array.isArray(q.calls) ? Response.json(rows) : answering(u as string, init);
+    }) as typeof fetch;
+    const q = await ask("sel-q");
+    globalThis.fetch = realFetch;
+    expect(q.cwd).not.toBe(p.cwd); // never another open request's clone
   });
 
   it("[MUST-FAIL] once the copy has moved on, a request's own clone, changed or not, is not handed back: a clone at the new tip is", async () => {

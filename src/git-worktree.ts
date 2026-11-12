@@ -12,7 +12,7 @@ import { git, vesselGit } from "./git-commit.js";
 import { agentWritableDir } from "./shell-privilege.js";
 import { withClones } from "./clones-lock.js";
 import { walkTreesDir } from "./tool-roots.js";
-import { openEpisodes, readRows, type Row } from "./walk-rows.js";
+import { readRows, type Row, walkCalls } from "./walk-rows.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
 // Where change clones are made: also a tool root (tool-roots.ts), so the file tools work in a clone's cwd.
@@ -48,12 +48,13 @@ export async function makeWorktree(repo: string, env: Env = process.env, selecti
 }
 
 // Which clones may be handed to the request a call is made for: an unchanged clone goes again only to the request it
-// was handed to, or once every request it was handed to is closed. Read from the rows of the roots records lists as open
-// (openEpisodes: each open root's selections and their hops), so the read is bounded by the work open now: a clone no
-// open root's git_worktree hop names was handed only to closed requests, or to none. Anything unread (no selection
-// named, a records read failing) hands nothing out again: a fresh clone costs disk, a shared one would put one request's
-// edit into another's commit. `ours` is the asking request's own clones, newest first, each with what its hop recorded
-// (repo, branch, base, origin), less any it has landed.
+// was handed to, or once every request it was handed to is closed. Read from records' calls read (walk-rows.ts
+// walkCalls): the walk's git_worktree and git_land calls, each with its root and whether that root is open, and no
+// selection, so the read grows with the calls made, not with what the selections saw. A clone no open root's call names
+// was handed only to closed requests, or to none. Anything unread (no selection named, a records read failing) hands
+// nothing out again: a fresh clone costs disk, a shared one would put one request's edit into another's commit. `ours`
+// is the asking request's own clones, newest first, each with what its call answered (repo, branch, base, origin), less
+// any it has landed.
 type Handouts = { mine: string; may: (cwd: string) => boolean; ours: Array<{ cwd: string; made: Row }> };
 async function handouts(selectionRef: string | undefined): Promise<Handouts | null> {
   if (!selectionRef) return null;
@@ -61,24 +62,19 @@ async function handouts(selectionRef: string | undefined): Promise<Handouts | nu
   if (!Array.isArray(sel) || !Array.isArray(arms)) return null;
   const mine = String(sel.find((r) => r.id === selectionRef)?.root ?? "");
   if (!mine) return null;
-  const eps = await openEpisodes([...new Set((arms as Row[]).map((a) => String(a.vessel_id ?? "")).filter((v) => v !== ""))]);
-  if (!Array.isArray(eps)) return null;
+  const calls = await walkCalls([...new Set((arms as Row[]).map((a) => String(a.vessel_id ?? "")).filter((v) => v !== ""))], ["git_worktree", "git_land"]);
+  if (!Array.isArray(calls)) return null;
   const to = new Map<string, Set<string>>();
   const own: Array<{ cwd: string; made: Row; seq: number }> = [];
   const landed = new Set<string>();
-  for (const { root, rows } of eps) {
-    const walk = rows.filter((r) => r.shape === "hop" && r.role === "walk");
-    const called = (type: string) => new Set(walk.filter((h) => h.phase === "started" && h.pointer_type === type).map((h) => String(h.call_id)));
-    const [made, lands] = [called("git_worktree"), called("git_land")];
-    for (const h of walk.filter((x) => x.phase === "ended")) {
-      const cwd = String(h.output?.cwd ?? "");
-      if (!cwd) continue;
-      if (lands.has(String(h.call_id))) { if (root === mine) landed.add(cwd); continue; }
-      if (!made.has(String(h.call_id))) continue;
-      if (!to.has(cwd)) to.set(cwd, new Set());
-      to.get(cwd)!.add(root);
-      if (root === mine) own.push({ cwd, made: (h.output ?? {}) as Row, seq: Number(h.seq ?? 0) });
-    }
+  for (const c of calls.filter((x) => x.state === "ended")) {
+    const cwd = String(c.output?.cwd ?? "");
+    if (!cwd) continue;
+    if (c.type === "git_land") { if (c.root === mine) landed.add(cwd); continue; }
+    if (c.type !== "git_worktree" || !c.open) continue;
+    if (!to.has(cwd)) to.set(cwd, new Set());
+    to.get(cwd)!.add(c.root);
+    if (c.root === mine) own.push({ cwd, made: (c.output ?? {}) as Row, seq: c.seq });
   }
   const ours = own.filter((o) => !landed.has(o.cwd)).sort((x, y) => y.seq - x.seq).map(({ cwd, made }) => ({ cwd, made }));
   const may = (cwd: string) => [...(to.get(cwd) ?? [])].every((r) => r === mine);

@@ -9,8 +9,7 @@
 //     names it, except the newest unchanged clone of each origin, which git_worktree hands out again;
 //   - changed and not landed: kept and reported. What the walk tried there is evidence; deciding to drop it is a later
 //     rule, not this one.
-// Anything this cannot read fails closed: a records read that errors, or an open-roots read that answers nothing while
-// selections exist, removes nothing. Only a directory directly under the clones directory (realpath, no symlink) that is
+// Anything this cannot read fails closed: a records read that errors, or answers no list, removes nothing. Only a directory directly under the clones directory (realpath, no symlink) that is
 // a whole clone (its own .git directory) is ever touched.
 import { lstatSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,7 +17,7 @@ import { join, sep } from "node:path";
 import { withClones } from "./clones-lock.js";
 import { git } from "./git-commit.js";
 import { walkTreesDir } from "./tool-roots.js";
-import { openRoots, readRows, type Row } from "./walk-rows.js";
+import { readRows, type Row, walkCalls } from "./walk-rows.js";
 
 // What it did with each clone it looked at, so the answer (and the walk's hop row of it) says why each went or stayed.
 export type Decision = { cwd: string; did: "removed" | "kept" | "reported"; why: string };
@@ -47,39 +46,28 @@ async function reclaim(env: Env, remove: (p: string) => unknown, budgetMs: numbe
   let base: string;
   try { base = realpathSync(dir); } catch { return { shape: "walkTreesReclaim", removed: [], reported: [], kept: 0, decisions: [], more: false }; }
 
-  const [hops, failures, sels, arms] = await Promise.all([
-    readRows({ shape: "hop" }), readRows({ shape: "failure" }), readRows({ shape: "selection" }), readRows({ shape: "arm" }),
-  ]);
-  for (const r of [hops, failures, sels, arms]) if (!Array.isArray(r)) return r;
-  const walkRows = (rows: Row[]) => rows.filter((r) => r.role === "walk");
-  const hop = walkRows(hops as Row[]);
-  const selection = new Map(walkRows(sels as Row[]).map((s) => [s.id, s]));
+  // records' calls read: the walk's git_worktree and git_land calls and every call still in flight, each with its root
+  // and whether that root is open, and no selection, so it grows with the calls, not with what the selections saw.
+  const arms = await readRows({ shape: "arm" });
+  if (!Array.isArray(arms)) return arms;
   const walks = [...new Set((arms as Row[]).map((a) => String(a.vessel_id ?? "")).filter((v) => v !== ""))];
-  const open = await openRoots(walks);
-  if (!(open instanceof Set)) return open;
-  if (open.size === 0 && selection.size > 0) return { error: "records lists no open root while the walk has selections: nothing is removed" };
-
-  const rootOf = (selRef: unknown): string | undefined => {
-    const s = selection.get(String(selRef));
-    return s === undefined ? undefined : String(s.root ?? "");
-  };
-  // Calls in flight: started, with no ended hop and no failure for the same call. Their roots' clones are in use.
-  const settled = new Set([...hop.filter((h) => h.phase === "ended"), ...walkRows(failures as Row[])].map((r) => String(r.call_id)));
-  const inFlight = hop.filter((h) => h.phase === "started" && !settled.has(String(h.call_id)))
-  const busy = new Set(inFlight.map((h) => rootOf(h.selection_ref) ?? "?"));
+  const calls = await walkCalls(walks, ["git_worktree", "git_land"]);
+  if (!Array.isArray(calls)) return calls;
+  const rootOf = (root: string): string => root || "?";
+  const open = new Set(calls.filter((c) => c.open).map((c) => c.root));
+  // Calls in flight (of any shape): their roots' clones are in use.
+  const inFlight = calls.filter((c) => c.state === "started");
+  const busy = new Set(inFlight.map((c) => rootOf(c.root)));
   // A clone being made is on disk before any row names it: while a git_worktree call is in flight, no unnamed clone goes.
-  const making = inFlight.some((h) => h.pointer_type === "git_worktree");
-  // An ended hop does not name the shape called; its started hop, under the same call_id, does.
-  const calledAs = new Map(hop.filter((h) => h.phase === "started").map((h) => [String(h.call_id), String(h.pointer_type ?? "")]));
-  const ended = (type: string) => hop.filter((h) => h.phase === "ended" && (h.pointer_type ?? calledAs.get(String(h.call_id))) === type);
+  const making = inFlight.some((c) => c.type === "git_worktree");
   const named = new Map<string, Set<string>>();
-  for (const h of ended("git_worktree")) {
-    const cwd = String(h.output?.cwd ?? "");
+  for (const c of calls.filter((x) => x.state === "ended" && x.type === "git_worktree")) {
+    const cwd = String(c.output?.cwd ?? "");
     if (!cwd) continue;
     if (!named.has(cwd)) named.set(cwd, new Set());
-    named.get(cwd)!.add(rootOf(h.selection_ref) ?? "?");
+    named.get(cwd)!.add(rootOf(c.root));
   }
-  const landed = new Set(ended("git_land").map((h) => String(h.output?.cwd ?? "")));
+  const landed = new Set(calls.filter((x) => x.state === "ended" && x.type === "git_land").map((c) => String(c.output?.cwd ?? "")));
 
   const out = async (cwd: string, args: string[]) => {
     const r = await git(["-C", cwd, ...args], tmpdir());

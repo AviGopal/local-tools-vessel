@@ -25,3 +25,25 @@ export const episodeRead = (rows: R[], w: string, open: string[]) => ({
     return { root, rows: [root, ...rows.filter((r) => r.writer === w && (sels.has(String(r.id)) || sels.has(String(r.selection_ref))))], awaits: true };
   }),
 });
+
+// records' calls read ({episode: w, calls: [shapes]}), as records builds it (records-vessel store.ts walkCalls): each of
+// the walk's started hops of an asked shape, and every call still in flight whatever its shape, with the root its
+// selection names, whether that root is open, how the call stands, and the ended hop's output. No selection rides along.
+export const callsRead = (rows: R[], open: string[], types: string[]) => {
+  const walk = rows.filter((r) => r.role === "walk");
+  const sels = new Map(walk.filter((r) => r.shape === "selection").map((s) => [String(s.id), s]));
+  const ended = new Map(walk.filter((r) => r.shape === "hop" && r.phase === "ended").map((r) => [String(r.call_id), r]));
+  const failed = new Set(walk.filter((r) => r.shape === "failure").map((r) => String(r.call_id)));
+  // only a call under the walk's newest selection can be in flight; an unsettled one under an older selection is abandoned
+  const newest = walk.filter((r) => r.shape === "selection").reduce<R | undefined>((a, r) => (a === undefined || Number(r.seq ?? 0) >= Number(a.seq ?? 0) ? r : a), undefined);
+  const settled = (id: string) => ended.has(id) || failed.has(id);
+  const live = (h: R) => !settled(String(h.call_id)) && (String(h.selection_ref) === String(newest?.id) || !sels.has(String(h.selection_ref)));
+  return walk.filter((r) => r.shape === "hop" && r.phase === "started" && (types.includes(String(r.pointer_type)) || live(r)))
+    .map((h) => {
+      const id = String(h.call_id);
+      const root = String(sels.get(String(h.selection_ref))?.root ?? "");
+      const e = ended.get(id);
+      return { call_id: id, type: String(h.pointer_type), selection_ref: String(h.selection_ref), root, open: open.includes(root),
+        state: e ? "ended" : failed.has(id) ? "failed" : live(h) ? "started" : "abandoned", seq: Number(h.seq ?? 0), t: String(h.t ?? ""), ...(e ? { output: e.output } : {}) };
+    });
+};

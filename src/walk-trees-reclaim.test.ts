@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeWorktree } from "./git-worktree";
 import { reclaimWalkTrees } from "./walk-trees-reclaim";
-import { recordRead, walkCall } from "./walk-call-rows.test-helper";
+import { callsRead, recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 const T = mkdtempSync(join(tmpdir(), "walk-trees-reclaim-"));
 chmodSync(T, 0o755);
@@ -36,6 +36,7 @@ const clone = (name: string): string => {
 let rows: Record<string, Array<Record<string, unknown>>> = {};
 let openRoots: string[] = [];
 let failing = false;
+const reads: Array<Record<string, unknown>> = [];
 // records answers 401 to a request that does not say who is asking, as the live one does.
 const KEY = "test-node-key";
 const answer = () => {
@@ -43,6 +44,8 @@ const answer = () => {
     if ((init?.headers as Record<string, string> | undefined)?.Authorization !== `ApiKey ${KEY}`) return new Response("no key", { status: 401 });
     if (failing) return new Response("down", { status: 503 });
     const p = JSON.parse(String(init?.body)).pointer;
+    reads.push(p);
+    if (p.episode !== undefined && Array.isArray(p.calls)) return Response.json(callsRead(Object.values(rows).flat(), openRoots, p.calls));
     if (p.episode !== undefined) return Response.json({ shared: [], roots: openRoots.map((id) => ({ root: { id }, rows: [] })) });
     return Response.json(recordRead(rows[p.shape] ?? [], p));
   }) as typeof fetch;
@@ -92,13 +95,58 @@ describe("walk_trees_reclaim", () => {
     expect(existsSync(c4)).toBe(true);
   });
 
-  it("[MUST-FAIL] removes nothing when records cannot be read, or lists no open request while there are selections", async () => {
+  it("[MUST-FAIL] reads the walk's calls, never every selection, hop or failure", async () => {
+    const [c1, c2] = ["super-r1", "super-r2"].map(clone);
+    world([...made(c1, "R1"), ...made(c2, "R2")], ["R2"]);
+    reads.length = 0;
+    const r = await reclaimWalkTrees(env);
+    if ("error" in r) throw new Error(r.error);
+    const bulk = reads.filter((p) => ["selection", "hop", "failure"].includes(String(p.shape)) && p.ids === undefined);
+    expect(bulk).toEqual([]);
+    expect(reads.some((p) => Array.isArray(p.calls))).toBe(true);
+    expect(existsSync(c2)).toBe(true); // an open request's clone is kept, as before
+  });
+
+  it("[MUST-FAIL] removes nothing when records answers the episode's rows instead of calls (a records without the calls read)", async () => {
+    const [c1, c2] = ["super-e1", "super-e2"].map(clone);
+    world([...made(c1, "R1"), ...made(c2, "R1")], ["R1"]);
+    const answering = globalThis.fetch;
+    globalThis.fetch = (async (u: unknown, init?: RequestInit) => {
+      const p = JSON.parse(String(init?.body)).pointer;
+      return Array.isArray(p.calls) ? Response.json(Object.values(rows).flat()) : answering(u as string, init);
+    }) as typeof fetch;
+    expect("error" in (await reclaimWalkTrees(env))).toBe(true);
+    globalThis.fetch = answering;
+    expect([c1, c2].map(existsSync)).toEqual([true, true]);
+  });
+
+  it("[MUST-FAIL] a call the walk was cut off in (abandoned) is not in flight: an unnamed unchanged clone goes", async () => {
+    const [older, newer] = ["super-o1", "super-o2"].map(clone); // unchanged, no row names either: clones whose caller gave up
+    world([
+      // a git_worktree started under an older selection and never settled: the walk stopped mid-call and moved on
+      { id: "sel-cut", shape: "selection", role: "walk", root: "R1", seq: 1 },
+      { id: "h-cut", shape: "hop", role: "walk", phase: "started", pointer_type: "git_worktree", call_id: "c-cut", selection_ref: "sel-cut", seq: 2 },
+      { id: "sel-now", shape: "selection", role: "walk", root: "R1", seq: 3 },
+    ], ["R1"]);
+    const r = await reclaimWalkTrees(env);
+    if ("error" in r) throw new Error(r.error);
+    expect(existsSync(newer)).toBe(true); // the newest unchanged clone of its origin: handed out again
+    expect(existsSync(older)).toBe(false); // nothing in flight holds it, and no open request names it
+  });
+
+  it("removes nothing when records cannot be read, or answers no list of calls (a guard)", async () => {
     const [c1, c2] = ["super-b1", "super-b2"].map(clone);
     world([...made(c1, "R1"), ...made(c2, "R1")], []);
     failing = true;
     expect("error" in (await reclaimWalkTrees(env))).toBe(true);
     failing = false;
-    expect("error" in (await reclaimWalkTrees(env))).toBe(true); // no open root, yet selections exist
+    const answering = globalThis.fetch;
+    globalThis.fetch = (async (u: unknown, init?: RequestInit) => {
+      const p = JSON.parse(String(init?.body)).pointer;
+      return Array.isArray(p.calls) ? Response.json({ status: "starting" }) : answering(u as string, init);
+    }) as typeof fetch;
+    expect("error" in (await reclaimWalkTrees(env))).toBe(true); // a records answer that is not a list of calls
+    globalThis.fetch = answering;
     expect([c1, c2].map(existsSync)).toEqual([true, true]);
   });
 
