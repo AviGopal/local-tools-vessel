@@ -15,6 +15,8 @@
 // coverage that does not exist and stays green through any regression. mapPath
 // is now exported and imported here, so breaking it breaks this file.
 import { describe, expect, it } from "bun:test";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import { mapPath } from "./index";
 
@@ -31,10 +33,17 @@ describe("mapPath", () => {
     );
   });
 
-  it("leaves absolute paths untouched", () => {
-    expect(mapPath("/vessels/analysis-vessel/src/index.ts")).toBe(
-      "/vessels/analysis-vessel/src/index.ts",
-    );
+  // An absolute path is confined like any other: this vessel holds the fleet's credentials, so a path outside every
+  // tool root is refused, never passed through (index.ts). Inside a root (the temp dir is always one) it comes back as
+  // its resolved location.
+  it("keeps an absolute path inside a tool root, resolved", () => {
+    const inside = `${tmpdir()}/map-path-case/src/index.ts`;
+    expect(mapPath(inside)).toBe(`${realpathSync(tmpdir())}/map-path-case/src/index.ts`);
+  });
+
+  it("[MUST-FAIL] refuses an absolute path outside every tool root: the fleet's secrets are never a path", () => {
+    expect(() => mapPath("/etc/substrate/env")).toThrow();
+    expect(() => mapPath("/proc/self/environ")).toThrow();
   });
 
   it("anchors relative paths to the workspace, NOT the process cwd", () => {
