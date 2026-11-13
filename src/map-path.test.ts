@@ -49,10 +49,15 @@ describe("mapPath", () => {
   it("anchors relative paths to the workspace, NOT the process cwd", () => {
     // The whole point: without this, `find . -name '*.ts'` searched
     // /vessels/local-tools-vessel and found no vessel source.
-    expect(mapPath("scripts/substrate/vessels.inventory.json")).toBe(
-      `${WORKSPACE}/scripts/substrate/vessels.inventory.json`,
-    );
-    expect(mapPath("scripts/substrate/vessels.inventory.json")!.startsWith(`${process.cwd()}/`)).toBe(WORKSPACE === process.cwd());
+    // The path lies in a workspace data dir (tool-roots.ts WORKSPACE_DATA_DIRS): /workspace itself is not a root,
+    // since it holds .substrate-secrets, so a path elsewhere under it is refused, and asserting one here failed
+    // wherever WORKSPACE_ROOT is the real workspace.
+    expect(mapPath("proposals/map-path-case.md")).toBe(`${WORKSPACE}/proposals/map-path-case.md`);
+    expect(mapPath("proposals/map-path-case.md")!.startsWith(`${process.cwd()}/`)).toBe(WORKSPACE === process.cwd());
+  });
+
+  it("[MUST-FAIL] refuses a relative path that climbs out of the workspace to the fleet's secrets", () => {
+    expect(() => mapPath("../../../../../../../../etc/substrate/env")).toThrow();
   });
 
   it("keeps repos/ winning over the relative-path anchor", () => {
