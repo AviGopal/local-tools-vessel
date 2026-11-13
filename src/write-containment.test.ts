@@ -284,6 +284,24 @@ describe("the scope is the COMMITTED one, read at use time, and fails closed", (
     expect([...SUPER_REPO_FALLBACKS]).toEqual(["/workspace/git/super-repo"]);
   });
 
+  it("[MUST-FAIL] every caller that names no fallbacks gets SUPER_REPO_FALLBACKS: a clone at a fallback location is protected through the default path", () => {
+    // The default path is what every production caller takes, so it is exercised, not only the constant: a clone this
+    // test controls is put in the exported list for the length of the test (never the host location), then taken out.
+    const list = SUPER_REPO_FALLBACKS as string[];
+    list.push(superRepo);
+    try {
+      const bare = join(base, "bare-super-3");
+      put(join(bare, "scripts", "substrate", "README"), "x");
+      git(bare, "init", "-q"); git(bare, "add", "-A"); git(bare, "commit", "-qm", "no scope");
+      const e = { WORKSPACE_ROOT: bare, MITOSIS_RUNTIME_DIR: vessels, MITOSIS_PUSH_CLONE_DIR: clones, COMPOSE_WS_DIR: compose, METABOB_API_KEY: KEY };
+      expect(containmentZones(e).supers).toContain(realpathSync(superRepo));
+      const v = containWrite(join(superRepo, "scripts", "substrate", "x.ts"), { env: e, imageScopeFile: join(base, "no-image-copy.json") });
+      expect(v.ok).toBe(false);
+      expect(!v.ok && v.zone).toBe("super");
+    } finally { list.pop(); }
+    expect([...SUPER_REPO_FALLBACKS]).toEqual(["/workspace/git/super-repo"]);
+  });
+
   it("never a secret location, grant or not", () => {
     for (const p of ["/etc/substrate/env", "/proc/self/environ", "/workspace/.substrate-secrets"]) {
       expect(containWrite(p, { env: { METABOB_API_KEY: KEY }, grant: signWriteGrant(KEY, p) }).ok).toBe(false);
