@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { refusedWrite } from "./index";
-import { containWrite, readCommittedScope, signWriteGrant, WRITE_CONTAINMENT_ERROR } from "./write-containment";
+import { containmentZones, containWrite, readCommittedScope, signWriteGrant, SUPER_REPO_FALLBACKS, WRITE_CONTAINMENT_ERROR } from "./write-containment";
 
 const KEY = "test-fleet-key-0123456789";
 const PULL_SYNC = "#!/usr/bin/env bash\necho committed pull-sync\n";
@@ -259,13 +259,29 @@ describe("the scope is the COMMITTED one, read at use time, and fails closed", (
     const e = { WORKSPACE_ROOT: bare, MITOSIS_RUNTIME_DIR: vessels, MITOSIS_PUSH_CLONE_DIR: clones, COMPOSE_WS_DIR: compose, METABOB_API_KEY: KEY };
     const img = join(base, "no-image-copy.json");
     const rt = join(vessels, "demo", "src", "a.ts");
-    const v = containWrite(rt, { env: e, imageScopeFile: img });
+    const v = containWrite(rt, { env: e, imageScopeFile: img, fallbacks: [] });
     expect(v.ok).toBe(false);
     expect(!v.ok && v.reason).toContain("autonomy scope unreadable");
-    expect(containWrite(rt, { env: e, imageScopeFile: img, grant: signWriteGrant(KEY, rt) }).ok).toBe(true);
-    expect(containWrite(join(data, "report.md"), { env: e, imageScopeFile: img }).ok).toBe(true);
-    const sv = containWrite(join(bare, "scripts", "substrate", "README"), { env: e, imageScopeFile: img, grant: signWriteGrant(KEY, join(bare, "scripts", "substrate", "README")) });
+    expect(containWrite(rt, { env: e, imageScopeFile: img, fallbacks: [], grant: signWriteGrant(KEY, rt) }).ok).toBe(true);
+    expect(containWrite(join(data, "report.md"), { env: e, imageScopeFile: img, fallbacks: [] }).ok).toBe(true);
+    const sv = containWrite(join(bare, "scripts", "substrate", "README"), { env: e, imageScopeFile: img, fallbacks: [], grant: signWriteGrant(KEY, join(bare, "scripts", "substrate", "README")) });
     expect(sv.ok).toBe(false);
+  });
+
+  it("[MUST-FAIL] the super-repo fallback is a protected location: a clone there with a committed scope makes the scope readable, and a runtime write without a grant is refused by it", () => {
+    const bare = join(base, "bare-super-2");
+    put(join(bare, "scripts", "substrate", "README"), "x");
+    git(bare, "init", "-q"); git(bare, "add", "-A"); git(bare, "commit", "-qm", "no scope");
+    const e = { WORKSPACE_ROOT: bare, MITOSIS_RUNTIME_DIR: vessels, MITOSIS_PUSH_CLONE_DIR: clones, COMPOSE_WS_DIR: compose, METABOB_API_KEY: KEY };
+    const rt = join(vessels, "demo", "src", "a.ts");
+    const v = containWrite(rt, { env: e, imageScopeFile: join(base, "no-image-copy.json"), fallbacks: [superRepo] });
+    expect(v.ok).toBe(false);
+    expect(!v.ok && v.reason).not.toContain("autonomy scope unreadable");
+    expect(containmentZones(e, [superRepo]).supers).toContain(realpathSync(superRepo));
+  });
+
+  it("[MUST-FAIL] the default fallback is the fleet's live clone location", () => {
+    expect([...SUPER_REPO_FALLBACKS]).toEqual(["/workspace/git/super-repo"]);
   });
 
   it("never a secret location, grant or not", () => {

@@ -122,9 +122,17 @@ function isGitCheckout(dir: string): boolean {
  * counts only when it actually is a super-repo clone, so a /workspace root does
  * not make the whole workspace protected.
  */
-export function containmentZones(env: Env): Zones {
+/**
+ * Where the live super-repo clone is when no setting names it: the fleet's own location. Kept as a fallback so a node
+ * whose unit sets no SUPER_REPO_DIR still protects its live clone (a walk change that removed it was refused, gap 16531).
+ * Named debt (law 11): a host path in source, agf_d8psexoekvsj. Tests pass their own
+ * list through ContainOpts.fallbacks, as they pass imageScopeFile; no production caller passes it.
+ */
+export const SUPER_REPO_FALLBACKS: readonly string[] = ["/workspace/git/super-repo"];
+
+export function containmentZones(env: Env, fallbacks: readonly string[] = SUPER_REPO_FALLBACKS): Zones {
   const supers: string[] = [];
-  for (const s of [env.SUPER_REPO_DIR, env.MITOSIS_SUPER_REPO_DIR, "/workspace/git/super-repo"]) {
+  for (const s of [env.SUPER_REPO_DIR, env.MITOSIS_SUPER_REPO_DIR, ...fallbacks]) {
     if (abs(s)) { const r = real(s.trim()); if (isGitCheckout(r) && !supers.includes(r)) supers.push(r); }
   }
   const ws = env.WORKSPACE_ROOT;
@@ -245,6 +253,8 @@ export interface ContainOpts {
   grant?: unknown;
   now?: number;
   imageScopeFile?: string;
+  /** The super-repo fallbacks to use instead of SUPER_REPO_FALLBACKS: a test seam, as imageScopeFile is; no production caller passes it. */
+  fallbacks?: readonly string[];
 }
 
 /**
@@ -257,7 +267,7 @@ export function containWrite(path: string, opts: ContainOpts): WriteVerdict {
   const r = realLocation(path);
   if (!r) return refuse(null, null, `cannot resolve ${path}`);
   for (const s of SECRET_LOCATIONS) if (within(r, s) || within(r, real(s))) return refuse(r, "secret", `${r} is a secret location`);
-  const z = containmentZones(opts.env);
+  const z = containmentZones(opts.env, opts.fallbacks);
   const hit = zoneOf(r, z);
   if (!hit) return { ok: true, real: r, zone: null, granted: false };
   const granted = verifyWriteGrant(opts.env.METABOB_API_KEY, opts.raw ?? path, opts.grant, opts.now);
