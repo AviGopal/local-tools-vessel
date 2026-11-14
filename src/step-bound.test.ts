@@ -10,7 +10,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { asShellUser } from "./git-land.js";
 
-const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Alive: signalable and not a zombie (state Z in /proc/<pid>/stat: killed, not yet reaped by whatever adopted it, which
+// in a container without init, or on a loaded host, can lag the kill).
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); } catch { return false; }
+  try { const st = readFileSync(`/proc/${pid}/stat`, "utf8"); return st.slice(st.lastIndexOf(")") + 2, st.lastIndexOf(")") + 3) !== "Z"; } catch { return false; }
+};
+// Gone within a short while: the kill is sent before the answer, but its delivery and the reaping are the kernel's.
+const goneSoon = async (pid: number): Promise<boolean> => {
+  for (let i = 0; i < 30; i++) { if (!alive(pid)) return true; await new Promise((r) => setTimeout(r, 100)); }
+  return !alive(pid);
+};
 // Writable by the shell user: as root (node1's local-tools), asShellUser runs the command as that user (setpriv), and it
 // writes the pid of what it started here.
 const dir = () => { const d = mkdtempSync(join(tmpdir(), "step-bound-")); chmodSync(d, 0o777); return d; };
@@ -30,7 +40,7 @@ describe("a step answers within its bound, whatever it starts", () => {
     expect(r.signalled).toBe(true);
     expect(r.out).toContain("started");
     expect(r.out).toContain("killed at the step bound");
-    expect(alive(pidOf(d))).toBe(false);
+    expect(await goneSoon(pidOf(d))).toBe(true);
   }, 30_000);
 
   test("[MUST-FAIL] a command that ends but leaves a process holding its pipes answers soon after it ends, not at the bound", async () => {
@@ -42,7 +52,7 @@ describe("a step answers within its bound, whatever it starts", () => {
     expect(r.out).toContain("done");
     expect(r.killed).toBe(false);
     expect(r.exit_code).toBe(0);
-    expect(alive(pidOf(d))).toBe(false);
+    expect(await goneSoon(pidOf(d))).toBe(true);
   }, 30_000);
 
   test("a command still running at the bound is killed there (a guard: killing the command alone does this too)", async () => {
