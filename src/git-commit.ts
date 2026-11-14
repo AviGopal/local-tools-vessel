@@ -26,6 +26,7 @@ import { redactSecrets } from "./script-runner.js";
 import { agentShellSpawn } from "./shell-privilege.js";
 import { type Made, madeClone } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
+import { runBounded } from "./bounded-run.js";
 
 type Run = { stdout: string; stderr: string; exit_code: number };
 
@@ -37,12 +38,12 @@ const GIT_TIMEOUT_MS = 60_000;
 export async function git(args: string[], cwd: string, opts: { stdin?: string; extraEnv?: Record<string, string>; timeoutMs?: number } = {}): Promise<Run> {
   const run = agentShellSpawn(["git", ...args], agentShellEnv(process.env, opts.extraEnv), tmpdir());
   try {
-    const p = Bun.spawn(run.argv, {
-      cwd, env: run.env, stdout: "pipe", stderr: "pipe",
-      stdin: opts.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : "ignore",
-      signal: AbortSignal.timeout(opts.timeoutMs ?? GIT_TIMEOUT_MS),
+    // The clone is the walk's: its config can name a clean filter, a hook, a pager that runs and outlives git; bounded
+    // as a whole (bounded-run.ts), so none holds the call.
+    const { stdout, stderr, exit_code } = await runBounded(run.argv, {
+      cwd, env: run.env, stepMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
+      ...(opts.stdin !== undefined ? { stdin: new TextEncoder().encode(opts.stdin) } : {}),
     });
-    const [stdout, stderr, exit_code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     return { stdout, stderr, exit_code };
   } finally {
     void run.done();
@@ -56,8 +57,7 @@ export async function git(args: string[], cwd: string, opts: { stdin?: string; e
  */
 export async function vesselGit(args: string[], cwd: string): Promise<Run> {
   const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/nonexistent", XDG_CONFIG_HOME: "/nonexistent", GIT_TERMINAL_PROMPT: "0" };
-  const p = Bun.spawn(["git", "-c", "credential.helper=", ...args], { cwd, env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(GIT_TIMEOUT_MS) });
-  const [stdout, stderr, exit_code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  const { stdout, stderr, exit_code } = await runBounded(["git", "-c", "credential.helper=", ...args], { cwd, env, stepMs: GIT_TIMEOUT_MS });
   return { stdout, stderr, exit_code };
 }
 
