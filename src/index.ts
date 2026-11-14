@@ -32,6 +32,7 @@ import { diffClone, gapOf, isGapCheckFile, landClone } from "./git-land.js";
 import { madeClone, readRows } from "./walk-rows.js";
 import { behind, cloneOf } from "./clone-freshness.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
+import { runBounded } from "./bounded-run.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
 const VESSEL_ID = "local-tools-vessel";
@@ -303,7 +304,7 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
   // the bound actually applied, the slot wait, bash exit vs pipe EOF, the end kind and what
   // the call left alive. The probe swallows its own errors; nothing below changes behaviour.
   const probe = openShProbe({ cmd, requestedTimeoutSec: timeoutSec, effectiveTimeoutSec: requestTimeoutSec, testClass, executionId: extraEnv?.SUBSTRATE_EXECUTION_ID, callerTag });
-  let abort: AbortSignal | undefined;
+  let aborted = false;
   // What ended the process, as the runtime says it: a signal's name, a number, or nothing (its type differs across bun
   // versions, and a node's installed types need not match the lockfile's).
   let proc: { signalCode: unknown } | undefined;
@@ -320,14 +321,13 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
       // Unprivileged when this vessel runs as root (shell-privilege.ts).
       const run = agentShellSpawn(["bash", "-c", groupBounded(cmd, requestTimeoutSec)], agentShellEnv(process.env, extraEnv), tmpdir());
       done = run.done;
-      const p = Bun.spawn(run.argv, { cwd, env: run.env, stdout: "pipe", stderr: "pipe", signal: (abort = AbortSignal.timeout((requestTimeoutSec + 5) * 1000)) });
-      proc = p;
-      probe.spawned(p.pid);
-      p.exited.then(probe.exited, () => {});
-      const out = new Response(p.stdout).text(), err = new Response(p.stderr).text();
-      Promise.all([out, err]).then(probe.eof, () => {});
-      const [stdout, stderr, exit_code] = await Promise.all([out, err, p.exited]);
-      result = { stdout, stderr, exit_code };
+      // Bounded as a whole (bounded-run.ts): what the command leaves running (a server, `cmd &`, a setsid job) cannot
+      // hold its pipes, and so the call, past the end of the command or the backstop, as it did when only bash was
+      // signalled and its pipes were read to EOF.
+      const r = await runBounded(run.argv, { cwd, env: run.env, stepMs: (requestTimeoutSec + 5) * 1000, hooks: { spawned: probe.spawned, exited: probe.exited, eof: probe.eof } });
+      aborted = r.killed;
+      proc = { signalCode: r.signal };
+      result = { stdout: r.stdout, stderr: r.stderr, exit_code: r.exit_code };
       return result;
     } finally {
       void done(); // cleanup trails the answer (shell-privilege.ts)
@@ -337,7 +337,7 @@ export async function sh(cmd: string, cwd = DEFAULT_CWD, timeoutSec?: number, ex
     threw = true;
     throw e;
   } finally {
-    probe.done({ result, threw, aborted: abort?.aborted ?? false, signal: proc?.signalCode == null ? null : String(proc.signalCode) });
+    probe.done({ result, threw, aborted, signal: proc?.signalCode == null ? null : String(proc.signalCode) });
   }
 }
 
@@ -585,10 +585,8 @@ const boundedShellResolver: ResolverHandler = async (ctx) => {
     if (!(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))) console.log(`[local-tools] bounded_shell request WITHOUT execution_id — body keys=${JSON.stringify(Object.keys((ctx.body as object) ?? {}))} pointer keys=${JSON.stringify(Object.keys(((ctx.body as any)?.impulse?.pointer as object) ?? {}))} ${cmdRef(command)}`);
     const run = agentShellSpawn(["bash", "-c", groupBounded(command, timeoutSec)], agentShellEnv(process.env, ((id) => id ? { SUBSTRATE_EXECUTION_ID: id } : {})(str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id"))), tmpdir());
     done = run.done;
-    const p = Bun.spawn(run.argv, { cwd, env: run.env, stdout: "pipe", stderr: "pipe", timeout: (timeoutSec + 5) * 1000 });
-    const [stdout, stderr, exit_code] = await Promise.all([
-      new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited,
-    ]);
+    // Bounded as a whole, as sh() is (bounded-run.ts): a job the command leaves running cannot hold the call.
+    const { stdout, stderr, exit_code } = await runBounded(run.argv, { cwd, env: run.env, stepMs: (timeoutSec + 5) * 1000 });
     return { shape: "boundedShellResult", stdout, stderr, exit_code };
   } finally {
     void done(); // cleanup trails the answer (shell-privilege.ts)

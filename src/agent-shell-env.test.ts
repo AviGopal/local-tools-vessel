@@ -119,6 +119,7 @@ describe("(iv) both shell spawn sites use agentShellEnv", () => {
     const spawns = src.split("\n").filter((l) => /agentShellSpawn\(\s*\[\s*"bash"/.test(l));
     expect(spawns.length).toBe(2);
     for (const l of spawns) expect(l).toMatch(/agentShellEnv\(process\.env/);
-    expect(src.split("\n").filter((l) => /Bun\.spawn\(run\.argv, \{ cwd, env: run\.env/.test(l)).length).toBe(2);
+    // both run through runBounded (bounded-run.ts), with the env agentShellSpawn built and nothing else
+    expect(src.split("\n").filter((l) => /runBounded\(run\.argv, \{ cwd, env: run\.env/.test(l)).length).toBe(2);
   });
 });
