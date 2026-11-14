@@ -5,13 +5,15 @@
 // discovery holding local-tools' calls with no limit the walk would have waited on that answer forever.
 // Judged by effect: how long the answer takes, and whether what was started is still alive.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { asShellUser } from "./git-land.js";
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const dir = () => mkdtempSync(join(tmpdir(), "step-bound-"));
+// Writable by the shell user: as root (node1's local-tools), asShellUser runs the command as that user (setpriv), and it
+// writes the pid of what it started here.
+const dir = () => { const d = mkdtempSync(join(tmpdir(), "step-bound-")); chmodSync(d, 0o777); return d; };
 const pidOf = (d: string): number => Number(readFileSync(join(d, "pid"), "utf8").trim());
 
 describe("a step answers within its bound, whatever it starts", () => {
