@@ -101,6 +101,12 @@ describe("a refused path is the request's fault: answered 422, so the move that 
     expect(text).toContain("fileContent");
   });
 
+  it("a read says how many bytes it holds, so a reader shown it knows whether it is the whole file", async () => {
+    const [, text] = await status("fs_read", { path: join(data, "report.md") });
+    const r = JSON.parse(text) as { content?: string; bytes?: number };
+    expect([r.content, r.bytes]).toEqual(["report one\n", Buffer.byteLength("report one\n")]);
+  });
+
   it("an unreadable autonomy scope is the node's fault, not the request's: it stays a 200 {error} (a pin)", () => {
     const why = `${WRITE_CONTAINMENT_ERROR}: autonomy scope unreadable (no file); /x is in the vessel runtime /vessels, which fails closed`;
     expect(refusedWrite(why, "/x")).toEqual({ error: why, path: "/x" });

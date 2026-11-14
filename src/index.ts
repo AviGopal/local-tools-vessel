@@ -377,7 +377,8 @@ const fsRead: ResolverHandler = async (ctx) => {
   const path = readPath(rawPath);
   if (!path) return { error: "path is required" };
   for (let attempt = 0; ; attempt++) {
-    try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content }; }
+    // bytes: how much was read, so a reader shown the row knows whether it holds the whole file.
+    try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content, bytes: Buffer.byteLength(content) }; }
     catch (e) {
       const msg = (e as Error)?.message ?? "";
       if (attempt < 5 && /ENOENT|no such file/i.test(msg)) { await new Promise((r) => setTimeout(r, 80)); continue; }
