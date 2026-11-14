@@ -370,7 +370,7 @@ async function writeOut(t: Trusted, made: Made, work: string, ref = "refs/land/h
   if (a.exit_code !== 0) return { why: "the tree could not be written out" };
   const dir = join(work, name);
   mkdirSync(dir, { mode: 0o755 });
-  const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore" });
+  const x = Bun.spawnSync(["tar", "-xf", tar, "-C", dir, "--no-same-owner"], { stdout: "ignore", stderr: "ignore", timeout: STEP_MS });
   if (x.exitCode !== 0) return { why: "the tree could not be written out" };
   rmSync(join(dir, "node_modules"), { recursive: true, force: true });
   symlinkSync(join(containmentZones(process.env).runtime, made.repo, "node_modules"), join(dir, "node_modules"));

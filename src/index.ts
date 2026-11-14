@@ -1036,9 +1036,17 @@ const runtime = new ExecutionRuntime({
   attachedVessels: [{ id: VESSEL_ID, kind: "local-tools" as never, resolverIds: Array.from(resolvers.keys()) }],
 });
 
+// How long discovery may hold a call it forwards here: no limit (the largest delay a timer takes, as the walk declares).
+// Every call this vessel serves bounds itself: each subprocess it starts carries its own signal or timeout (STEP_MS for
+// git_diff's and git_land's steps, a caller's timeout capped at MAX_TIMEOUT_SEC for the shells), which call-bounds.test.ts
+// holds for every site in src. With discovery's default of 10 s, a git_diff (a typecheck and the gap's test file run on
+// the base and on the tree, in one call) was cut before it could answer. Above this value a timer can fire at once.
+export const RESOLVE_TIMEOUT_MS = 2147483647;
+
 if (import.meta.main) {
   await new VesselDaemon({
     port: PORT,
+    resolveTimeoutMs: RESOLVE_TIMEOUT_MS,
   vesselId: VESSEL_ID,
   vesselName: "Local Tools Vessel",
   shapes: [

@@ -91,6 +91,8 @@ const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_STRING_MAX = 256;
 const POOL_READ_TIMEOUT_MS = 10_000;
+// How long one git or tar step of an export (an object check, an archive, its extraction) may take before it is stopped.
+const EXPORT_STEP_MS = 300_000;
 /** Every pool status, read so a retirement or consumption of an approval is seen. */
 const ROW_STATUSES = ["open", "retired", "consumed"] as const;
 const REDACTED = "[REDACTED]";
@@ -464,7 +466,7 @@ const gitEnv = (env: Env) => ({ PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
 /** One git call in argv form, from `cwd`'s repository, with a minimal env. */
 function gitSync(cwd: string, args: string[], env: Env): { code: number; out: string; err: string } {
   try {
-    const r = Bun.spawnSync(["git", ...args], { cwd, env: gitEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync(["git", ...args], { cwd, env: gitEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: EXPORT_STEP_MS });
     return { code: r.exitCode ?? -1, out: new TextDecoder().decode(r.stdout ?? new Uint8Array()), err: new TextDecoder().decode(r.stderr ?? new Uint8Array()) };
   } catch (e) { return { code: -1, out: "", err: String((e as Error)?.message ?? e) }; }
 }
@@ -493,7 +495,7 @@ function gateCommit(root: string, e: AllowlistEntry, env: Env): { ok: true; subs
 
 /** `git archive` of `paths` at `rev`, streamed to `tarPath` with a byte budget, then extracted into `dest`. */
 async function archiveInto(cwd: string, rev: string, paths: string[], dest: string, tarPath: string, budget: number, env: Env): Promise<{ ok: true; bytes: number } | { ok: false; code: RefusalCode; why: string }> {
-  const p = Bun.spawn(["git", "archive", "--format=tar", rev, "--", ...paths], { cwd, env: gitEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawn(["git", "archive", "--format=tar", rev, "--", ...paths], { cwd, env: gitEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(EXPORT_STEP_MS) });
   const w = Bun.file(tarPath).writer();
   let total = 0;
   const reader = (p.stdout as ReadableStream<Uint8Array>).getReader();
@@ -513,7 +515,7 @@ async function archiveInto(cwd: string, rev: string, paths: string[], dest: stri
   const code = await p.exited;
   if (code !== 0) return { ok: false, code: "export_failed", why: `git archive ${rev} exited ${code}: ${(await new Response(p.stderr as ReadableStream).text()).slice(0, 300)}` };
   mkdirSync(dest, { recursive: true });
-  const x = Bun.spawnSync(["tar", "-x", "--no-same-owner", "-f", tarPath, "-C", dest], { env: gitEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const x = Bun.spawnSync(["tar", "-x", "--no-same-owner", "-f", tarPath, "-C", dest], { env: gitEnv(env), stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: EXPORT_STEP_MS });
   rmSync(tarPath, { force: true });
   if (x.exitCode !== 0) return { ok: false, code: "export_failed", why: `tar exited ${x.exitCode}` };
   return { ok: true, bytes: total };

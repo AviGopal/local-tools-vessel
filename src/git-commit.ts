@@ -122,7 +122,7 @@ async function pinnedHooks(superDir: string, made: Made): Promise<string | { err
 
 /** The system hooks directory, when this vessel's owner alone can write it; null otherwise. */
 function systemHooksDir(): string | null {
-  const r = Bun.spawnSync(["git", "config", "--system", "--get", "core.hooksPath"], { env: process.env as Record<string, string>, stdout: "pipe", stderr: "ignore" });
+  const r = Bun.spawnSync(["git", "config", "--system", "--get", "core.hooksPath"], { env: process.env as Record<string, string>, stdout: "pipe", stderr: "ignore", timeout: GIT_TIMEOUT_MS });
   const dir = r.exitCode === 0 ? r.stdout.toString().trim() : "";
   if (!dir) return null;
   try {
