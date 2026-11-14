@@ -245,8 +245,8 @@ export type GapCheck =
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
-      fast_forward: boolean; typecheck: Typecheck; check?: GapCheck }
-  | { error: string; stderr?: string };
+      fast_forward: boolean; typecheck: Typecheck; check?: GapCheck; uncommitted?: string[] }
+  | { error: string; stderr?: string; uncommitted?: string[] };
 
 // What a change could write to make a check it fails read as passing: the runner's own result words, an exit before the
 // runner reports, where its report goes. A change adding any of these does not pass the gap's check, whatever else it
@@ -470,14 +470,34 @@ const timed = async <T>(steps: Array<[string, number]>, step: string, f: () => P
   try { return await f(); } finally { steps.push([step, Math.round(performance.now() - t0)]); }
 };
 
+/**
+ * The paths the clone holds changed and not committed (modified, added, deleted, untracked), relative to it; null when
+ * they cannot be read. git_diff describes the committed change, which is what lands; a walk that edited without
+ * committing was shown a diff and a typecheck that do not have its edits, and nothing said so. Read as the shell user
+ * (the clone is the walk's), with core.fsmonitor off, so nothing the clone's config names is run.
+ */
+async function uncommitted(cwd: string): Promise<string[] | null> {
+  const r = await git(["-c", "core.fsmonitor=false", "-C", cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], tmpdir());
+  if (r.exit_code !== 0) return null;
+  return r.stdout.split("\0").filter((e) => e.length > 3).map((e) => e.slice(3));
+}
+
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
 export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports, gap: GapRef | null | { error: string } = null): Promise<DiffResult> {
   const work = mkdtempSync(join(tmpdir(), "diff-"));
   const steps: Array<[string, number]> = [];
   const t0 = performance.now();
   try {
+    const pending = await timed(steps, "status", () => uncommitted(cwd));
+    const said = pending === null ? {} : { uncommitted: pending };
+    // A clone with no commit since it was made has no change to diff; said so, with what it holds uncommitted, rather
+    // than the bundle's "could not be bundled".
+    const ahead = await git(["-C", cwd, "rev-list", "--count", `${made.base}..HEAD`], tmpdir());
+    if (ahead.exit_code === 0 && ahead.stdout.trim() === "0") {
+      return { error: "the clone has no commit since it was made: there is no change to diff; git_commit commits what it holds", ...said };
+    }
     const t = await timed(steps, "into_trusted", () => intoTrusted(cwd, made, work, transports));
-    if ("error" in t) return t;
+    if ("error" in t) return { ...t, ...said };
     const base = await t.out(["rev-parse", t.origin]);
     // The change is what the clone's commits do: diffed from where they leave origin's branch. When origin has moved on
     // since the clone was made, a diff from origin's tip would show every later commit on it undone, as if the change
@@ -495,7 +515,7 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const baseDir = gap === null || "error" in gap ? { why: "no gap" } : ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
-      fast_forward: ff, typecheck, ...check };
+      fast_forward: ff, typecheck, ...check, ...said };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
     console.log(`[git_diff] ${steps.map(([s, ms]) => `${s}=${ms}ms`).join(" ")} total=${Math.round(performance.now() - t0)}ms`);

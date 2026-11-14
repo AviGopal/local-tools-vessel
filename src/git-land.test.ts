@@ -275,7 +275,7 @@ describe("git_land", () => {
       await diffClone(cwd, made.get(cwd)!, ["file"]);
       const lines = log.mock.calls.flat().map(String).filter((l) => l.startsWith("[git_diff] "));
       expect(lines.length).toBe(1);
-      expect(lines[0]).toMatch(/^\[git_diff\] into_trusted=\d+ms diff=\d+ms write_out=\d+ms typecheck=\d+ms total=\d+ms$/);
+      expect(lines[0]).toMatch(/^\[git_diff\] status=\d+ms into_trusted=\d+ms diff=\d+ms write_out=\d+ms typecheck=\d+ms total=\d+ms$/);
       expect(lines[0]).not.toContain(cwd); // no path
     } finally { log.mockRestore(); }
   });
@@ -324,6 +324,23 @@ describe("git_land", () => {
     writeFileSync(join(cwd, "m.ts"), "export const n: number = 1;\n"); // fixed in the clone, not in the tree that lands
     const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
     expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false });
+    // [MUST-FAIL] and git_diff says so: the edit it does not show is named, so the walk can commit it
+    expect("tree" in r && r.uncommitted).toEqual(["m.ts"]);
+  });
+
+  it("[MUST-FAIL] a clone with no commit since it was made answers that, with what it holds uncommitted, not a bundle error", async () => {
+    g(COPY, "pull", "-q", "origin", "dev");
+    const w = await makeWorktree("demo");
+    if ("error" in w) throw new Error(w.error);
+    made.set(w.cwd, w);
+    writeFileSync(join(w.cwd, "z.ts"), "export const z = 1;\n");
+    mkdirSync(join(w.cwd, "sub"), { recursive: true });
+    writeFileSync(join(w.cwd, "sub", "new.ts"), "export const y = 2;\n");
+    asOwner(w.cwd);
+    const r = await diffClone(w.cwd, w, ["file"]);
+    expect("error" in r && r.error).toContain("no commit since it was made");
+    expect("error" in r && r.error).not.toContain("could not be bundled");
+    expect([...(r.uncommitted ?? [])].sort()).toEqual(["sub/new.ts", "z.ts"]);
   });
 
   it("[MUST-FAIL] the typecheck runs nothing of the clone's: not a compiler it carries, committed or not", async () => {
