@@ -1,7 +1,7 @@
 // git_land pushes a clone's change only when a verdict row approves its exact tree, the secrets scan is clean and it
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
-import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -268,6 +268,18 @@ describe("git_land", () => {
     expect(r.typecheck).toEqual({ ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" });
   });
 
+  it("[MUST-FAIL] a git_diff says how long each of its steps took, once, by step name and milliseconds only", async () => {
+    const { cwd } = await change("t.txt", "t\n");
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await diffClone(cwd, made.get(cwd)!, ["file"]);
+      const lines = log.mock.calls.flat().map(String).filter((l) => l.startsWith("[git_diff] "));
+      expect(lines.length).toBe(1);
+      expect(lines[0]).toMatch(/^\[git_diff\] into_trusted=\d+ms diff=\d+ms write_out=\d+ms typecheck=\d+ms total=\d+ms$/);
+      expect(lines[0]).not.toContain(cwd); // no path
+    } finally { log.mockRestore(); }
+  });
+
   /** A clone with these files committed as one change (null deletes one); its cwd and tree. */
   const changeOf = async (files: Record<string, string | null>): Promise<{ cwd: string; tree: string }> => {
     g(COPY, "pull", "-q", "origin", "dev");
@@ -362,6 +374,13 @@ describe("git_land", () => {
     };
     const fixed = "export const add = (a: number, b: number): number => a + b;\n";
     expect(await check({ "calc.ts": fixed })).toMatchObject({ gap_id: "G1", test_file: "calc.test.ts", ran: true, passed: true });
+    // a gap's diff also says how long writing out the base and running the gap's check took (the steps suspected of overrunning)
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await check({ "calc.ts": fixed });
+      const line = log.mock.calls.flat().map(String).find((l) => l.startsWith("[git_diff] "));
+      expect(line).toMatch(/ typecheck=\d+ms base_out=\d+ms gap_check=\d+ms total=\d+ms$/);
+    } finally { log.mockRestore(); }
     expect(await check({ "calc.ts": "export const add = (a: number, b: number): number => a * b;\n" })).toMatchObject({ ran: true, passed: false });
     // the check is the base's: a change to the test, or to what tests lean on, does not pass whatever it does
     expect(await check({ "calc.test.ts": 'import { test } from "bun:test";\ntest("adds", () => {});\n' })).toMatchObject({ passed: false });

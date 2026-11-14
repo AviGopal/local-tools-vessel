@@ -426,11 +426,21 @@ async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef |
   return { ...id, ran: true, passed: named && regressed.length === 0 && !r.signalled, ...tail, regressed };
 }
 
+// How long each step of a git_diff took, said once per call on this vessel's output (step names and milliseconds only,
+// never a path, a name or a diff): a caller that gives up on the call (discovery's forward) sees only that it gave up,
+// so this is where the step that overruns is read.
+const timed = async <T>(steps: Array<[string, number]>, step: string, f: () => Promise<T>): Promise<T> => {
+  const t0 = performance.now();
+  try { return await f(); } finally { steps.push([step, Math.round(performance.now() - t0)]); }
+};
+
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
 export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports, gap: GapRef | null | { error: string } = null): Promise<DiffResult> {
   const work = mkdtempSync(join(tmpdir(), "diff-"));
+  const steps: Array<[string, number]> = [];
+  const t0 = performance.now();
   try {
-    const t = await intoTrusted(cwd, made, work, transports);
+    const t = await timed(steps, "into_trusted", () => intoTrusted(cwd, made, work, transports));
     if ("error" in t) return t;
     const base = await t.out(["rev-parse", t.origin]);
     // The change is what the clone's commits do: diffed from where they leave origin's branch. When origin has moved on
@@ -441,16 +451,17 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const from = await t.out(["merge-base", t.origin, "refs/land/head"]);
     if (base === null || from === null) return { error: "the change's diff could not be read" };
     const ff = from === base;
-    const diff = await t.out(["diff", "--no-renames", from, "refs/land/head"]);
+    const diff = await timed(steps, "diff", () => t.out(["diff", "--no-renames", from, "refs/land/head"]));
     if (diff === null) return { error: "the change's diff could not be read" };
     const behind = "the clone's base is behind origin's branch: this change cannot land as it is; ask for a fresh clone and make the edits again";
-    const dir = ff ? await writeOut(t, made, work) : { why: behind };
-    const typecheck: Typecheck = ff ? await typecheckTree(t, made, dir) : { ran: false, passed: false, why: behind };
-    const baseDir = gap === null || "error" in gap ? { why: "no gap" } : ff ? await writeOut(t, made, work, t.origin, "base") : { why: behind };
-    const check = gap === null ? {} : { check: await gapCheck(t, dir, gap, baseDir) };
+    const dir = ff ? await timed(steps, "write_out", () => writeOut(t, made, work)) : { why: behind };
+    const typecheck: Typecheck = ff ? await timed(steps, "typecheck", () => typecheckTree(t, made, dir)) : { ran: false, passed: false, why: behind };
+    const baseDir = gap === null || "error" in gap ? { why: "no gap" } : ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
+    const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
       fast_forward: ff, typecheck, ...check };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
+    console.log(`[git_diff] ${steps.map(([s, ms]) => `${s}=${ms}ms`).join(" ")} total=${Math.round(performance.now() - t0)}ms`);
   }
 }
