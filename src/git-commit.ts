@@ -25,7 +25,7 @@ import { agentShellEnv } from "./agent-shell-env.js";
 import { redactSecrets } from "./script-runner.js";
 import { agentShellSpawn } from "./shell-privilege.js";
 import { type Made, madeClone } from "./walk-rows.js";
-import { containmentZones } from "./write-containment.js";
+import { containmentZones, parseScope, SCOPE_REL, scopeEntryFor } from "./write-containment.js";
 import { runBounded } from "./bounded-run.js";
 
 type Run = { stdout: string; stderr: string; exit_code: number };
@@ -96,6 +96,33 @@ export async function judgesOf(show: (path: string) => Promise<string | null>, m
     try { fixtures = (JSON.parse(policy) as { fixture_paths?: string[] }).fixture_paths ?? []; } catch { /* unreadable: keep the broad set */ }
   }
   return [...JUDGES_EVERYWHERE, ...(JUDGES_BY_REPO[made.repo] ?? []), ...fixtures];
+}
+
+/**
+ * The USER's protected list as the base states it: the committed autonomy scope's excluded paths, read by `read`
+ * (a `git show <base>:` of the super-repo), never from the change's own tree, so a change that drops an entry and
+ * edits what it protected is judged by the list it would replace. Unreadable, missing or empty (and not declared
+ * unrestricted) is an error: a list nobody can read protects nothing, so the caller refuses.
+ */
+export async function protectedListAt(read: (path: string) => Promise<string | null>, where: string): Promise<{ excluded: string[] } | { error: string }> {
+  const text = await read(SCOPE_REL);
+  if (text === null) return { error: `the protected list (${SCOPE_REL}) cannot be read at ${where}: nothing lands without it` };
+  let r;
+  try { r = parseScope(text, `${where}:${SCOPE_REL}`); } catch (e) { return { error: `the protected list at ${where} is not readable JSON: nothing lands without it (${(e as Error).message.split("\n")[0]})` }; }
+  return r.readable ? { excluded: r.excluded } : { error: `the protected list is unreadable: ${r.reason}` };
+}
+
+/**
+ * The changed paths the protected list names, each with the entry that names it ("path (protected: entry)"). A vessel's
+ * paths are named as the super-repo names them (repos/<vessel>/<path>). Pass every name a change touches, old and new.
+ */
+export function protectedHits(changed: string[], repo: string, excluded: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const p of changed) {
+    const entry = scopeEntryFor(repo === "super" ? p : `repos/${repo}/${p}`, excluded);
+    if (entry !== null) out.push(`${p} (protected: ${entry})`);
+  }
+  return out;
 }
 
 /** The pre-commit hook as of the super base, in a fresh directory the agent cannot write; that directory. */
@@ -231,7 +258,10 @@ export async function commitInClone(
     const changed = (await out(["diff", "--cached", "--name-only", "--no-renames", made.base], cwd) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to commit: the clone does not differ from its base" };
     const judges = await judgesOf((path) => out(["show", `${made.base}:${path}`], cwd), made);
-    const needs_person = changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p)));
+    // The USER's protected list, as the super base this clone was made from states it.
+    const list = await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`);
+    if ("error" in list) return { error: list.error };
+    const needs_person = [...changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p))), ...protectedHits(changed, made.repo, list.excluded)];
 
     const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv, timeoutMs: COMMIT_TIMEOUT_MS });
     if (c.exit_code !== 0) {

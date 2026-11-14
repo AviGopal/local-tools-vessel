@@ -165,7 +165,7 @@ export function zoneOf(realPath: string, z: Zones): { zone: Zone; root: string; 
 
 export type ScopeRead = { readable: true; excluded: string[]; source: string } | { readable: false; reason: string };
 
-function parseScope(text: string, source: string): ScopeRead {
+export function parseScope(text: string, source: string): ScopeRead {
   const j = JSON.parse(text) as { autonomyScope?: { excluded_paths?: unknown; unrestricted?: unknown } };
   const body = j?.autonomyScope ?? {};
   const raw = Array.isArray(body.excluded_paths) ? body.excluded_paths : [];

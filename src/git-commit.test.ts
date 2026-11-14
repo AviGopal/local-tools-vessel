@@ -61,6 +61,9 @@ beforeAll(() => {
   writeFileSync(join(SUPER, "scripts", "git-hooks", "pre-commit"), hook("super-hook"), { mode: 0o755 });
   writeFileSync(join(SUPER, "scripts", "git-hooks", "vessel-pre-commit"), hook("vessel-hook", "echo 'note: gitleaks not installed; secrets scan skipped.'\n"), { mode: 0o755 });
   writeFileSync(join(SUPER, "scripts", "git-hooks", ".gitleaks.toml"), 'title = "t"\n\n[extend]\nuseDefault = true\n');
+  // The USER's protected list at the super base: a commit is judged against it (git-land.test.ts covers what it names).
+  mkdirSync(join(SUPER, "scripts", "substrate"), { recursive: true });
+  writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), JSON.stringify({ autonomyScope: { excluded_paths: ["scripts/substrate/"] } }) + "\n");
   g(SUPER, "remote", "add", "origin", "https://example.invalid/super.git");
   commitAll(SUPER, "super base");
   const demo = join(CLONES, "demo");

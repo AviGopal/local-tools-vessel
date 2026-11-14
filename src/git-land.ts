@@ -17,7 +17,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git, judgesOf, vesselGit } from "./git-commit.js";
+import { git, judgesOf, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
@@ -114,7 +114,14 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     const changed = ((await out(["diff", "--name-only", "--no-renames", origin, "refs/land/head"])) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to land: the change does not differ from origin" };
     const judges = await judgesOf((path) => out(["show", `${origin}:${path}`]), { repo: made.repo });
-    const needs_person = changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p)));
+    // The USER's protected list as the base states it: for a super-repo change, origin's (the fetched base this change
+    // would move, never the change's own tree); for a vessel's, the super base its clone was made from. A path it names
+    // lands only on a person's verdict, as a judge's own files do.
+    const list = made.repo === "super"
+      ? await protectedListAt((path) => out(["show", `${origin}:${path}`]), "origin")
+      : await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`);
+    if ("error" in list) return { error: list.error, tree };
+    const needs_person = [...changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p))), ...protectedHits(changed, made.repo, list.excluded)];
 
     // The scan, with the super base's config, over exactly the commits that would be pushed.
     const cfg = await vesselGit(["show", `${made.super_base}:scripts/git-hooks/.gitleaks.toml`], superDir);

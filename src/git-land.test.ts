@@ -40,6 +40,8 @@ const ORIGIN = join(T, "demo.git");
 const COPY = join(T, "clones", "demo");
 const CONFIG = 'title = "t"\n\n[extend]\nuseDefault = true\n\n[[rules]]\nid = "substrate-api-key"\nregex = \'\'\'\\bmb[-_][A-Za-z0-9_-]{32,}\'\'\'\n';
 
+const SCOPE = (excluded: string[]) => JSON.stringify({ autonomyScope: { excluded_paths: excluded } }) + "\n";
+
 const made = new Map<string, Made>();
 const find = async (cwd: string) => made.get(cwd) ?? { error: "0 walk rows" };
 let table: Row[] = [];
@@ -81,6 +83,10 @@ beforeAll(() => {
   g(SUPER, "init", "-q", "-b", "dev");
   for (const h of ["pre-commit", "vessel-pre-commit"]) writeFileSync(join(SUPER, "scripts", "git-hooks", h), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   writeFileSync(join(SUPER, "scripts", "git-hooks", ".gitleaks.toml"), CONFIG);
+  // The USER's protected list, committed at the super base: the node gate's directory, the operator's tooling, and a
+  // directory of the demo vessel (named as the super-repo names it, repos/demo/...).
+  mkdirSync(join(SUPER, "scripts", "substrate"), { recursive: true });
+  writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), SCOPE(["scripts/substrate/", ".claude/", "repos/demo/protected/"]));
   g(SUPER, "remote", "add", "origin", "https://example.invalid/super.git");
   commitAll(SUPER, "super base");
   g(T, "init", "-q", "--bare", "-b", "dev", ORIGIN);
@@ -488,5 +494,93 @@ describe("git_land", () => {
       expect(judges.some((g) => new Bun.Glob(g).match(p))).toBe(true);
     }
     expect(judges.some((g) => new Bun.Glob(g).match("src/fs-read.ts"))).toBe(false);
+  });
+});
+
+describe("git_land: the USER's protected list", () => {
+  const graderOn = (tree: string, id: string): Row[] => [ask,
+    { id: `gd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row,
+    { id, shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", `gd-${id}`] } as Row];
+
+  scanned("[MUST-FAIL] a path the list names lands only on a person's verdict, which names the entry; a person's r 1 lands it", async () => {
+    const { cwd, tree } = await change("protected/x.ts", "export const x = 1\n");
+    table = graderOn(tree, "pg1");
+    const r = await landClone(cwd, deps);
+    expect(String((r as { error: string }).error)).toContain("only a person's verdict");
+    expect((r as unknown as { needs_person: string[] }).needs_person).toEqual(["protected/x.ts (protected: repos/demo/protected/)"]);
+    table = personOn(tree, "pp1");
+    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+  });
+
+  it("[MUST-FAIL] the commit already says which entry needs a person, so the walk waits rather than retries", async () => {
+    g(COPY, "pull", "-q", "origin", "dev");
+    const w = await makeWorktree("demo");
+    if ("error" in w) throw new Error(w.error);
+    made.set(w.cwd, w); asOwner(w.cwd);
+    mkdirSync(join(w.cwd, "protected"), { recursive: true });
+    writeFileSync(join(w.cwd, "protected", "y.ts"), "y\n");
+    const c = await commitInClone(w.cwd, "y", undefined, find);
+    expect((c as { needs_person: string[] }).needs_person).toEqual(["protected/y.ts (protected: repos/demo/protected/)"]);
+  });
+
+  scanned("a path only like a listed directory's name is not in it, and lands on a grader's r 1", async () => {
+    const { cwd, tree } = await change("protected-x/y.ts", "y\n");
+    table = graderOn(tree, "pg2");
+    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+  });
+
+  scanned("[MUST-FAIL] a rename out of a listed directory counts the name it leaves", async () => {
+    // protected/x.ts is on origin (landed by a person above); move it out under a grader's verdict alone.
+    g(COPY, "pull", "-q", "origin", "dev");
+    const w = await makeWorktree("demo");
+    if ("error" in w) throw new Error(w.error);
+    made.set(w.cwd, w); asOwner(w.cwd);
+    g(w.cwd, "mv", "protected/x.ts", "moved-x.ts");
+    const c = await commitInClone(w.cwd, "move out", undefined, find);
+    if (!("tree" in c)) throw new Error(JSON.stringify(c));
+    table = graderOn(c.tree, "pg3");
+    const r = await landClone(w.cwd, deps);
+    expect(String((r as { error: string }).error)).toContain("only a person's verdict");
+    expect((r as unknown as { needs_person: string[] }).needs_person).toContain("protected/x.ts (protected: repos/demo/protected/)");
+  });
+
+  it("[MUST-FAIL] a super base with no readable list refuses the commit, never reads as no hits", async () => {
+    const good = g(SUPER, "rev-parse", "HEAD");
+    writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), "{ not json\n");
+    commitAll(SUPER, "unreadable list");
+    try {
+      g(COPY, "pull", "-q", "origin", "dev");
+      const w = await makeWorktree("demo");
+      if ("error" in w) throw new Error(w.error);
+      made.set(w.cwd, w); asOwner(w.cwd);
+      writeFileSync(join(w.cwd, "free.txt"), "f\n");
+      const c = await commitInClone(w.cwd, "free", undefined, find);
+      expect(String((c as { error: string }).error)).toContain("protected list");
+    } finally {
+      writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), SCOPE(["scripts/substrate/", ".claude/", "repos/demo/protected/"]));
+      commitAll(SUPER, "list restored");
+      expect(g(SUPER, "rev-parse", "HEAD")).not.toBe(good);
+    }
+  });
+
+  it("[MUST-FAIL] the list is read at the base: a change that drops an entry is judged by the list it would replace", async () => {
+    const { protectedHits, protectedListAt } = await import("./git-commit");
+    const r = join(T, "scope-base");
+    g(T, "init", "-q", "-b", "dev", r);
+    mkdirSync(join(r, "scripts", "substrate"), { recursive: true });
+    writeFileSync(join(r, "scripts", "substrate", "autonomy-scope.json"), SCOPE(["scripts/substrate/", ".claude/"]));
+    commitAll(r, "base");
+    const base = g(r, "rev-parse", "HEAD");
+    writeFileSync(join(r, "scripts", "substrate", "autonomy-scope.json"), SCOPE(["scripts/substrate/"]));
+    writeFileSync(join(r, "x"), "x\n");
+    commitAll(r, "drops .claude/");
+    const at = (ref: string) => async (path: string) => { try { return g(r, "show", `${ref}:${path}`); } catch { return null; } };
+    const list = await protectedListAt(at(base), "base");
+    if ("error" in list) throw new Error(list.error);
+    expect(protectedHits([".claude/hooks/gate.sh", "scripts/substrate/autonomy-scope.json", "scripts/substrate-x/y"], "super", list.excluded))
+      .toEqual([".claude/hooks/gate.sh (protected: .claude/)", "scripts/substrate/autonomy-scope.json (protected: scripts/substrate/)"]);
+    // an empty or missing list is an error, never no hits
+    expect("error" in (await protectedListAt(async () => null, "base"))).toBe(true);
+    expect("error" in (await protectedListAt(async () => SCOPE([]), "base"))).toBe(true);
   });
 });
