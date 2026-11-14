@@ -18,10 +18,11 @@
 // without the pinned hook, or make this answer wrong (replace refs on the base, an fsmonitor, a rewritten index). That
 // gains it nothing it does not already have, but every value answered here (changed, needs_person, tree, scan) is
 // advisory: a landing recomputes all of it in a repository of its own before anything is pushed.
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentShellEnv } from "./agent-shell-env.js";
+import { redactSecrets } from "./script-runner.js";
 import { agentShellSpawn } from "./shell-privilege.js";
 import { type Made, madeClone } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
@@ -133,11 +134,90 @@ function systemHooksDir(): string | null {
 
 export type CommitResult =
   | { shape: "gitCommitResult"; sha: string; tree: string; base: string; changed: string[]; needs_person: string[]; scan: "ran" | "skipped" }
-  | { error: string; stderr?: string; exit_code?: number };
+  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number };
+
+// What a refused commit printed, as the reason the walk is shown: git's stderr, where git also sends everything a hook
+// prints (its stdout too). A hook may print what it read (a test's output, a scan's finding, a file in the tree), and
+// that can quote a secret. So, before the cut and in this order, using what this vessel already has:
+//   - every value this process holds that an agent's shell would not be given (the complement of agentShellEnv's
+//     allowlist, so a credential added to the env is covered when it arrives) is redacted with script-runner's
+//     redactSecrets, except values shorter than its window and values that are only a place: a bare absolute path
+//     (letters, digits, ".", "_", "-" and "/"), or exactly scheme://host[:port] with at most a trailing "/". Those stay,
+//     so a failure keeps the file and line it names (a redacted window of "/workspace" would cut every path). A URL
+//     with anything more (a user, a path, a query, a fragment) is redacted: a webhook keeps its secret there;
+//   - the rest is scanned with the super base's secrets config (gitleaks over a private temp file, as a landing scans
+//     its range). Each line a finding names is replaced by "[REDACTED: secrets scan, rules ...]", placed by the
+//     report's rule ids and line numbers, never by matching its text; the replaced text is scanned again and must come
+//     back clean;
+//   - then it is cut to its last TAIL characters.
+// If the scan cannot run or cannot be trusted (no scanner, no config, an error, a report it cannot read, a finding
+// outside the text, a second scan that still finds something), nothing of the output is kept: the answer says it was
+// withheld and why. Only a refused commit is scanned; a commit that lands is scanned by the landing. SCAN_MS bounds
+// each scan.
+const TAIL = 2000;
+const SCAN_MS = 60_000;
+const SHORTEST = 8;
+const isPlace = (v: string): boolean => /^\/[A-Za-z0-9._/-]+$/.test(v) || /^[a-z][a-z0-9+.-]*:\/\/[A-Za-z0-9.-]+(:\d+)?\/?$/.test(v);
+const hidden = (): string[] => {
+  const given = new Set(Object.keys(agentShellEnv(process.env)));
+  return Object.entries(process.env)
+    .filter(([k, v]) => !given.has(k) && typeof v === "string" && v.length >= SHORTEST && !isPlace(v))
+    .map(([, v]) => v as string);
+};
+type Scan = { clean: true } | { found: Array<{ RuleID?: string; StartLine?: number; EndLine?: number }> } | { failed: string };
+async function scanText(text: string, scanner: string, config: string, work: string, n: number): Promise<Scan> {
+  const input = join(work, `in-${n}`);
+  mkdirSync(input, { mode: 0o700 });
+  writeFileSync(join(input, "said.txt"), text, { mode: 0o600 });
+  const report = join(work, `leaks-${n}.json`);
+  let sc: number;
+  try {
+    const scan = Bun.spawn([scanner, "detect", "--no-git", "--source", input, "--config", config,
+      "--redact", "--no-banner", "--exit-code", "3", "--report-format", "json", "--report-path", report],
+    { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: work }, stdout: "ignore", stderr: "ignore", signal: AbortSignal.timeout(SCAN_MS) });
+    sc = await scan.exited;
+  } catch { return { failed: "the secrets scan could not start" }; }
+  if (sc === 0) return { clean: true };
+  if (sc !== 3) return { failed: `the secrets scan did not run cleanly (exit ${sc})` };
+  try {
+    const found = JSON.parse(readFileSync(report, "utf8"));
+    return Array.isArray(found) && found.length > 0 ? { found } : { failed: "the secrets scan's report named nothing" };
+  } catch { return { failed: "the secrets scan's report could not be read" }; }
+}
+async function refusedSaying(c: Run, superDir: string, made: Made, scanner: string | null): Promise<{ stderr: string } | { stderr_withheld: string }> {
+  const known = redactSecrets(c.stderr, hidden()).text;
+  if (!scanner) return { stderr_withheld: "no secrets scanner on this node" };
+  const work = mkdtempSync(join(tmpdir(), "commit-said-"));
+  try {
+    const cfg = await vesselGit(["show", `${made.super_base}:scripts/git-hooks/.gitleaks.toml`], superDir);
+    if (cfg.exit_code !== 0) return { stderr_withheld: "the super base has no secrets scan config" };
+    const config = join(work, "gitleaks.toml");
+    writeFileSync(config, cfg.stdout, { mode: 0o600 });
+    const first = await scanText(known, scanner, config, work, 1);
+    if ("failed" in first) return { stderr_withheld: first.failed };
+    if ("clean" in first) return { stderr: known.slice(-TAIL) };
+    const lines = known.split("\n");
+    for (const f of first.found) {
+      const from = Number(f.StartLine);
+      const to = Number(f.EndLine ?? f.StartLine);
+      if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from || to > lines.length) {
+        return { stderr_withheld: "the secrets scan found something it could not place" };
+      }
+      for (let i = from; i <= to; i++) lines[i - 1] = `[REDACTED: secrets scan, rules ${String(f.RuleID)}]`;
+    }
+    const replaced = lines.join("\n");
+    const again = await scanText(replaced, scanner, config, work, 2);
+    if (!("clean" in again)) return { stderr_withheld: "the secrets scan still found something after its findings were replaced" };
+    return { stderr: replaced.slice(-TAIL) };
+  } finally {
+    try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
+  }
+}
 
 export async function commitInClone(
   cwd: string, message: string, extraEnv?: Record<string, string>,
   find: (cwd: string) => Promise<Made | { error: string }> = madeClone,
+  scanner: string | null = Bun.which("gitleaks", { PATH: process.env.PATH ?? "" }),
 ): Promise<CommitResult> {
   const made = await find(cwd);
   if ("error" in made) return made;
@@ -154,7 +234,10 @@ export async function commitInClone(
     const needs_person = changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p)));
 
     const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv, timeoutMs: COMMIT_TIMEOUT_MS });
-    if (c.exit_code !== 0) return { error: "the commit was refused (the pinned hook, or git)", stderr: c.stderr.slice(-2000), exit_code: c.exit_code };
+    if (c.exit_code !== 0) {
+      const said = await refusedSaying(c, superDir, made, scanner);
+      return { error: "the commit was refused (the pinned hook, or git)", ...said, exit_code: c.exit_code };
+    }
     const sha = await out(["rev-parse", "HEAD"], cwd);
     const tree = await out(["rev-parse", "HEAD^{tree}"], cwd);
     if (!sha || !tree) return { error: "committed, but HEAD could not be read" };

@@ -35,9 +35,11 @@ const asOwner = (cwd: string) => {
 };
 const commitAll = (cwd: string, m: string) => { g(cwd, "add", "-A"); g(cwd, "commit", "-q", "-m", m); };
 
-// Each hook records which one ran and the env it ran with, and refuses while a BLOCK file is in the change.
+// Each hook records which one ran and the env it ran with, and refuses while a BLOCK file is in the change. One with a
+// LEAKY file prints it on stdout and stderr, as a hook printing what it read would, and refuses.
 const hook = (name: string, extra = "") =>
-  `#!/bin/sh\necho ${name} >> "${OUT}/hooks-ran.txt"\nenv > "${OUT}/hook-env.txt"\n${extra}[ -e BLOCK ] && { echo blocked >&2; exit 1; }\nexit 0\n`;
+  `#!/bin/sh\necho ${name} >> "${OUT}/hooks-ran.txt"\nenv > "${OUT}/hook-env.txt"\n${extra}[ -e BLOCK ] && { echo blocked >&2; exit 1; }\n` +
+  `[ -e LEAKY ] && { cat LEAKY; [ -e OLD ] && cat OLD; echo "hook refused: a finding in LEAKY"; cat LEAKY >&2; echo "hook refused on stderr" >&2; exit 1; }\nexit 0\n`;
 const SUPER = join(T, "super");
 const CLONES = join(T, "clones");
 
@@ -58,6 +60,7 @@ beforeAll(() => {
   g(SUPER, "init", "-q", "-b", "dev");
   writeFileSync(join(SUPER, "scripts", "git-hooks", "pre-commit"), hook("super-hook"), { mode: 0o755 });
   writeFileSync(join(SUPER, "scripts", "git-hooks", "vessel-pre-commit"), hook("vessel-hook", "echo 'note: gitleaks not installed; secrets scan skipped.'\n"), { mode: 0o755 });
+  writeFileSync(join(SUPER, "scripts", "git-hooks", ".gitleaks.toml"), 'title = "t"\n\n[extend]\nuseDefault = true\n');
   g(SUPER, "remote", "add", "origin", "https://example.invalid/super.git");
   commitAll(SUPER, "super base");
   const demo = join(CLONES, "demo");
@@ -269,7 +272,116 @@ describe("git_commit", () => {
     writeFileSync(join(cwd, "BLOCK"), "x\n");
     const r = await commitInClone(cwd, "weaken the gate", undefined, find);
     expect("error" in r && r.error).toContain("refused");
-    expect("stderr" in r && r.stderr).toContain("blocked");
+    // what the hook said is kept only when it could be scanned; with no scanner on the node it is withheld
+    if (Bun.which("gitleaks")) expect("stderr" in r && r.stderr).toContain("blocked");
+    else expect("stderr_withheld" in r && r.stderr_withheld).toContain("no secrets scanner");
+  });
+
+  // Key-shaped values, built so that no scanner reads this file as holding one.
+  const ADDED = "AKIA" + "Z7Q4LX2M9WB3N8PD";
+  const IN_TREE = "AKIA" + "Q2W8E4R6T1Y3U5I7";
+  const refuse = async (leaky: string, opts: { old?: string; scanner?: string | null } = {}) => {
+    if (opts.old !== undefined) { writeFileSync(join(CLONES, "demo", "OLD"), opts.old); commitAll(join(CLONES, "demo"), "a file already in the tree"); }
+    const cwd = await clone("demo");
+    writeFileSync(join(cwd, "LEAKY"), leaky);
+    const r = await commitInClone(cwd, "plant a value", undefined, find, opts.scanner === undefined ? Bun.which("gitleaks") : opts.scanner);
+    if (opts.old !== undefined) { rmSync(join(CLONES, "demo", "OLD")); commitAll(join(CLONES, "demo"), "the file gone again"); }
+    expect("error" in r && r.error).toContain("refused");
+    return r as { stderr?: string; stderr_withheld?: string };
+  };
+  // A scanner that names one line, whatever it is given, and always finds it: line 0 is past nothing, a large one past the end.
+  const stub = (line: number): string => {
+    const at = join(T, `stub-scanner-${line}`);
+    writeFileSync(at, `#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = "--report-path" ] && R="$2"; shift; done\n` +
+      `printf '[{"RuleID":"stub","StartLine":${line},"EndLine":${line}}]' > "$R"\nexit 3\n`, { mode: 0o755 });
+    return at;
+  };
+
+  it("the secrets scanner these tests need is on PATH: without it the redaction tests would prove nothing", () => {
+    expect(Bun.which("gitleaks")).not.toBeNull();
+  });
+
+  it("[MUST-FAIL] a refused commit says what the hook printed (its stdout and stderr both), cut short, without a key the change added", async () => {
+    const r = await refuse(`${"x".repeat(5000)}\naws_key=${ADDED}\nshort=abc\n`);
+    const said = r.stderr ?? "";
+    expect(said.length).toBeLessThanOrEqual(2000);
+    expect(said).not.toContain(ADDED);
+    expect(said).toContain("[REDACTED: secrets scan, rules aws-access-token]");
+    expect(said).toContain("short=abc");
+    expect(said).toContain("hook refused on stderr"); // the end of what it printed: where a hook gives its verdict
+  });
+
+  it("[MUST-FAIL] a key in a file already in the tree, printed by the hook, is not in the answer", async () => {
+    const r = await refuse("a line\n", { old: `old_key=${IN_TREE}\n` });
+    expect(r.stderr ?? "").not.toContain(IN_TREE);
+    expect(r.stderr).toContain("[REDACTED: secrets scan");
+  });
+
+  it("[MUST-FAIL] any value this vessel holds that an agent's shell is not given, printed by the hook, is not in the answer", async () => {
+    // a name no list carries: what is withheld from the shell is what is redacted here, whatever it is called
+    const name = "SOME_PROVIDER_" + "SECRET_OF_THIS_TEST";
+    const own = "node-credential-value-" + "4f1c9a7e2b";
+    process.env[name] = own;
+    try {
+      const r = await refuse(`the key is ${own} here\n`);
+      expect(r.stderr ?? "").not.toContain(own);
+      expect(r.stderr).toContain("[REDACTED]");
+    } finally { delete process.env[name]; }
+  });
+
+  it("[MUST-FAIL] a value that is a place (a path, a URL without credentials) keeps a failure's file and line; a token beside it does not stay", async () => {
+    const set: Record<string, string> = {
+      ["WORK" + "SPACE_ROOT_OF_THIS_TEST"]: "/workspace",
+      ["SHELL_" + "OF_THIS_TEST"]: "/bin/bash",
+      ["ENDPOINT_" + "OF_THIS_TEST"]: "http://127.0.0.1:8100",
+      ["TOKEN_" + "OF_THIS_TEST"]: "tok-" + "9b2e7c41d0a8f6",
+      ["CRED_URL_" + "OF_THIS_TEST"]: "https://" + "user:pw-" + "77aa31c9@example.invalid/x",
+      ["QUERY_URL_" + "OF_THIS_TEST"]: "https://h/x?token=" + "q-5d0e9a2b7c13",
+      ["HOOK_URL_" + "OF_THIS_TEST"]: "https://hooks.example/services/T0/B0/" + "w3bh00k5ecr3tT0k3nAbCdEf",
+    };
+    Object.assign(process.env, set);
+    try {
+      const failing = "src/x.ts(12,3): error TS2304: Cannot find name 'y' at /workspace/git/walk-trees/t/src/x.ts:12 via /bin/bash http://127.0.0.1:8100/health";
+      const r = await refuse(`${failing}\nwith ${set["TOKEN_" + "OF_THIS_TEST"]} and pw-77aa31c9 and q-5d0e9a2b7c13 and ${set["HOOK_URL_" + "OF_THIS_TEST"]}\n`);
+      expect(r.stderr).toContain("/workspace/git/walk-trees/t/src/x.ts:12");
+      expect(r.stderr).toContain("/bin/bash");
+      expect(r.stderr).toContain("http://127.0.0.1:8100/health");
+      expect(r.stderr ?? "").not.toContain("9b2e7c41d0a8f6");
+      expect(r.stderr ?? "").not.toContain("pw-77aa31c9");
+      expect(r.stderr ?? "").not.toContain("q-5d0e9a2b7c13");
+      expect(r.stderr ?? "").not.toContain("w3bh00k5ecr3tT0k3nAbCdEf"); // a webhook's secret rides in its path
+    } finally { for (const k of Object.keys(set)) delete process.env[k]; }
+  });
+
+  it("[MUST-FAIL] a finding the scan places outside the text withholds everything", async () => {
+    const r = await refuse(`aws_key=${ADDED}\n`, { scanner: stub(9999) });
+    expect(r.stderr).toBeUndefined();
+    expect(r.stderr_withheld).toContain("could not place");
+  });
+
+  it("[MUST-FAIL] a finding the scan places on the wrong line is caught by scanning the replaced text again: withheld", async () => {
+    // the stub names line 1 every time; the key the hook prints is on a later line, so it survives the first replace
+    const r = await refuse(`first line\naws_key=${ADDED}\n`, { scanner: stub(1) });
+    expect(r.stderr).toBeUndefined();
+    expect(r.stderr_withheld).toContain("still found");
+    expect(JSON.stringify(r)).not.toContain(ADDED);
+  });
+
+  it("[MUST-FAIL] a long name the change added stays readable, and both of the hook's streams are said", async () => {
+    const r = await refuse("const someVeryLongIdentifierName = 1\nsrc/a.ts(3,1): error TS2304: Cannot find name 'someVeryLongIdentifierName'.\n");
+    expect(r.stderr).toContain("Cannot find name 'someVeryLongIdentifierName'");
+    expect(r.stderr).toContain("hook refused: a finding in LEAKY"); // what the hook printed on its stdout
+    expect(r.stderr).toContain("hook refused on stderr"); // and on its stderr
+  });
+
+  it("[MUST-FAIL] when the scan cannot run, nothing the hook printed is kept: it is withheld and said why", async () => {
+    // none on the node; one that cannot start; one that runs and fails (exits 1, neither clean nor a finding)
+    for (const scanner of [null, "/nonexistent/gitleaks", "/bin/false"]) {
+      const r = await refuse(`aws_key=${ADDED}\n`, { scanner });
+      expect(r.stderr).toBeUndefined();
+      expect(typeof r.stderr_withheld).toBe("string");
+      expect(JSON.stringify(r)).not.toContain(ADDED);
+    }
   });
 
   it("[MUST-FAIL] the commit and its hook run without this vessel's credentials", async () => {
