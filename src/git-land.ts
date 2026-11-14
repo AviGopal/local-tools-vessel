@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, judgesOf, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
+import { killTree } from "./proc-tree.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
 
@@ -346,14 +347,49 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   return { ran: true, passed: r.exit_code === 0 && !r.signalled, exit_code: r.exit_code, out: r.out.slice(0, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
 }
 
-/** A command run in `dir` as the shell user, env PATH only, within the step time; its output, with dir shown as ".". */
-async function asShellUser(argv: string[], dir: string): Promise<{ exit_code: number; signalled: boolean; out: string }> {
+// How long a command's output is still read after it ended, or after it was killed at the bound, before whatever it
+// started that still holds its pipes is killed and the answer given.
+const AFTER_MS = 2_000;
+
+/**
+ * A command run in `dir` as the shell user, env PATH only, within the step time; its output, with dir shown as ".".
+ * What it runs is the walk's tree (its tests, the code they import), so it can start something that outlives it: a
+ * server, a watcher, a `sleep` that keeps its stdout. Killing the command alone left that holding the pipes, and the
+ * read waited for it: past the bound, and forever if it never ended. So the command runs in its own process group, and
+ * the answer never waits on its pipes past the bound: at the bound the whole group is killed (killTree), and once the
+ * command has ended, anything it left is given AFTER_MS to finish its output and then killed. What was read is kept,
+ * and killed says the bound ended it.
+ */
+export async function asShellUser(argv: string[], dir: string, stepMs = STEP_MS): Promise<{ exit_code: number; signalled: boolean; out: string; killed: boolean }> {
   const s = agentShellSpawn(argv, { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir());
   try {
-    const p = Bun.spawn(s.argv, { cwd: dir, env: s.env, stdout: "pipe", stderr: "pipe", signal: AbortSignal.timeout(STEP_MS) });
-    const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-    const out = `${stdout}${stderr}`.split(dir).join(".");
-    return { exit_code: typeof code === "number" ? code : -1, signalled: Boolean(p.signalCode), out };
+    const p = Bun.spawn(s.argv, { cwd: dir, env: s.env, stdout: "pipe", stderr: "pipe", detached: true });
+    const dec = new TextDecoder();
+    const read = { out: "", err: "" };
+    const readers: Array<ReadableStreamDefaultReader<Uint8Array>> = [];
+    const drain = async (st: ReadableStream<Uint8Array>, k: "out" | "err"): Promise<void> => {
+      const r = st.getReader();
+      readers.push(r);
+      for (;;) {
+        const { done, value } = await r.read().catch(() => ({ done: true, value: undefined }));
+        if (done) return;
+        read[k] += dec.decode(value, { stream: true });
+      }
+    };
+    const pipes = Promise.all([drain(p.stdout as ReadableStream<Uint8Array>, "out"), drain(p.stderr as ReadableStream<Uint8Array>, "err")]);
+    let killed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((r) => { timer = setTimeout(() => { killed = true; killTree(p.pid); r(); }, stepMs); });
+    const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    // Ended (or killed at the bound): its output is read for AFTER_MS more at most, then nothing of it is waited on.
+    await Promise.race([p.exited.then(() => Promise.race([pipes, pause(AFTER_MS)])), bound.then(() => Promise.race([pipes, pause(AFTER_MS)]))]);
+    clearTimeout(timer);
+    killTree(p.pid);
+    for (const r of readers) void r.cancel().catch(() => {});
+    const code = await Promise.race([p.exited, pause(AFTER_MS).then(() => null)]);
+    const said = killed ? `\n[killed at the step bound (${stepMs} ms): the command, or something it started, was still running]` : "";
+    const out = `${read.out}${read.err}`.split(dir).join(".") + said;
+    return { exit_code: typeof code === "number" ? code : -1, signalled: killed || Boolean(p.signalCode), out, killed };
   } finally {
     void s.done();
   }

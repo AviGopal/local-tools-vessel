@@ -25,6 +25,7 @@ const argsAt = (s: string, open: number): string => {
 const EXEMPT: Array<{ file: string; has: string; why: string }> = [
   { file: "script-runner-reaper.ts", has: "argv, { stdin: \"ignore\", stdout: \"inherit\"", why: "the script under the reaper: its run is timed by script-runner, which kills the reaper's whole process group when the run's timeout passes" },
   { file: "script-runner.ts", has: "REAPER, \"bash\"", why: "the reaper itself: its run's timer (setTimeout ... killTree) ends it at the run's timeout, capped by MAX_TIMEOUT_S, or MAX_ASYNC_TIMEOUT_S for an async run, which answers its caller at once" },
+  { file: "git-land.ts", has: "env: s.env, stdout: \"pipe\", stderr: \"pipe\", detached: true", why: "asShellUser: its own process group, killed whole by its own timer at the step bound, and its pipes not waited on past it (step-bound.test.ts holds this by effect: a command that leaves a process holding its stdout still answers)" },
   { file: "shell-privilege.ts", has: "\"find\", home, \"-mindepth\"", why: "the shell user's HOME emptied after a command: no caller awaits it (done() is fire-and-forget), so it holds no call open" },
 ];
 
