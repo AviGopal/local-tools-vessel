@@ -92,6 +92,17 @@ export type LandResult =
       needs_person: string[]; verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
   | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[] };
 
+/**
+ * Where the USER's protected list is read for a change: never from the change's own tree. A super-repo change is
+ * judged by origin's copy (the fetched base it would move: the change may edit the list itself); a vessel's, by the
+ * super base its clone was made from (a vessel's tree holds no list).
+ */
+export function listSourceFor(made: Pick<Made, "repo" | "super_base">, origin: string): { in: "trusted" | "super"; ref: string; where: string } {
+  return made.repo === "super"
+    ? { in: "trusted", ref: origin, where: "origin" }
+    : { in: "super", ref: made.super_base, where: `the super base ${made.super_base.slice(0, 12)}` };
+}
+
 export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<LandResult> {
   const d = { ...DEFAULTS, ...deps };
   const made = await d.find(cwd);
@@ -117,9 +128,10 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     // The USER's protected list as the base states it: for a super-repo change, origin's (the fetched base this change
     // would move, never the change's own tree); for a vessel's, the super base its clone was made from. A path it names
     // lands only on a person's verdict, as a judge's own files do.
-    const list = made.repo === "super"
-      ? await protectedListAt((path) => out(["show", `${origin}:${path}`]), "origin")
-      : await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`);
+    const src = listSourceFor(made, origin);
+    const list = await protectedListAt(src.in === "trusted"
+      ? (path) => out(["show", `${src.ref}:${path}`])
+      : (path) => vesselGit(["show", `${src.ref}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), src.where);
     if ("error" in list) return { error: list.error, tree };
     const needs_person = [...changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p))), ...protectedHits(changed, made.repo, list.excluded)];
 

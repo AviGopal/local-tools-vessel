@@ -563,6 +563,13 @@ describe("git_land: the USER's protected list", () => {
     }
   });
 
+  it("[MUST-FAIL] git_land reads a super-repo change's list at origin, and a vessel's at the super base: never the change", async () => {
+    const { listSourceFor } = await import("./git-land");
+    expect(listSourceFor({ repo: "super", super_base: "s".repeat(40) }, "refs/remotes/origin/dev")).toMatchObject({ in: "trusted", ref: "refs/remotes/origin/dev" });
+    expect(listSourceFor({ repo: "demo", super_base: "s".repeat(40) }, "refs/remotes/origin/dev")).toMatchObject({ in: "super", ref: "s".repeat(40) });
+    for (const repo of ["super", "demo"]) expect(listSourceFor({ repo, super_base: "s".repeat(40) }, "refs/remotes/origin/dev").ref).not.toContain("refs/land/head");
+  });
+
   it("[MUST-FAIL] the list is read at the base: a change that drops an entry is judged by the list it would replace", async () => {
     const { protectedHits, protectedListAt } = await import("./git-commit");
     const r = join(T, "scope-base");
