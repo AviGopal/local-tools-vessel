@@ -69,6 +69,8 @@ const out = async (args: string[], cwd: string): Promise<string | null> => {
 // The super-repo's hooks: the one that judges a super-repo commit, and the one that judges a vessel's.
 const HOOK_FOR_SUPER = "scripts/git-hooks/pre-commit";
 const HOOK_FOR_VESSEL = "scripts/git-hooks/vessel-pre-commit";
+// The scan config the super-repo hook reads from beside itself.
+const SCAN_CONFIG = "scripts/git-hooks/.gitleaks.toml";
 
 // Paths whose change needs a person's verdict, by repository. Patterns are matched against repo-relative paths.
 const JUDGES_EVERYWHERE = ["scripts/git-hooks/**", ".git-hooks/**", "scripts/substrate/gate/**", "validation/scripts/gate/**",
@@ -143,6 +145,13 @@ async function pinnedHooks(superDir: string, made: Made): Promise<string | { err
     }
   }
   writeFileSync(join(dir, "pre-commit"), hook.stdout, { mode: 0o555 });
+  // The super-repo hook scans with the config beside it (scripts/git-hooks/.gitleaks.toml). Pinned without it, the scan
+  // could not run, and the hook reported that as secrets found: every super commit was refused for a leak it never saw.
+  if (made.repo === "super") {
+    const cfg = await vesselGit(["show", `${made.super_base}:${SCAN_CONFIG}`], superDir);
+    if (cfg.exit_code !== 0) return { error: `the super base ${made.super_base.slice(0, 12)} has no ${SCAN_CONFIG}: nothing trusted would scan this commit` };
+    writeFileSync(join(dir, ".gitleaks.toml"), cfg.stdout, { mode: 0o444 });
+  }
   chmodSync(dir, 0o555);
   return dir;
 }
@@ -216,7 +225,7 @@ async function refusedSaying(c: Run, superDir: string, made: Made, scanner: stri
   if (!scanner) return { stderr_withheld: "no secrets scanner on this node" };
   const work = mkdtempSync(join(tmpdir(), "commit-said-"));
   try {
-    const cfg = await vesselGit(["show", `${made.super_base}:scripts/git-hooks/.gitleaks.toml`], superDir);
+    const cfg = await vesselGit(["show", `${made.super_base}:${SCAN_CONFIG}`], superDir);
     if (cfg.exit_code !== 0) return { stderr_withheld: "the super base has no secrets scan config" };
     const config = join(work, "gitleaks.toml");
     writeFileSync(config, cfg.stdout, { mode: 0o600 });

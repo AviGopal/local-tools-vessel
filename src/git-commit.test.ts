@@ -462,6 +462,38 @@ describe("git_commit", () => {
     expect("scan" in rs && rs.scan).toBe("ran");
   });
 
+  // The super-repo hook reads its scan config from beside itself, as the real one does: missing, the scan cannot run,
+  // and the real hook reports that as secrets found. Each case swaps the super base's hook and puts the fixture's back.
+  const withSuperHook = async (text: string, fn: () => Promise<void>) => {
+    const path = join(SUPER, "scripts", "git-hooks", "pre-commit");
+    const keep = readFileSync(path, "utf8");
+    writeFileSync(path, text, { mode: 0o755 }); commitAll(SUPER, "super hook for a case");
+    try { await fn(); } finally { writeFileSync(path, keep, { mode: 0o755 }); commitAll(SUPER, "fixture hook back"); }
+  };
+
+  it("[MUST-FAIL] the super hook finds its scan config beside it, so a clean super commit is not refused as a leak", async () => {
+    await withSuperHook('#!/bin/sh\n[ -f "$(dirname "$0")/.gitleaks.toml" ] || { echo "gitleaks: secrets detected in staged diff"; exit 1; }\nexit 0\n', async () => {
+      const s = await clone("super");
+      writeFileSync(join(s, "clean.md"), "nothing secret\n");
+      const r = await commitInClone(s, "clean super change", undefined, find);
+      expect("sha" in r ? "committed" : JSON.stringify(r)).toBe("committed");
+    });
+  });
+
+  const SCANNER = Bun.which("gitleaks", { PATH: process.env.PATH ?? "" });
+  it(SCANNER ? "[MUST-FAIL] a real secret in a super commit is still refused by the pinned hook's scan"
+    : "[MUST-FAIL] a real secret in a super commit is still refused (no gitleaks here: not run)", async () => {
+    if (!SCANNER) return;
+    // The fixture's config at the super base has no project rule; the scan uses gitleaks' default rules beside it.
+    await withSuperHook('#!/bin/sh\ngitleaks protect --staged --redact --no-banner --config "$(dirname "$0")/.gitleaks.toml" >/dev/null 2>&1 || { echo "gitleaks: secrets detected in staged diff"; exit 1; }\nexit 0\n', async () => {
+      const s = await clone("super");
+      const secret = ["gh", "p_", "A1b2C3d4E5f6G7h8I9j0", "K1l2M3n4O5p6Q7r8S9t0"].join("");
+      writeFileSync(join(s, "leak.env"), `TOKEN=${secret}\n`);
+      const r = await commitInClone(s, "a leak", undefined, find);
+      expect("error" in r && String(r.error)).toContain("refused");
+    });
+  });
+
   it("[MUST-FAIL] keeps the node's record-only hooks, but never its pre-commit, which would chain to the clone's own", async () => {
     const ledger = mkdtempSync(join(tmpdir(), "ledger-hooks-"));
     writeFileSync(join(ledger, "post-commit"), `#!/bin/sh\necho recorded >> "${OUT}/ledger.txt"\n`, { mode: 0o755 });
