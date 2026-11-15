@@ -85,6 +85,7 @@ describe("walk failure classes", () => {
     const k = classesOf([...prod("w1", "/uses/1 \"aaa\" is not a row it was shown"), ...prod("w2", "/uses/0 \"bbb\" is not a row it was shown")])
     expect(k).toHaveLength(1)
     expect(k[0]).toMatchObject({ tool: "answer", refused: "schema", roots: ["w1", "w2"] })
+    expect(k[0].example).toBe("") // the model's quoted words never reach a gap row
   })
 
   test("[MUST-FAIL] every failure records blames on the callee is infra (the USER's ruling), answered 5xx or not; still two classes", () => {

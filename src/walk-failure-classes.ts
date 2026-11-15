@@ -59,6 +59,9 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     // failure is what the tool said, classed by its body with the call's own values named.
     const produce = String(sel?.a ?? "").startsWith("produce/") || h?.kind === "produce"
     const signature = produce ? "" : signatureOf(body, known)
+    // Nor does its example carry those words: a gap row is a root producers read, and a model's quoted text there would
+    // be handed on as if it were the failure. A tool's body is the tool's own words.
+    const example = produce ? "" : body.slice(0, 500)
     const fields = { kind: f.kind, refused: f.refused, blames: blamesOf(f), waits_for: f.waits_for } as Record<string, unknown>
     const s = (k: string) => typeof fields[k] === "string" ? String(fields[k]) : undefined
     const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([tool, s("kind"), s("refused"), s("blames"), s("waits_for"), band(f.status), signature])).digest("hex").slice(0, 24)
@@ -66,11 +69,11 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     const root = typeof sel?.root === "string" && sel.root !== "" ? sel.root : `move:${String(sel?.a ?? tool)}`
     if (ownRoots.get(key)?.has(root) === true) continue
     const k = out.get(key) ?? { key, tool, kind: s("kind"), refused: s("refused"), blames: s("blames"), waits_for: s("waits_for"), status_band: band(f.status),
-      signature, example: body.slice(0, 500), failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamesOf(f) === "callee" }
+      signature, example, failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamesOf(f) === "callee" }
     k.failures.push(f.id)
     if (root !== "" && !k.roots.includes(root)) k.roots.push(root)
     k.last_seq = f.seq
-    k.example = body.slice(0, 500)
+    k.example = example
     out.set(key, k)
   }
   return [...out.values()].sort((a, b) => b.failures.length - a.failures.length)
