@@ -121,5 +121,7 @@ describe("walk failure classes", () => {
       ...call("w3", "fs_read", {}, { status: 0, blames: "callee", body: "TypeError: fetch failed" })]
     const k = classesOf(rows)
     expect(k.map((c) => c.tool)).toEqual(["fs_read"])
+    // another waits_for value is still a failure the detector sees
+    expect(classesOf(call("w4", "git_land", {}, { status: 403, blames: "callee", waits_for: "something-new", body: "x" })).map((c) => c.tool)).toEqual(["git_land"])
   })
 })
