@@ -195,8 +195,11 @@ describe("a clone moved onto a newer base that no row records is a fact, read fr
     const c = await clone();
     const to = moveOrigin("b.txt", "b11\n");
     // the real wrapper and refresh; the rows (made) still say the old base, as they do until the walk records this answer
-    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, async () => madeCurrent(c.cwd, at(c.made)), process.env, (cl, env) => refreshInPlace(cl, env, at(c.made))) as Record<string, unknown>;
+    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, async () => madeCurrent(c.cwd, at({ ...c.made, super_base: "an-older-super-base" })), process.env,
+      (cl, env) => refreshInPlace(cl, env, at(c.made))) as Record<string, unknown>;
     expect(out).toMatchObject({ refreshed: { base: to }, base: to });
+    // the super base the refresh read now (the hooks a commit is judged by), not the one the clone was made at
+    expect(out.super_base).toBe((out.refreshed as { super_base: string }).super_base);
     expect("moved_unrecorded" in out).toBe(false);
     // the next call, outside that one (as after the walk failed to record it, or a restart): the fact
     expect(await madeCurrent(c.cwd, at(c.made))).toMatchObject({ moved_unrecorded: to, error: expect.stringContaining("git_worktree for demo") });
