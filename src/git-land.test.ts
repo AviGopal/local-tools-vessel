@@ -213,11 +213,45 @@ describe("git_land", () => {
     expect(String((await landClone(cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
   });
 
-  scanned("[MUST-FAIL] a person's Wrong is not lifted by a later Right on the same tree, in either order", async () => {
+  scanned("[MUST-FAIL] a person's latest mark on the tree decides: their Right after their Wrong lands it; Wrong after Right refuses", async () => {
     const a = await change("p2.txt", "p2\n");
     table = [ask, ...pv(a.tree, "pv2", 1, 5), ...pv(a.tree, "pv3", 0, 6)];
     expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
     table = [ask, ...pv(a.tree, "pv2", 0, 5), ...pv(a.tree, "pv3", 1, 6)];
+    const r = await landClone(a.cwd, deps);
+    expect("pushed" in r && r.verdict_by).toBe("kid-person");
+  });
+
+  scanned("[MUST-FAIL] a grader's Right does not lift a person's Wrong; another person's later Right does", async () => {
+    const a = await change("p2b.txt", "p2b\n");
+    table = [ask, ...pv(a.tree, "pw", 0, 5), ...graderYes(a.tree)];
+    expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+    const other = pv(a.tree, "po", 1, 6); (other[1] as Row).writer = "kid-other-person";
+    table = [ask, ...pv(a.tree, "pw", 0, 5), ...other];
+    const r = await landClone(a.cwd, deps);
+    expect("pushed" in r && r.verdict_by).toBe("kid-other-person");
+  });
+
+  scanned("[MUST-FAIL] latest is by records' seq, not by the order rows arrive in", async () => {
+    const a = await change("p2e.txt", "p2e\n");
+    // the Right (seq 9) arrives before the Wrong (seq 5): the Right is latest, it lands
+    table = [ask, ...pv(a.tree, "pr4", 1, 9), ...pv(a.tree, "pw4", 0, 5)];
+    expect("pushed" in await landClone(a.cwd, deps)).toBe(true);
+    const b = await change("p2f.txt", "p2f\n");
+    // the Wrong (seq 9) arrives before the Right (seq 5): the Wrong is latest, it refuses
+    table = [ask, ...pv(b.tree, "pw5", 0, 9), ...pv(b.tree, "pr5", 1, 5)];
+    expect(String((await landClone(b.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+  });
+
+  scanned("[MUST-FAIL] a person's Right on another tree does not lift a Wrong on this one", async () => {
+    const a = await change("p2d.txt", "p2d\n");
+    table = [ask, ...pv(a.tree, "pw3", 0, 5), ...pv("T-elsewhere", "pr3", 1, 9)];
+    expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+  });
+
+  scanned("[MUST-FAIL] a person's Right on a cut diff does not lift their Wrong (a Right counts only on what they saw whole)", async () => {
+    const a = await change("p2c.txt", "p2c\n");
+    table = [ask, ...pv(a.tree, "pw2", 0, 5), ...pv(a.tree, "pr2", 1, 6, { truncated: true })];
     expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
   });
 
