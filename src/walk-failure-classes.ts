@@ -42,6 +42,10 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
   const byId = new Map(pool.map((r) => [r.id, r]))
   const out = new Map<ClassKey, Klass>()
   for (const f of pool.filter((r) => r.shape === "failure" && r.role === "walk" && typeof r.call_id === "string").sort((a, b) => a.seq - b.seq)) {
+    // A refusal that says it waits (waits_for: a gate waiting on a person's verdict, lifted from the tool's answer) is
+    // the gate working, not a failure: no class, so never an infra gap nor work for the walk. records stamps it blames
+    // callee for the fold's sake (no debit); here it is not a failure at all.
+    if (typeof f.waits_for === "string" && f.waits_for !== "") continue
     const h = started.get(String(f.call_id))
     const sel = sels.get(String(f.selection_ref))
     const tool = h !== undefined ? String(h.pointer_type) : String(sel?.a ?? "unknown")
