@@ -73,7 +73,8 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   code_insert_after_line: "Inserts text after a line of a file.",
   code_search: "Finds the lines of a file that match a regular expression.",
   code_verify_typecheck: "Runs the typecheck script of the package in cwd and reports the exit code and the first type errors.",
-  bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code.",
+  bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code. " +
+    "It is how to search a repository (grep -rn) or read git history (git log, git show) in a clone.",
   git_status: "Lists a repository's changed files (git status --porcelain).",
   git_diff: "Shows a repository's unstaged changes (git diff). For a clone git_worktree made, shows its committed change " +
     "against origin's branch, with repo, base, head and tree: the tree a land_verdict names; and typecheck, whether that " +
