@@ -197,6 +197,47 @@ describe("git_land", () => {
     expect("pushed" in r && r.verdict_by).toBe("kid-person");
   });
 
+  // A person's verdict on the walk's whole diff of a tree, and that diff. The USER's rule: a Wrong blocks that exact tree.
+  const pv = (tree: string, id: string, r: number, seq: number, diff: Record<string, unknown> = {}): Row[] => [
+    { id: `pd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: false, typecheck: TC_OK, ...diff } as Row,
+    { id, shape: "land_verdict", repo: "demo", tree, role: "person", r, seq, writer: "kid-person", input_refs: [`pd-${id}`] } as Row,
+  ];
+  const graderYes = (tree: string): Row[] => [
+    { id: "gd", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row,
+    { id: "gv", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, seq: 1, input_refs: ["ask1", "gd"] } as Row,
+  ];
+
+  scanned("[MUST-FAIL] a person's r 0 on the tree refuses it, though a grader's r 1 would land it", async () => {
+    const { cwd, tree } = await change("p1.txt", "p1\n");
+    table = [ask, ...graderYes(tree), ...pv(tree, "pv1", 0, 5)];
+    expect(String((await landClone(cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+  });
+
+  scanned("[MUST-FAIL] a person's Wrong is not lifted by a later Right on the same tree, in either order", async () => {
+    const a = await change("p2.txt", "p2\n");
+    table = [ask, ...pv(a.tree, "pv2", 1, 5), ...pv(a.tree, "pv3", 0, 6)];
+    expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+    table = [ask, ...pv(a.tree, "pv2", 0, 5), ...pv(a.tree, "pv3", 1, 6)];
+    expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+  });
+
+  scanned("[MUST-FAIL] a person's r 0 on this tree blocks it whatever diff it cites, cut or not; a person's r 1 on a cut diff counts for nothing", async () => {
+    const a = await change("p3.txt", "p3\n");
+    // a Wrong given on a cut diff: blocks, though a grader's r 1 would land it
+    table = [ask, ...graderYes(a.tree), ...pv(a.tree, "pv4", 0, 5, { truncated: true })];
+    expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("a person judged this tree r 0");
+    // a Right given on a cut diff is not approval of what the person saw: no person verdict, so nothing lands without one
+    table = [ask, ...pv(a.tree, "pv5", 1, 6, { truncated: true })];
+    expect(String((await landClone(a.cwd, deps) as { error?: string }).error)).toContain("no verdict approves this tree");
+  });
+
+  scanned("[MUST-FAIL] a person's Wrong on another tree, even the same change before a rebase, neither carries over nor blocks", async () => {
+    const a = await change("p4.txt", "p4\n");
+    // the person's r 0 on the tree this change had before it was remade: the new tree is judged on its own
+    table = [ask, ...graderYes(a.tree), { ...pv("T-before", "pv7", 0, 5)[0] }, { ...pv("T-before", "pv7", 0, 5)[1], tree: "T-before" } as Row];
+    expect("pushed" in await landClone(a.cwd, deps)).toBe(true);
+  });
+
   scanned("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
     const { cwd, tree } = await change("scripts/substrate/gate/x.sh", "x\n");
     const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;

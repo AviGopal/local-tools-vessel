@@ -187,11 +187,20 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
   const mine = verdicts.filter((v) => v.repo === made.repo);
   const diffs = await d.rows({ shape: "gitDiff", where: { tree } });
   if (!Array.isArray(diffs)) return diffs;
-  // A person's r 1 counts only when it was given on the walk's own diff of this tree, shown whole: a diff row anyone
-  // else wrote could name this tree and show another change.
+  // A person's verdict counts only when it was given on the walk's own diff of this tree, shown whole: a diff row anyone
+  // else wrote could name this tree and show another change. The USER's rule (11-15): a person's Wrong on a change blocks
+  // that exact tree, and a later Right does not lift it; when the code changes (a new tree, a rebase among them), the new
+  // version needs its own verdict, and the earlier Wrong neither carries over nor blocks it. So any person's r 0 on this
+  // tree refuses it; with none, a person's r 1 lands it; with neither, the graders' rules below.
+  // A Wrong needs no shown diff: a person's r 0 on this repository's exact tree blocks it, whatever diff it cites, cut or
+  // not (a big change the person rejected is not landed by a grader's r 1 because its diff was too big to show whole).
+  // A Right still counts only on the walk's whole diff of this tree: approval of what the person saw.
   const shown = (v: Row): boolean => diffs.some((x) => x.role === "walk" && x.repo === made.repo && x.truncated !== true
     && [v.input_refs].flat().map(String).includes(x.id));
-  const person = mine.find((v) => v.role === "person" && Number(v.r) === 1 && shown(v));
+  const persons = mine.filter((v) => v.role === "person" && String(v.tree) === tree);
+  const wrong = persons.find((v) => Number(v.r) === 0);
+  if (wrong) return { error: "a person judged this tree r 0: it does not land; a changed version needs its own verdict" };
+  const person = persons.find((v) => Number(v.r) === 1 && shown(v));
   if (person) return { id: person.id, by: String(person.writer ?? "") };
   if (mine.some((v) => v.role === "described" && Number(v.r) === 0)) return { error: "a grader judged this tree r 0, and no person has approved it" };
   // waits_for says, as a field, that this refusal is the gate waiting on a person, not a fault in what was asked: records
