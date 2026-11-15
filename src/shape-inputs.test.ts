@@ -82,6 +82,18 @@ describe("declared shape inputs", () => {
     expect(src).toContain("shapeAnswers: SHAPE_ANSWERS")
   })
 
+  // The walk keeps a tool's answer as a row of the answer's shape only when a vessel serving the tool also advertises
+  // that shape (walk recordAnswer): a clone's gitWorktree, never advertised, was never a row a request could be shown.
+  it("[MUST-FAIL] every declared answer is advertised, so the walk keeps it as a row", () => {
+    for (const answer of new Set(Object.values(SHAPE_ANSWERS))) expect(advertised).toContain(`"${answer}"`)
+  })
+
+  // Advertising an answer must not make it a way in: a resolve naming gitLand would otherwise reach the landing without
+  // the walk's git_land requires check, and gitWorktree or walkTreesReclaim likewise their tools' checks.
+  it("[MUST-FAIL] an answer that is only an answer has no resolver: naming it directly reaches no tool", () => {
+    for (const answer of ["gitWorktree", "gitLand", "walkTreesReclaim", "boundedShellResult"]) expect(resolvers.has(answer)).toBe(false)
+  })
+
   // Read from the source, not from a call: a call answers only where the handler can run (bounded_shell's default
   // directory is absent outside a node), and a refusal names no shape, so a check on what a call answered passed
   // wherever the handler was refused. Each declared answer is every shape the tool's handler returns, or any function it

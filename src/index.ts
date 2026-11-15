@@ -1051,6 +1051,11 @@ if (import.meta.main) {
   shapes: [
     "shellResult", "fileContent", "fileWriteResult", "fileEditResult",
     "gitStatus", "gitDiff", "gitCommitResult",
+    // Every declared answer (SHAPE_ANSWERS) is advertised: the walk keeps a tool's answer as a row of the answer's shape
+    // only when a vessel serving the tool also serves that shape, so an unadvertised answer (a clone's gitWorktree) was
+    // never a row any request was shown. These four have no resolver: a resolve naming one directly is refused (no
+    // resolver), so a clone, a landing or a reclaim is still reached only through its own tool shape and its requires.
+    "gitWorktree", "gitLand", "walkTreesReclaim", "boundedShellResult",
     "codeSearchResult", "codeFindFunctionResult", "codeFindImportResult",
     "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult", "webSearchResult",
     "scriptRunResult",
