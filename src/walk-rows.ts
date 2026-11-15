@@ -66,9 +66,14 @@ export async function endedCalls(pointerType: string): Promise<Row[] | { error: 
  * the clones made, not every hop.
  */
 export async function madeClone(cwd: string): Promise<Made | { error: string }> {
-  const made = await endedCalls("git_worktree");
+  const [made, moves] = await Promise.all([endedCalls("git_worktree"), readRows({ shape: "gitWorktree", where: { cwd } })]);
   if (!Array.isArray(made)) return made;
-  const mine = made.filter((r) => r.role === "walk" && r.output?.cwd === cwd).sort((a, b) => Number(a.seq) - Number(b.seq))
+  if (!Array.isArray(moves)) return moves;
+  // A clone a tool refreshed in place before working in it (clone-refresh.ts) is recorded by the walk as a gitWorktree
+  // row of its own (the walk writes it only for a shape the called vessel serves, and never cuts it as it cuts a long
+  // answer on the hop): read here, the walk's own rows for this cwd only.
+  const moved = moves.filter((r) => r.role === "walk" && r.cwd === cwd).map((r): Row => ({ ...r, output: r as Record<string, unknown> }))
+  const mine = [...made.filter((r) => r.role === "walk" && r.output?.cwd === cwd), ...moved].sort((a, b) => Number(a.seq) - Number(b.seq))
   if (mine.length === 0) return { error: `no walk row records a clone made at ${cwd}: a commit or landing needs one` };
   const same = (k: string) => new Set(mine.map((r) => String(r.output?.[k] ?? ""))).size === 1;
   // One clone's base moves only by a refresh, which says the base it moved from: each row keeps the one before's base or

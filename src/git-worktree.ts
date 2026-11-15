@@ -154,8 +154,8 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
 //   - both: not carried (commit or drop the edits first; nothing is guessed).
 // Not ok: changed says whether the clone held a change (so a fresh clone does not hide it), conflicts which paths `to`
 // also changed, why in words. Nothing here edits a file or resolves a conflict.
-type Refresh = { ok: true; carried?: "uncommitted" | "commits" } | { ok: false; changed: boolean; conflicts: string[]; why: string };
-async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
+export type Refresh = { ok: true; carried?: "uncommitted" | "commits" } | { ok: false; changed: boolean; conflicts: string[]; why: string };
+export async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
   const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
   const out = async (args: string[], timeoutMs?: number) => { const r = await run(args, timeoutMs); return r.exit_code === 0 ? r.stdout.trim() : null; };
   const no = (why: string, changed = false, conflicts: string[] = []): Refresh => ({ ok: false, changed, conflicts, why });

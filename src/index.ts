@@ -29,8 +29,9 @@ import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { diffClone, gapOf, isGapCheckFile, landClone } from "./git-land.js";
-import { madeClone, readRows } from "./walk-rows.js";
+import { readRows } from "./walk-rows.js";
 import { behind, cloneOf } from "./clone-freshness.js";
+import { freshFirst, madeCurrent } from "./clone-refresh.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 import { runBounded } from "./bounded-run.js";
 
@@ -613,7 +614,9 @@ const gitDiff: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   // A clone git_worktree made answers its committed change, with the tree it would land as: what a grader judges.
   if (cwd) {
-    const made = await madeClone(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
+    // Its base as the rows say, unless the clone moved onto a newer base no row records: then that fact is the answer.
+    const made = await madeCurrent(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
+    if (made && "moved_unrecorded" in made) return made;
     if (made && !("error" in made)) {
       // the walk names its selection on every call: the gap the clone is for, if its root is one, is checked on the tree
       const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref")).catch((e) => ({ error: String(e) }));
@@ -649,7 +652,7 @@ const gitCommit: ResolverHandler = async (ctx) => {
     return { error: reason, cwd: cwd ?? DEFAULT_CWD };
   }
   const id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
-  return commitInClone(resolvePath(DEFAULT_CWD, cwd ?? "."), message, id ? { SUBSTRATE_EXECUTION_ID: id } : undefined)
+  return commitInClone(resolvePath(DEFAULT_CWD, cwd ?? "."), message, id ? { SUBSTRATE_EXECUTION_ID: id } : undefined, (c) => madeCurrent(c))
     .catch(refusedOrError);
 };
 
@@ -660,7 +663,7 @@ const gitLand: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   if (!cwd) return { error: "cwd is required" };
   runDir(cwd); // a directory that does not exist: 422 by name
-  return landClone(resolvePath(DEFAULT_CWD, cwd)).catch(refusedOrError);
+  return landClone(resolvePath(DEFAULT_CWD, cwd), { find: (c) => madeCurrent(c) }).catch(refusedOrError);
 };
 
 const gitWorktree: ResolverHandler = async (ctx) => {
@@ -1020,9 +1023,11 @@ export const resolvers = new Map<string, ResolverHandler>([
 for (const [name, handler] of resolvers) {
   if (name === "git_worktree" || name === "walk_trees_reclaim") continue;
   resolvers.set(name, async (ctx) => {
-    const out = await handler(ctx);
     const body = ctx.body as Record<string, unknown> | undefined;
     const clone = cloneOf((body?.impulse as { pointer?: unknown } | undefined)?.pointer ?? body, process.env);
+    // A clone behind the copy is brought onto it first (clone-refresh.ts), so the call works in a clone that can land; one
+    // that cannot be carried is said, and the tool does not run in it.
+    const out = await freshFirst(clone, () => handler(ctx), process.env);
     if (clone === null || typeof out !== "object" || out === null) return out;
     const why = await behind(clone, process.env).catch(() => null);
     // First: the walk keeps the start of a long answer (a cut hop) and of a refusal (its failure row), so a note at the
