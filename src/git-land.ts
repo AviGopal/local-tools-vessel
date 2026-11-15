@@ -90,7 +90,7 @@ export async function intoTrusted(cwd: string, made: Made, work: string, transpo
 export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
       needs_person: string[]; verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
-  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[] };
+  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person" };
 
 /**
  * Where the USER's protected list is read for a change: never from the change's own tree. A super-repo change is
@@ -181,7 +181,7 @@ const isRequest = (r: Row): boolean =>
 // The verdict's writer (records stamps it: a person row's writer is its key id) goes into the answer, so a count of
 // autonomous landings can tell a person's approval from an operator agent's key: any key that is not the node's counts as
 // a person here.
-async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]): Promise<{ id: string; by: string } | { error: string }> {
+async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]): Promise<{ id: string; by: string } | { error: string; waits_for?: "person" }> {
   const verdicts = await d.rows({ shape: "land_verdict", where: { tree } });
   if (!Array.isArray(verdicts)) return verdicts;
   const mine = verdicts.filter((v) => v.repo === made.repo);
@@ -194,7 +194,9 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
   const person = mine.find((v) => v.role === "person" && Number(v.r) === 1 && shown(v));
   if (person) return { id: person.id, by: String(person.writer ?? "") };
   if (mine.some((v) => v.role === "described" && Number(v.r) === 0)) return { error: "a grader judged this tree r 0, and no person has approved it" };
-  if (needsPerson.length > 0) return { error: `the change touches what judges changes (${needsPerson.join(", ")}): only a person's verdict lands it` };
+  // waits_for says, as a field, that this refusal is the gate waiting on a person, not a fault in what was asked: records
+  // reads it, never the words, so it does not blame the request for it (a grader's r 0 has no such field).
+  if (needsPerson.length > 0) return { error: `the change touches what judges changes (${needsPerson.join(", ")}): only a person's verdict lands it`, waits_for: "person" };
   // A grader's r 1 counts only when it was made from exactly two rows: the request, and the walk's record of this tree's
   // diff made for that request (its input_refs hold the request). Anything more and what it judged is not only the
   // change; anything less and it did not see the change; a diff made for another request is not this request's change.

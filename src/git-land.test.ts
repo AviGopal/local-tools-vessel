@@ -189,7 +189,9 @@ describe("git_land", () => {
     const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, input_refs: ["ask1", "d2"] } as Row;
     const yes = { id: "v7", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d2"] } as Row;
     table = [ask, diff, no, yes];
-    expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("r 0");
+    const refused = await landClone(cwd, deps) as { error: string; waits_for?: string };
+    expect(String(refused.error)).toContain("r 0");
+    expect(refused.waits_for).toBeUndefined(); // a grader's r 0 is a verdict on the change, not the gate waiting on a person
     table = [ask, diff, no, yes, { id: "v8", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, writer: "kid-person", input_refs: ["d2"] }];
     const r = await landClone(cwd, deps);
     expect("pushed" in r && r.verdict_by).toBe("kid-person");
@@ -202,6 +204,7 @@ describe("git_land", () => {
     const r = await landClone(cwd, deps);
     expect(String((r as { error: string }).error)).toContain("only a person's verdict");
     expect((r as unknown as { needs_person: string[] }).needs_person).toEqual(["scripts/substrate/gate/x.sh"]);
+    expect((r as { waits_for?: string }).waits_for).toBe("person"); // said as a field: records reads it, never the words
   });
 
   scanned("[MUST-FAIL] a planted secret is refused by its rule, and the answer never carries its text", async () => {
