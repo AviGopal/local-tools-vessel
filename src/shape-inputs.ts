@@ -5,9 +5,11 @@
 // Each schema is taken from its handler in index.ts, and shape-inputs.test.ts calls every handler with exactly the
 // required fields declared here, so a handler that comes to need another field turns that test red.
 //
-// Declared only for fields a handler reads from the POINTER. Some handlers also read the request body's top level
+// Declared only for fields a handler reads from the POINTER (the USER ruled that the tools a vessel already serves are
+// declared, so the walk's request producer can see them; no new tool). Some handlers also read the request body's top level
 // (bounded_shell's timeout, git_diff's staged, code_search's limit); a walk's call sends a pointer, so those are not
-// offered. Not declared at all: shell and bash (bounded_shell covers them), and code_verify_typecheck's bun_cmd and script: the handler splices both into `<bun_cmd> run <script>`
+// offered. Not declared at all: web_search (held until the USER rules: its answers are untrusted web text that would reach
+// producers as context, and each call is paid; it needs an untrusted mark and a spend bound on an owner row first), shell and bash (bounded_shell covers them), and code_verify_typecheck's bun_cmd and script: the handler splices both into `<bun_cmd> run <script>`
 // and runs it without the shell containment check, so either field would run any command (agf_m40aao3ttwpx).
 type Schema = Record<string, unknown>
 
@@ -55,6 +57,10 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
     repo: { type: "string", minLength: 1, description: "\"super\" for the super-repo, or a vessel's name, e.g. walk-vessel." },
   }),
   walk_trees_reclaim: object([], {}),
+  code_find_function: object(["path", "name"], { path: PATH, name: { type: "string", minLength: 1, description: "The function's name." } }),
+  code_find_import: object(["path", "module"], {
+    path: PATH, module: { type: "string", minLength: 1, description: "The module specifier as imported, e.g. \"./calls\"." },
+  }),
 }
 
 export const SHAPE_DESCRIPTIONS: Record<string, string> = {
@@ -82,6 +88,8 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   git_worktree: "Gives a clone of a repository for one change, at this node's current copy of it (one nothing has changed yet " +
     "is handed out again); answers cwd (where to read, edit and commit), branch (where a landing goes), base, super_base " +
     "and origin_url.",
+  code_find_function: "Finds where a function is defined in a file: its start and end lines, or found false.",
+  code_find_import: "Finds the import of a module in a file: its line and statement, or found false.",
   walk_trees_reclaim: "Removes the clones git_worktree made that nothing will use again (landed, or unchanged with no open " +
     "request), keeps the rest, and reports changed clones of closed requests; answers what it removed and reported.",
 }
@@ -105,4 +113,6 @@ export const SHAPE_ANSWERS: Record<string, string> = {
   code_read_lines: "codeReadResult",
   code_verify_typecheck: "codeTypecheckResult",
   bounded_shell: "boundedShellResult",
+  code_find_function: "codeFindFunctionResult",
+  code_find_import: "codeFindImportResult",
 }

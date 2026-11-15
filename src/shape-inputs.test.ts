@@ -24,6 +24,7 @@ const sample = (field: string): unknown => {
   const values: Record<string, unknown> = {
     path: file, content: "x", old_string: "line1", new_string: "LINE1", start_line: 1, end_line: 2, text: "t",
     after_line: 0, pattern: "line", cwd: dir, command: "true", message: "m", repo: "no-such-repo",
+    name: "nothing", module: "./nothing",
   }
   if (!(field in values)) throw new Error(`no sample for required field ${field}: add one`)
   return values[field]
