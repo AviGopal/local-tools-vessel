@@ -28,6 +28,7 @@ import { runAllowlistedScript } from "./script-runner.js";
 import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
+import { detect } from "./walk-failure-detect.js";
 import { diffClone, gapOf, isGapCheckFile, landClone } from "./git-land.js";
 import { readRows } from "./walk-rows.js";
 import { behind, cloneOf } from "./clone-freshness.js";
@@ -658,6 +659,7 @@ const gitCommit: ResolverHandler = async (ctx) => {
 
 // The clones nothing will use again, removed (walk-trees-reclaim.ts). Its refusals (an unreadable record) are answers.
 const walkTreesReclaim: ResolverHandler = async () => reclaimWalkTrees().catch(refusedOrError);
+const walkFailureDetect: ResolverHandler = async () => detect().catch(refusedOrError);
 
 const gitLand: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
@@ -995,6 +997,7 @@ export const resolvers = new Map<string, ResolverHandler>([
   ["bounded_shell", boundedShellResolver],
   ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit], ["git_worktree", gitWorktree], ["git_land", gitLand],
   ["walk_trees_reclaim", walkTreesReclaim],
+  ["walk_failure_detect", walkFailureDetect],
   ["code_search", codeSearch],
   ["code_find_function", codeFindFunction],
   ["code_find_import", codeFindImport],
@@ -1021,7 +1024,7 @@ export const resolvers = new Map<string, ResolverHandler>([
 // learns it the moment it touches the clone, not only at the diff before landing. Not for the calls that hand clones
 // out or remove them.
 for (const [name, handler] of resolvers) {
-  if (name === "git_worktree" || name === "walk_trees_reclaim") continue;
+  if (name === "git_worktree" || name === "walk_trees_reclaim" || name === "walk_failure_detect") continue;
   resolvers.set(name, async (ctx) => {
     const body = ctx.body as Record<string, unknown> | undefined;
     const clone = cloneOf((body?.impulse as { pointer?: unknown } | undefined)?.pointer ?? body, process.env);
@@ -1060,7 +1063,7 @@ if (import.meta.main) {
     // only when a vessel serving the tool also serves that shape, so an unadvertised answer (a clone's gitWorktree) was
     // never a row any request was shown. These four have no resolver: a resolve naming one directly is refused (no
     // resolver), so a clone, a landing or a reclaim is still reached only through its own tool shape and its requires.
-    "gitWorktree", "gitLand", "walkTreesReclaim", "boundedShellResult",
+    "gitWorktree", "gitLand", "walkTreesReclaim", "walkFailureReport", "boundedShellResult",
     "codeSearchResult", "codeFindFunctionResult", "codeFindImportResult",
     "codeInsertResult", "codeReplaceResult", "codeReadResult", "codeAddImportResult", "codeTypecheckResult", "webSearchResult",
     "scriptRunResult",
@@ -1072,7 +1075,7 @@ if (import.meta.main) {
     // reach. Advertising them costs nothing; they already resolve.
     "shell", "bash", "bounded_shell",
     "fs_read", "fs_write", "fs_edit",
-    "git_status", "git_diff", "git_commit", "git_worktree", "git_land", "walk_trees_reclaim",
+    "git_status", "git_diff", "git_commit", "git_worktree", "git_land", "walk_trees_reclaim", "walk_failure_detect",
     "code_search", "code_find_function", "code_find_import",
     "code_insert_after_line", "code_replace_lines", "code_read_lines",
     "code_add_import", "code_verify_typecheck", "web_search",

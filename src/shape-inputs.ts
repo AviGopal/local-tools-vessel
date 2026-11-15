@@ -57,6 +57,7 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
     repo: { type: "string", minLength: 1, description: "\"super\" for the super-repo, or a vessel's name, e.g. walk-vessel." },
   }),
   walk_trees_reclaim: object([], {}),
+  walk_failure_detect: object([], {}),
   code_find_function: object(["path", "name"], { path: PATH, name: { type: "string", minLength: 1, description: "The function's name." } }),
   code_find_import: object(["path", "module"], {
     path: PATH, module: { type: "string", minLength: 1, description: "The module specifier as imported, e.g. \"./calls\"." },
@@ -91,6 +92,9 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
     "and origin_url.",
   code_find_function: "Finds where a function is defined in a file: its start and end lines, or found false.",
   code_find_import: "Finds the import of a module in a file: its line and statement, or found false.",
+  walk_failure_detect: "Classes the walk's recent failures and files each class that recurs (by the owner's failure_rule " +
+    "row) as one gap; closes a class quiet since and called again; answers what it found and wrote (none when the rule is " +
+    "a dry run).",
   walk_trees_reclaim: "Removes the clones git_worktree made that nothing will use again (landed, or unchanged with no open " +
     "request), keeps the rest, and reports changed clones of closed requests; answers what it removed and reported.",
 }
@@ -108,6 +112,7 @@ export const SHAPE_ANSWERS: Record<string, string> = {
   git_worktree: "gitWorktree",
   git_land: "gitLand",
   walk_trees_reclaim: "walkTreesReclaim",
+  walk_failure_detect: "walkFailureReport",
   code_search: "codeSearchResult",
   code_insert_after_line: "codeInsertResult",
   code_replace_lines: "codeReplaceResult",
