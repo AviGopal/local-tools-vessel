@@ -21,7 +21,12 @@ export { walkTreesDir };
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export type Worktree =
-  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string }
+  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string;
+      // What a refresh carried onto the new base: the clone's uncommitted edits, or its commits (replayed).
+      carried?: "uncommitted" | "commits";
+      // A clone of this request's whose change could not be carried onto the new base: where it is, and which paths the
+      // new base also changed (its change is left as it was there; this answer is a fresh clone).
+      not_carried?: { cwd: string; from: string; conflicts: string[]; why: string } }
   | { error: string };
 
 const isRepo = (p: string): boolean => { try { return statSync(join(p, ".git")).isDirectory(); } catch { return false; } };
@@ -103,13 +108,26 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
   // in place when nothing in it has changed: the new base is fetched from the copy into it and its own branch moved there.
   // Making a fresh clone instead copies the whole repository again, and every push would do that for every request.
   // The answer says which base it moved from (refreshed_from), so a later commit reads the clone's rows as one clone.
+  // A clone holding the request's change is carried too, when the new base changed none of what it changed: its
+  // uncommitted edits stay in place across the move (git's own rule: a checkout keeps local changes to files the two
+  // bases share unchanged), its commits are replayed onto the new base. Nothing is edited or merged by hand: where the
+  // new base also changed a path the change touches, the clone is left exactly as it was and the answer says which
+  // paths (not_carried), beside a fresh clone. A carried change is a new tree: the diff, typecheck and verdict of the old
+  // one judge nothing here (a landing takes only a verdict on its own tree).
   const stale = h?.ours.find((o) => o.made.repo === repo && o.made.origin_url === origin && typeof o.made.base === "string"
     && o.made.base !== base && h.may(o.cwd) && isRepo(o.cwd));
-  if (stale && await refreshed(stale.cwd, String(stale.made.base), base, branch, source)) {
-    return { shape: "gitWorktree", cwd: stale.cwd, repo, branch, base, super_base: superBase, origin_url: origin, refreshed_from: String(stale.made.base) };
+  let notCarried: { cwd: string; from: string; conflicts: string[]; why: string } | undefined;
+  if (stale) {
+    const r = await refreshed(stale.cwd, String(stale.made.base), base, branch, source);
+    if (r.ok) {
+      return { shape: "gitWorktree", cwd: stale.cwd, repo, branch, base, super_base: superBase, origin_url: origin, refreshed_from: String(stale.made.base),
+        ...(r.carried ? { carried: r.carried } : {}) };
+    }
+    if (r.changed) notCarried = { cwd: stale.cwd, from: String(stale.made.base), conflicts: r.conflicts, why: r.why };
   }
+  const also = notCarried ? { not_carried: notCarried } : {};
   const reused = await unchangedClone(trees, repo, base, origin, h);
-  if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin };
+  if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin, ...also };
   const id = `${repo}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const cwd = agentWritableDir(join(trees, id));
   const steps: string[][] = [
@@ -123,24 +141,56 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     const r = await git(args, tmpdir(), { timeoutMs: 300_000 });
     if (r.exit_code !== 0) return { error: `git ${args.find((a) => !a.startsWith("-") && a !== cwd)} failed: ${r.stderr.slice(-500)}` };
   }
-  return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin };
+  return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin, ...also };
 }
 
-// Bring an unchanged clone made at `from` to `to`: nothing modified or untracked, and no commit past `from`; then the copy's
-// branch is fetched into it (the same upload-pack form the clone was made with: never shared objects) and the clone's own
-// branch moved to `to`. False on anything else, and the caller makes a fresh clone as before.
-async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<boolean> {
-  const out = async (args: string[], timeoutMs?: number) => {
-    const r = await git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
-    return r.exit_code === 0 ? r.stdout.trim() : null;
-  };
+// Bring a clone made at `from` to `to`. The copy's branch is fetched into it (the same upload-pack form the clone was made
+// with: never shared objects), then its own branch moved to `to`:
+//   - unchanged (nothing modified or untracked, no commit past `from`): moved, as before;
+//   - uncommitted edits only: moved with a checkout, which keeps them in place when `to` changed none of those files and
+//     refuses, changing nothing, when it did (carried: "uncommitted");
+//   - commits past `from` only: replayed onto `to` (git decides what conflicts); on a conflict the replay is undone, the
+//     clone left as it was, and the conflicting paths are named (carried: "commits");
+//   - both: not carried (commit or drop the edits first; nothing is guessed).
+// Not ok: changed says whether the clone held a change (so a fresh clone does not hide it), conflicts which paths `to`
+// also changed, why in words. Nothing here edits a file or resolves a conflict.
+type Refresh = { ok: true; carried?: "uncommitted" | "commits" } | { ok: false; changed: boolean; conflicts: string[]; why: string };
+async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
+  const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
+  const out = async (args: string[], timeoutMs?: number) => { const r = await run(args, timeoutMs); return r.exit_code === 0 ? r.stdout.trim() : null; };
+  const no = (why: string, changed = false, conflicts: string[] = []): Refresh => ({ ok: false, changed, conflicts, why });
   const own = await out(["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (!own || !own.startsWith("walk/")) return false;
-  if ((await out(["status", "--porcelain", "--untracked-files=all"])) !== "") return false;
-  if ((await out(["rev-list", "HEAD", "--not", from])) !== "") return false;
-  if ((await out(["fetch", "--quiet", "--upload-pack=git -c 'safe.directory=*' upload-pack", source, branch], 300_000)) === null) return false;
-  if ((await out(["checkout", "--quiet", "-B", own, to])) === null) return false;
-  return (await out(["rev-parse", "HEAD"])) === to;
+  if (!own || !own.startsWith("walk/")) return no("the clone is not on its own walk/ branch");
+  const dirty = await out(["status", "--porcelain", "--untracked-files=all"]);
+  const ahead = await out(["rev-list", "HEAD", "--not", from]);
+  if (dirty === null || ahead === null) return no("the clone could not be read");
+  if (dirty !== "" && ahead !== "") return no("the clone holds both commits and uncommitted edits; commit or drop the edits first", true);
+  if ((await out(["fetch", "--quiet", "--upload-pack=git -c 'safe.directory=*' upload-pack", source, branch], 300_000)) === null) {
+    return no("the new base could not be fetched into the clone", dirty !== "" || ahead !== "");
+  }
+  // The paths the new base changed since the clone's base: uncommitted edits to any of them cannot be carried.
+  const moved = new Set(((await out(["diff", "--name-only", "--no-renames", from, to])) ?? "").split("\n").filter(Boolean));
+  if (ahead !== "") {
+    // git's own replay decides what conflicts; a conflicting one is undone, leaving the clone as it was.
+    const r = await run(["rebase", "--quiet", "--onto", to, from], 300_000);
+    if (r.exit_code !== 0) {
+      const conflicts = ((await out(["diff", "--name-only", "--diff-filter=U"])) ?? "").split("\n").filter(Boolean);
+      await run(["rebase", "--abort"]);
+      return no(`the commits could not be replayed onto the new base: ${r.stderr.trim().slice(-200)}`, true, conflicts);
+    }
+    return (await out(["merge-base", "--is-ancestor", to, "HEAD"])) !== null ? { ok: true, carried: "commits" } : no("the replay did not end on the new base", true);
+  }
+  if (dirty !== "") {
+    const edited = ((await out(["diff", "--name-only", "--no-renames", "HEAD"])) ?? "").split("\n").filter(Boolean);
+    const added = ((await out(["ls-files", "--others", "--exclude-standard"])) ?? "").split("\n").filter(Boolean);
+    const mine = [...new Set([...edited, ...added])];
+    const both = mine.filter((f) => moved.has(f));
+    if (both.length > 0) return no("the new base also changed paths the clone's uncommitted edits change", true, both);
+    if ((await out(["checkout", "--quiet", "-B", own, to])) === null) return no("the edits could not be kept across the move", true, mine);
+    return (await out(["rev-parse", "HEAD"])) === to ? { ok: true, carried: "uncommitted" } : no("the move did not end on the new base", true);
+  }
+  if ((await out(["checkout", "--quiet", "-B", own, to])) === null) return no("the clone's branch could not be moved");
+  return (await out(["rev-parse", "HEAD"])) === to ? { ok: true } : no("the move did not end on the new base");
 }
 
 // The newest clone under `trees` of this repo, that this request may be handed (handouts), still as made: its own walk/<name> branch, HEAD at `base`, origin

@@ -218,7 +218,7 @@ describe("git_worktree", () => {
     globalThis.fetch = realFetch;
   });
 
-  it("[MUST-FAIL] once the copy has moved on, a request's own unchanged clone is brought to the new tip in place; a changed one is not handed back", async () => {
+  it("[MUST-FAIL] once the copy has moved on, a request's own clone is brought to the new tip in place, unchanged or carrying an edit the new tip did not touch", async () => {
     process.env.METABOB_API_KEY = "test-node-key";
     const { st, sel, ask } = stubRecords();
     const demo = join(CLONES, "demo");
@@ -240,12 +240,94 @@ describe("git_worktree", () => {
       answers.push(w as unknown as Record<string, unknown>);
       got.push(`${what}: ${w.cwd !== old.cwd ? "new clone" : "same clone"}, base ${w.base === tip ? "tip" : "old"}, HEAD ${g(w.cwd, "rev-parse", "HEAD") === tip ? "tip" : "old"}`);
     }
-    expect(got).toEqual(["changed: new clone, base tip, HEAD tip", "unchanged: same clone, base tip, HEAD tip"]);
+    // the changed clone's edit (edit.txt) is not a path the push changed (b.txt), so it is carried in place too
+    expect(got).toEqual(["changed: same clone, base tip, HEAD tip", "unchanged: same clone, base tip, HEAD tip"]);
+    expect(answers[0]).toMatchObject({ refreshed_from: e.base, carried: "uncommitted" });
+    expect(readFileSync(join(e.cwd, "edit.txt"), "utf8")).toBe("x\n"); // the edit is still there
     expect(answers[1].refreshed_from).toBe(f.base); // says which base it moved from
-    expect(readdirSync(trees).length).toBe(before + 1); // only the changed one's fresh clone was made
+    expect(answers[1].carried).toBeUndefined(); // nothing to carry: as before
+    expect(readdirSync(trees).length).toBe(before); // no fresh clone was made
     // a commit in the refreshed clone reads its rows as one clone, at the new base
     const madeThere = await madeClone(f.cwd);
     expect("error" in madeThere ? madeThere.error : madeThere.base).toBe(tip);
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] a change the new tip also changed is not carried: the clone is left exactly as it was, and the answer names the paths beside a fresh clone", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-k", "R-K"], ["sel-k2", "R-K"]]) sel(id, root);
+    st.open = ["R-K"];
+    const k = await ask("sel-k");
+    writeFileSync(join(k.cwd, "a.txt"), "mine\n"); // the request's uncommitted edit of a.txt
+    writeFileSync(join(demo, "a.txt"), "theirs\n");
+    commitAll(demo, "a push changing a.txt too");
+    const tip = g(demo, "rev-parse", "HEAD");
+    const w = await ask("sel-k2");
+    expect(w.cwd).not.toBe(k.cwd); // a fresh clone
+    expect(w.base).toBe(tip);
+    expect((w as unknown as Record<string, unknown>).not_carried).toMatchObject({ cwd: k.cwd, from: k.base, conflicts: ["a.txt"] });
+    expect(g(k.cwd, "rev-parse", "HEAD")).toBe(k.base); // the old clone did not move
+    expect(readFileSync(join(k.cwd, "a.txt"), "utf8")).toBe("mine\n"); // and its edit is untouched
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] the request's commits are replayed onto the new tip when it changed none of their paths; a conflicting replay is undone", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-m", "R-M"], ["sel-m2", "R-M"], ["sel-n", "R-N"], ["sel-n2", "R-N"]]) sel(id, root);
+    st.open = ["R-M", "R-N"];
+    const m = await ask("sel-m");
+    writeFileSync(join(m.cwd, "m.txt"), "m\n"); commitAll(m.cwd, "m's change"); // commits a path the push won't touch
+    const n = await ask("sel-n");
+    writeFileSync(join(n.cwd, "c.txt"), "n\n"); commitAll(n.cwd, "n's change"); // commits a path the push will touch
+    const nHead = g(n.cwd, "rev-parse", "HEAD");
+    writeFileSync(join(demo, "c.txt"), "push\n");
+    commitAll(demo, "a push changing c.txt");
+    const tip = g(demo, "rev-parse", "HEAD");
+    const wm = await ask("sel-m2") as unknown as Record<string, unknown>;
+    expect(wm).toMatchObject({ cwd: m.cwd, base: tip, refreshed_from: m.base, carried: "commits" });
+    expect(g(m.cwd, "merge-base", "--is-ancestor", tip, "HEAD")).toBe(""); // on the new tip
+    expect(g(m.cwd, "log", "-1", "--format=%s")).toBe("m's change"); // its commit, replayed
+    expect(readFileSync(join(m.cwd, "c.txt"), "utf8")).toBe("push\n"); // and the push's change under it
+    const wn = await ask("sel-n2") as unknown as Record<string, unknown>;
+    expect(wn.cwd).not.toBe(n.cwd);
+    expect(wn.not_carried).toMatchObject({ cwd: n.cwd, conflicts: ["c.txt"] });
+    expect(g(n.cwd, "rev-parse", "HEAD")).toBe(nHead); // the conflicting clone is left exactly as it was
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] a carried change is a new tree: nothing judged on the old one (its diff, typecheck, verdict) is about it", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-v", "R-V"], ["sel-v2", "R-V"]]) sel(id, root);
+    st.open = ["R-V"];
+    const v = await ask("sel-v");
+    writeFileSync(join(v.cwd, "v.txt"), "v\n"); commitAll(v.cwd, "v's change");
+    const judged = g(v.cwd, "rev-parse", "HEAD^{tree}"); // the tree a diff, typecheck and verdict were made of
+    writeFileSync(join(demo, "d.txt"), "d\n"); commitAll(demo, "a push");
+    await ask("sel-v2");
+    // git_land takes a verdict only on the tree it lands (approved(…, tree)): the carried tree is another
+    expect(g(v.cwd, "rev-parse", "HEAD^{tree}")).not.toBe(judged);
+    globalThis.fetch = realFetch;
+  });
+
+  it("a clone holding both commits and uncommitted edits is not carried, and says so", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-b", "R-B"], ["sel-b2", "R-B"]]) sel(id, root);
+    st.open = ["R-B"];
+    const b = await ask("sel-b");
+    writeFileSync(join(b.cwd, "x.txt"), "x\n"); commitAll(b.cwd, "b's commit");
+    writeFileSync(join(b.cwd, "y.txt"), "y\n"); // and an uncommitted edit
+    writeFileSync(join(demo, "e.txt"), "e\n"); commitAll(demo, "a push");
+    const w = await ask("sel-b2") as unknown as Record<string, unknown>;
+    expect(w.cwd).not.toBe(b.cwd);
+    expect(String((w.not_carried as { why: string }).why)).toContain("both");
     globalThis.fetch = realFetch;
   });
 
