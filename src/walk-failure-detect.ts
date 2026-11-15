@@ -11,8 +11,8 @@
 //   write:                false is a dry run: the full report, and nothing written.
 // A gap is one class: gap_id walk-failure:<class>, written by walk-failure-detector, role detector. It is written again
 // only when what it says changes (status, count, roots or reopenings), so a rerun, or a second walk on the same store,
-// writes nothing new. A class whose failures blame a callee that never answered (an outage, a timeout) is filed
-// walkable false: shown, not offered to the walk, no one's debit (records reads that field). Failures on a gap's own
+// writes nothing new. A class whose failures records stamped as blaming the callee (an outage, a timeout, a crash in
+// what was called) is filed walkable false: shown, not offered to the walk, no one's debit (records reads that field). Failures on a gap's own
 // repair are not counted toward it. Nothing here names a tool, a shape of failure or a threshold.
 import { classesOf, type Klass, type Row } from "./walk-failure-classes";
 import { resolveRecords } from "./walk-rows";
@@ -111,6 +111,9 @@ export const detect = async (): Promise<Report> => {
   const seen = new Set<string>();
   for (const k of recent) {
     const gap_id = GAP_PREFIX + k.key;
+    // Quiet for quiet_rows though still inside the window (a rule whose quiet is shorter than its window): a close
+    // candidate, decided below as any quiet class is.
+    if (at - k.last_seq >= rule.quiet_rows && latest.get(gap_id)?.status === "open") continue;
     seen.add(gap_id);
     const prev = latest.get(gap_id);
     const filed: Filed = { gap_id, class: k.key, tool: k.tool, count: k.failures.length, roots: k.roots.length, walkable: !k.infra, action: "below" };

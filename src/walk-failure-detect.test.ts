@@ -131,6 +131,23 @@ describe("walk_failure_detect", () => {
     expect((await report()).written).toBe(0); // count unchanged: the repair's own failures are not the class's
   });
 
+  it("[MUST-FAIL] calls that threw (status 0) and a callee's own 5xx are filed walkable false (qa P1, P2)", async () => {
+    rule();
+    for (const root of ["w1", "w2", "w3"]) fail(root, "fs_read", "/x", { status: 0, blames: "callee", body: "TypeError: fetch failed" });
+    for (const root of ["w1", "w2", "w3"]) fail(root, "answer", "/x", { status: 502, blames: "callee", body: JSON.stringify({ prompt_ceiling: true }) });
+    const r = await report();
+    expect(r.classes.map((c) => [c.tool, c.action, c.walkable]).sort()).toEqual([["answer", "opened", false], ["fs_read", "opened", false]]);
+  });
+
+  it("[MUST-FAIL] a class quiet for quiet_rows closes though still inside a longer window", async () => {
+    rule({ window_rows: 5000, quiet_rows: 100 });
+    for (const root of ["w1", "w2", "w3"]) missing(root, `/trees/${root}`);
+    await report();
+    filler(150);
+    ok("w4", "git_diff");
+    expect((await report()).classes.map((c) => c.action)).toEqual(["closed"]);
+  });
+
   it("[MUST-FAIL] no owner failure_rule: nothing decided, nothing written", async () => {
     rows.push({ id: "fake", seq: ++head, shape: "failure_rule", role: "walk", target: "walk_failure", min_count: 1, min_roots: 1, window_rows: 9, quiet_rows: 9, write: true });
     for (const root of ["w1", "w2"]) missing(root, `/trees/${root}`);

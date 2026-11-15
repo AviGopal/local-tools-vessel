@@ -34,10 +34,12 @@ describe("walk failure classes", () => {
     expect(classesOf(rows)).toHaveLength(1)
   })
 
-  test("different tools, kinds or status bands are different classes; a cut call is no class", () => {
+  test("[MUST-FAIL] different tools, kinds or status bands are different classes; a call that threw (status 0) is counted, infra", () => {
     const rows = [...call("w1", "git_diff", {}, { status: 422, body: "x" }), ...call("w1", "git_commit", {}, { status: 422, body: "x" }),
-      ...call("w1", "git_diff", {}, { status: 502, body: "x" }), ...call("w1", "git_diff", {}, { status: 0, body: "stopped" })]
-    expect(classesOf(rows)).toHaveLength(3)
+      ...call("w1", "git_diff", {}, { status: 502, body: "x" }), ...call("w1", "git_diff", {}, { status: 0, blames: "callee", body: "TypeError: fetch failed" })]
+    const k = classesOf(rows)
+    expect(k).toHaveLength(4)
+    expect(k.find((x) => x.status_band === "0")?.infra).toBe(true)
   })
 
   test("[MUST-FAIL] infra is the blames field (callee), never the status alone", () => {
@@ -65,11 +67,12 @@ describe("walk failure classes", () => {
     expect(classesOf([...direct("w1", "/trees/a"), ...direct("w2", "/trees/b")])).toHaveLength(1)
   })
 
-  test("[MUST-FAIL] an unstamped forward timeout (no status) is infra, as records blames it; a root-less failure counts under its move", () => {
-    const rows = call("", "record_wait", {}, { body: "forward_failed timed out" })
+  test("[MUST-FAIL] blame is records' stamp only: an unstamped row is its own class, never inferred; a root-less failure counts under its move", () => {
+    const rows = [...call("", "record_wait", {}, { body: "timed out" }), ...call("", "record_wait", {}, { body: "timed out", blames: "callee" })]
     rows[0].root = undefined as unknown as string
+    rows[3].root = undefined as unknown as string
     const k = classesOf(rows)
-    expect(k[0].infra).toBe(true)
+    expect(k.map((c) => [c.blames, c.infra]).sort()).toEqual([["callee", true], ["unstamped", false]])
     expect(k[0].roots).toEqual(["move:call/record_wait"])
   })
 
@@ -84,12 +87,12 @@ describe("walk failure classes", () => {
     expect(k[0]).toMatchObject({ tool: "answer", refused: "schema", roots: ["w1", "w2"] })
   })
 
-  test("[MUST-FAIL] C1: a callee that answered with its own 5xx is work; one never reached is infra (two classes)", () => {
+  test("[MUST-FAIL] every failure records blames on the callee is infra (the USER's ruling), answered 5xx or not; still two classes", () => {
     const rows = [...call("w1", "answer", {}, { status: 500, blames: "callee", body: JSON.stringify({ failure: { status: 500, body: "TypeError: x" } }) }),
       ...call("w2", "answer", {}, { status: 502, blames: "callee", body: JSON.stringify({ error: "forward_failed", detail: "timed out" }) })]
     const k = classesOf(rows)
     expect(k).toHaveLength(2)
-    expect(k.map((c) => c.infra).sort()).toEqual([false, true])
+    expect(k.map((c) => c.infra)).toEqual([true, true])
   })
 
   test("[MUST-FAIL] C2: produce classes keep their target: the same fields on answer and on request are two classes", () => {

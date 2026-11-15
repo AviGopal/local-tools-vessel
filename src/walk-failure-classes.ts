@@ -9,23 +9,12 @@ export type ClassKey = string
 export type Klass = { key: ClassKey; tool: string; kind?: string; refused?: string; blames?: string; waits_for?: string;
   status_band: string; signature: string; example: string; failures: string[]; roots: string[]; first_seq: number; last_seq: number; infra: boolean }
 
-// Whom a failure blames, as records reads it (fold.ts blamed): its stamp, else, for a row written before the stamp, a
-// 4xx other than 401/403/408/429 with no kind blames the request and anything else the callee.
-const NOT_THE_REQUEST = new Set([401, 403, 408, 429])
-const blamedCallee = (f: Row): boolean => typeof f.blames === "string" ? f.blames === "callee"
-  : !(f.kind === undefined && typeof f.status === "number" && f.status !== 200 && f.status >= 400 && f.status < 500 && !NOT_THE_REQUEST.has(f.status))
-// Whether the callee answered at all: a forward that failed (discovery and the transport set error "forward_failed"),
-// a stop (status 0) or no status is no answer: infra. A callee that answered, even with its own 5xx (a crash in its own
-// code), answered: its failure is work, not infra. Read from the body's own JSON field, never its words.
-const unanswered = (f: Row): boolean => {
-  if (typeof f.status !== "number" || f.status === 0) return true
-  const parsed = ((): unknown => { try { return typeof f.body === "string" ? JSON.parse(f.body) : f.body } catch { return undefined } })()
-  const inner = (x: unknown): unknown => typeof x === "object" && x !== null ? (x as Record<string, unknown>) : undefined
-  const o = inner(parsed) as Record<string, unknown> | undefined
-  const nested = o && typeof o.failure === "object" && o.failure !== null ? (o.failure as Record<string, unknown>).body : undefined
-  const n = ((): Record<string, unknown> | undefined => { try { return typeof nested === "string" ? JSON.parse(nested) : (nested as Record<string, unknown> | undefined) } catch { return undefined } })()
-  return o?.error === "forward_failed" || n?.error === "forward_failed"
-}
+// Whom a failure blames is records' to say: it stamps blames on every walk failure row it stores (fold.ts blames), and
+// this reads that stamp only, never a copy of records' rule. A row written before the stamp is its own class, blames
+// "unstamped" (named debt: it leaves when no unstamped failure is left in a detector's window). A failure that blames
+// the callee (an outage, a timeout, a crash in what was called, the gate waiting for a person) is infra, the USER's
+// ruling: filed, not offered to the walk.
+const blamesOf = (f: Row): string => typeof f.blames === "string" ? f.blames : "unstamped"
 const band = (s: unknown): string => typeof s === "number" ? (s >= 500 ? "5xx" : s >= 400 ? "4xx" : s === 200 ? "200" : String(s)) : "none"
 
 // Every occurrence of a known value replaced by its name, longest values first (a path before its own prefix), by plain
@@ -53,7 +42,6 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
   const byId = new Map(pool.map((r) => [r.id, r]))
   const out = new Map<ClassKey, Klass>()
   for (const f of pool.filter((r) => r.shape === "failure" && r.role === "walk" && typeof r.call_id === "string").sort((a, b) => a.seq - b.seq)) {
-    if (f.status === 0) continue // a call cut by a stop says nothing about the call
     const h = started.get(String(f.call_id))
     const sel = sels.get(String(f.selection_ref))
     const tool = h !== undefined ? String(h.pointer_type) : String(sel?.a ?? "unknown")
@@ -71,14 +59,14 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     // failure is what the tool said, classed by its body with the call's own values named.
     const produce = String(sel?.a ?? "").startsWith("produce/") || h?.kind === "produce"
     const signature = produce ? "" : signatureOf(body, known)
-    const fields = { kind: f.kind, refused: f.refused, blames: f.blames ?? (blamedCallee(f) ? "callee" : "request"), waits_for: f.waits_for } as Record<string, unknown>
+    const fields = { kind: f.kind, refused: f.refused, blames: blamesOf(f), waits_for: f.waits_for } as Record<string, unknown>
     const s = (k: string) => typeof fields[k] === "string" ? String(fields[k]) : undefined
-    const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([tool, s("kind"), s("refused"), s("blames"), s("waits_for"), band(f.status), unanswered(f), signature])).digest("hex").slice(0, 24)
+    const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([tool, s("kind"), s("refused"), s("blames"), s("waits_for"), band(f.status), signature])).digest("hex").slice(0, 24)
     // A failure whose selection names no root is counted under its move (the template or call it ran), never dropped.
     const root = typeof sel?.root === "string" && sel.root !== "" ? sel.root : `move:${String(sel?.a ?? tool)}`
     if (ownRoots.get(key)?.has(root) === true) continue
     const k = out.get(key) ?? { key, tool, kind: s("kind"), refused: s("refused"), blames: s("blames"), waits_for: s("waits_for"), status_band: band(f.status),
-      signature, example: body.slice(0, 500), failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamedCallee(f) && unanswered(f) }
+      signature, example: body.slice(0, 500), failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamesOf(f) === "callee" }
     k.failures.push(f.id)
     if (root !== "" && !k.roots.includes(root)) k.roots.push(root)
     k.last_seq = f.seq
