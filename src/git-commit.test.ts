@@ -261,6 +261,7 @@ describe("git_worktree", () => {
     st.open = ["R-K"];
     const k = await ask("sel-k");
     writeFileSync(join(k.cwd, "a.txt"), "mine\n"); // the request's uncommitted edit of a.txt
+    asOwner(k.cwd)
     writeFileSync(join(demo, "a.txt"), "theirs\n");
     commitAll(demo, "a push changing a.txt too");
     const tip = g(demo, "rev-parse", "HEAD");
@@ -283,6 +284,7 @@ describe("git_worktree", () => {
     writeFileSync(join(m.cwd, "m.txt"), "m\n"); commitAll(m.cwd, "m's change"); // commits a path the push won't touch
     const n = await ask("sel-n");
     writeFileSync(join(n.cwd, "c.txt"), "n\n"); commitAll(n.cwd, "n's change"); // commits a path the push will touch
+    asOwner(m.cwd); asOwner(n.cwd)
     const nHead = g(n.cwd, "rev-parse", "HEAD");
     writeFileSync(join(demo, "c.txt"), "push\n");
     commitAll(demo, "a push changing c.txt");
@@ -306,7 +308,7 @@ describe("git_worktree", () => {
     for (const [id, root] of [["sel-v", "R-V"], ["sel-v2", "R-V"]]) sel(id, root);
     st.open = ["R-V"];
     const v = await ask("sel-v");
-    writeFileSync(join(v.cwd, "v.txt"), "v\n"); commitAll(v.cwd, "v's change");
+    writeFileSync(join(v.cwd, "v.txt"), "v\n"); commitAll(v.cwd, "v's change"); asOwner(v.cwd)
     const judged = g(v.cwd, "rev-parse", "HEAD^{tree}"); // the tree a diff, typecheck and verdict were made of
     writeFileSync(join(demo, "d.txt"), "d\n"); commitAll(demo, "a push");
     await ask("sel-v2");
@@ -322,13 +324,14 @@ describe("git_worktree", () => {
     for (const [id, root] of [["sel-r", "R-R"], ["sel-r2", "R-R"]]) sel(id, root);
     st.open = ["R-R"];
     const r = await ask("sel-r");
-    writeFileSync(join(r.cwd, "c.txt"), "r\n"); commitAll(r.cwd, "r's change");
+    writeFileSync(join(r.cwd, "c.txt"), "r\n"); commitAll(r.cwd, "r's change"); asOwner(r.cwd)
     const rHead = g(r.cwd, "rev-parse", "HEAD");
     writeFileSync(join(demo, "c.txt"), "push2\n"); commitAll(demo, "a push changing c.txt");
     const tip = g(demo, "rev-parse", "HEAD");
     // the replay a restart cut off: fetched, started, stopped on its conflict, never undone
     g(r.cwd, "fetch", "--quiet", demo, "HEAD");
     try { g(r.cwd, "rebase", "--quiet", "--onto", tip, r.base); } catch { /* the conflict, left as it is */ }
+    asOwner(r.cwd) // made here as the test's user: handed to the clone's owner, as every walk-tree git runs as it
     expect(existsSync(join(r.cwd, ".git", "rebase-merge")) || existsSync(join(r.cwd, ".git", "rebase-apply"))).toBe(true)
     const w = await ask("sel-r2") as unknown as Record<string, unknown>;
     expect(w.not_carried).toMatchObject({ cwd: r.cwd, conflicts: ["c.txt"] }); // named, beside a fresh clone
@@ -343,8 +346,9 @@ describe("git_worktree", () => {
     for (const [id, root] of [["sel-o", "R-O"], ["sel-o2", "R-O"]]) sel(id, root);
     st.open = ["R-O"];
     const o = await ask("sel-o");
-    writeFileSync(join(o.cwd, "o.txt"), "o\n"); commitAll(o.cwd, "o's change");
+    writeFileSync(join(o.cwd, "o.txt"), "o\n"); commitAll(o.cwd, "o's change"); asOwner(o.cwd)
     g(o.cwd, "checkout", "--quiet", "--detach"); // off its branch (an undo that could not run would leave it so)
+    asOwner(o.cwd)
     writeFileSync(join(demo, "f.txt"), "f\n"); commitAll(demo, "a push");
     const w = await ask("sel-o2") as unknown as Record<string, unknown>;
     expect(w.cwd).not.toBe(o.cwd);
@@ -361,6 +365,7 @@ describe("git_worktree", () => {
     const b = await ask("sel-b");
     writeFileSync(join(b.cwd, "x.txt"), "x\n"); commitAll(b.cwd, "b's commit");
     writeFileSync(join(b.cwd, "y.txt"), "y\n"); // and an uncommitted edit
+    asOwner(b.cwd)
     writeFileSync(join(demo, "e.txt"), "e\n"); commitAll(demo, "a push");
     const w = await ask("sel-b2") as unknown as Record<string, unknown>;
     expect(w.cwd).not.toBe(b.cwd);
