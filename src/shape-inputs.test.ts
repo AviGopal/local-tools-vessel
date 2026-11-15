@@ -57,6 +57,23 @@ describe("declared shape inputs", () => {
     }, 60_000)
   }
 
+  // Every declared tool is the walk's to call, so each is placed here: gated by the owner seed's requires rows
+  // (scripts/substrate/walk-owner-seed.ts: CHANGE_TOOLS needs a wanted change or an open gap; walk_trees_reclaim its
+  // gap), read-only, or ungated with the reason written down. Declaring a tool that is in none (a file-writing tool
+  // whose inputs were just declared, say) fails here until someone decides its gate (deployment's tripwire).
+  const GATED = ["git_worktree", "fs_edit", "fs_write", "code_replace_lines", "code_insert_after_line", "git_commit", "git_land", "walk_trees_reclaim"];
+  const READ_ONLY = ["fs_read", "code_read_lines", "code_search", "code_find_function", "code_find_import", "git_status", "git_diff"];
+  const UNGATED: Record<string, string> = {
+    bounded_shell: "runs as an unprivileged user with a time limit (shell containment); not gated by a wanted change",
+    code_verify_typecheck: "runs a package's typecheck; no declared field reaches its command (the check above)",
+    walk_failure_detect: "writes gap rows as the detector, never files",
+  };
+  it("[MUST-FAIL] every declared tool is gated by the seed, read-only, or ungated with a stated reason (a tripwire)", () => {
+    const placed = [...GATED, ...READ_ONLY, ...Object.keys(UNGATED)];
+    expect(Object.keys(SHAPE_INPUTS).filter((t) => !placed.includes(t))).toEqual([]);
+    expect(new Set(placed).size).toBe(placed.length);
+  });
+
   it("[MUST-FAIL] no declared field reaches a command line unchecked (agf_m40aao3ttwpx)", () => {
     const typecheck = SHAPE_INPUTS.code_verify_typecheck as unknown as Schema
     expect(Object.keys(typecheck.properties)).not.toContain("script")
