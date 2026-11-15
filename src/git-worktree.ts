@@ -5,7 +5,7 @@
 // landing pushes. The answer names the clone, its base (the copy's HEAD it was cloned at) and the super-repo's HEAD,
 // whose hooks judge a commit in it. The walk records that answer in its hop row, and a commit or landing reads it back
 // from there (walk-rows.ts).
-import { mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
@@ -159,8 +159,15 @@ async function refreshed(cwd: string, from: string, to: string, branch: string, 
   const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
   const out = async (args: string[], timeoutMs?: number) => { const r = await run(args, timeoutMs); return r.exit_code === 0 ? r.stdout.trim() : null; };
   const no = (why: string, changed = false, conflicts: string[] = []): Refresh => ({ ok: false, changed, conflicts, why });
+  // A replay a restart cut off leaves the clone mid-rebase, off its own branch: undone first, which puts the clone back
+  // on its branch exactly as it was, so it is carried (or named) like any other.
+  if (existsSync(join(cwd, ".git", "rebase-merge")) || existsSync(join(cwd, ".git", "rebase-apply"))) await run(["rebase", "--abort"]);
   const own = await out(["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (!own || !own.startsWith("walk/")) return no("the clone is not on its own walk/ branch");
+  if (!own || !own.startsWith("walk/")) {
+    // Still off its branch: whatever it holds past its base is named, never dropped in silence by a fresh clone.
+    const held = await out(["rev-list", "HEAD", "--not", from]);
+    return no("the clone is not on its own walk/ branch", held !== null && held !== "");
+  }
   const dirty = await out(["status", "--porcelain", "--untracked-files=all"]);
   const ahead = await out(["rev-list", "HEAD", "--not", from]);
   if (dirty === null || ahead === null) return no("the clone could not be read");

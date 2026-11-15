@@ -315,6 +315,43 @@ describe("git_worktree", () => {
     globalThis.fetch = realFetch;
   });
 
+  it("[MUST-FAIL] a replay a restart cut off (the clone left mid-rebase) is undone, and the change is carried or named, never dropped", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-r", "R-R"], ["sel-r2", "R-R"]]) sel(id, root);
+    st.open = ["R-R"];
+    const r = await ask("sel-r");
+    writeFileSync(join(r.cwd, "c.txt"), "r\n"); commitAll(r.cwd, "r's change");
+    const rHead = g(r.cwd, "rev-parse", "HEAD");
+    writeFileSync(join(demo, "c.txt"), "push2\n"); commitAll(demo, "a push changing c.txt");
+    const tip = g(demo, "rev-parse", "HEAD");
+    // the replay a restart cut off: fetched, started, stopped on its conflict, never undone
+    g(r.cwd, "fetch", "--quiet", demo, "HEAD");
+    try { g(r.cwd, "rebase", "--quiet", "--onto", tip, r.base); } catch { /* the conflict, left as it is */ }
+    expect(existsSync(join(r.cwd, ".git", "rebase-merge")) || existsSync(join(r.cwd, ".git", "rebase-apply"))).toBe(true)
+    const w = await ask("sel-r2") as unknown as Record<string, unknown>;
+    expect(w.not_carried).toMatchObject({ cwd: r.cwd, conflicts: ["c.txt"] }); // named, beside a fresh clone
+    expect(g(r.cwd, "rev-parse", "HEAD")).toBe(rHead); // undone: back on its branch, its commit there
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] a clone left off its own branch, holding commits, is named in the answer, not dropped in silence", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-o", "R-O"], ["sel-o2", "R-O"]]) sel(id, root);
+    st.open = ["R-O"];
+    const o = await ask("sel-o");
+    writeFileSync(join(o.cwd, "o.txt"), "o\n"); commitAll(o.cwd, "o's change");
+    g(o.cwd, "checkout", "--quiet", "--detach"); // off its branch (an undo that could not run would leave it so)
+    writeFileSync(join(demo, "f.txt"), "f\n"); commitAll(demo, "a push");
+    const w = await ask("sel-o2") as unknown as Record<string, unknown>;
+    expect(w.cwd).not.toBe(o.cwd);
+    expect(w.not_carried).toMatchObject({ cwd: o.cwd });
+    globalThis.fetch = realFetch;
+  });
+
   it("a clone holding both commits and uncommitted edits is not carried, and says so", async () => {
     process.env.METABOB_API_KEY = "test-node-key";
     const { st, sel, ask } = stubRecords();
