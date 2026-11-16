@@ -70,7 +70,7 @@ describe("a clone behind the copy is brought onto it in place", () => {
     const c = await clone();
     const to = moveOrigin("b.txt", "b2\n");
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made));
-    expect(r).toMatchObject({ refreshed: { shape: "gitWorktree", cwd: c.cwd, repo: "demo", base: to, refreshed_from: c.made.base } });
+    expect(r).toMatchObject({ clone: { shape: "gitWorktree", cwd: c.cwd, repo: "demo", base: to, refreshed_from: c.made.base } });
     expect(g(c.cwd, "rev-parse", "HEAD")).toBe(to);
     // (e) asked again: not behind any more, nothing changes
     expect(await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at({ ...c.made, base: to }))).toBeNull();
@@ -82,9 +82,9 @@ describe("a clone behind the copy is brought onto it in place", () => {
     const oldTree = g(c.cwd, "rev-parse", "HEAD^{tree}");
     const to = moveOrigin("b.txt", "b3\n");
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made));
-    expect(r).toMatchObject({ refreshed: { base: to, carried: "commits" } });
+    expect(r).toMatchObject({ clone: { base: to, carried: "commits" } });
     // where the clone is now, as fields (the walk reads its newest tree from them, never from words)
-    expect(r).toMatchObject({ refreshed: { head: g(c.cwd, "rev-parse", "HEAD"), tree: g(c.cwd, "rev-parse", "HEAD^{tree}") } });
+    expect(r).toMatchObject({ clone: { head: g(c.cwd, "rev-parse", "HEAD"), tree: g(c.cwd, "rev-parse", "HEAD^{tree}") } });
     // (f) the refreshed clone is a new tree: git_land takes a verdict only on its own tree, so one on the old tree lands nothing
     expect(g(c.cwd, "rev-parse", "HEAD^{tree}")).not.toBe(oldTree);
     expect(g(c.cwd, "log", "--format=%s", `${to}..HEAD`)).toBe("own change");
@@ -96,7 +96,7 @@ describe("a clone behind the copy is brought onto it in place", () => {
     writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3\n4\n5y\n"); asOwner(c.cwd);
     const to = moveOrigin("b.txt", "b4\n");
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made));
-    expect(r).toMatchObject({ refreshed: { base: to, carried: "uncommitted" } });
+    expect(r).toMatchObject({ clone: { base: to, carried: "uncommitted" } });
     expect(readFileSync(join(c.cwd, "a.txt"), "utf8")).toBe("1\n2\n3\n4\n5y\n");
   });
 
@@ -128,9 +128,9 @@ describe("the tool runs only in a clone that is current", () => {
     expect(out).toEqual({ error: "could not be brought onto it", conflicts: ["a.txt"] })
   })
   it("[MUST-FAIL] a refreshed clone: the tool runs, and its answer says so first", async () => {
-    const out = await freshFirst(C, async () => ({ shape: "gitDiff", ff: true }), process.env, async () => ({ refreshed: R })) as Record<string, unknown>
-    expect(Object.keys(out)[0]).toBe("refreshed")
-    expect(out).toMatchObject({ refreshed: R, shape: "gitDiff", ff: true })
+    const out = await freshFirst(C, async () => ({ shape: "gitDiff", ff: true }), process.env, async () => ({ clone: R })) as Record<string, unknown>
+    expect(Object.keys(out)[0]).toBe("clone")
+    expect(out).toMatchObject({ clone: R, shape: "gitDiff", ff: true })
   })
   it("(d) not behind, or no clone: the tool's answer as it was", async () => {
     expect(await freshFirst(C, async () => ({ shape: "gitDiff" }), process.env, async () => null)).toEqual({ shape: "gitDiff" })
@@ -185,7 +185,7 @@ describe("a clone moved onto a newer base that no row records is a fact, read fr
     const c = await clone();
     const to = moveOrigin("b.txt", "b9\n");
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made));
-    expect(r).toMatchObject({ refreshed: { base: to } });
+    expect(r).toMatchObject({ clone: { base: to } });
     // no row recorded the move: the rows still say c.made.base
     const first = await madeCurrent(c.cwd, at(c.made));
     expect(first).toMatchObject({ moved_unrecorded: to, error: expect.stringContaining("no row records") });
@@ -199,9 +199,9 @@ describe("a clone moved onto a newer base that no row records is a fact, read fr
     // the real wrapper and refresh; the rows (made) still say the old base, as they do until the walk records this answer
     const out = await freshFirst({ dir: c.cwd, repo: "demo" }, async () => madeCurrent(c.cwd, at({ ...c.made, super_base: "an-older-super-base" })), process.env,
       (cl, env) => refreshInPlace(cl, env, at(c.made))) as Record<string, unknown>;
-    expect(out).toMatchObject({ refreshed: { base: to }, base: to });
+    expect(out).toMatchObject({ clone: { base: to }, base: to });
     // the super base the refresh read now (the hooks a commit is judged by), not the one the clone was made at
-    expect(out.super_base).toBe((out.refreshed as { super_base: string }).super_base);
+    expect(out.super_base).toBe((out.clone as { super_base: string }).super_base);
     expect("moved_unrecorded" in out).toBe(false);
     // the next call, outside that one (as after the walk failed to record it, or a restart): the fact
     expect(await madeCurrent(c.cwd, at(c.made))).toMatchObject({ moved_unrecorded: to, error: expect.stringContaining("git_worktree for demo") });

@@ -2,7 +2,7 @@
 // A walk clone behind this node's copy of its repository is brought onto the copy's HEAD in place, before any tool works in
 // it: the same refresh git_worktree makes for a request's own stale clone (git-worktree.ts refreshed()), so a plan that
 // replays calls with the clone's path bound to its old row keeps working there instead of failing "behind" every time.
-// The answer says so (refreshed, the facts a gitWorktree answer gives), and madeClone reads it as the clone's new base. A
+// The answer says so (clone: where the clone is now, the facts a gitWorktree answer gives, with its head and tree), and madeClone reads it as the clone's new base. A
 // change that cannot be carried (a conflict) leaves the clone exactly as it was and is said, naming the paths; the tool
 // does not run in it. Nothing here writes a records row: the walk records what the answer says.
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -17,10 +17,10 @@ import { containmentZones, type Env } from "./write-containment.js";
 export type Refreshed = { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string;
   refreshed_from: string; carried?: "uncommitted" | "commits"; head?: string; tree?: string };
 
-/** The clone brought to its copy's HEAD (refreshed), why it could not be (error, with the paths), or null when it is not
+/** The clone brought to its copy's HEAD (clone: where it is now), why it could not be (error, with the paths), or null when it is not
  *  behind or is not a clone a walk row records (then nothing is touched). */
 export async function refreshInPlace(clone: { dir: string; repo: string }, env: Env, made = madeClone):
-  Promise<{ refreshed: Refreshed } | { error: string; conflicts: string[] } | null> {
+  Promise<{ clone: Refreshed } | { error: string; conflicts: string[] } | null> {
   const zones = containmentZones(env);
   const superDir = zones.supers[0];
   const source = clone.repo === "super" ? superDir : join(zones.clones, clone.repo);
@@ -38,7 +38,7 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
   return withClones(async () => {
     const r = await refreshed(clone.dir, m.base, to, branch, source);
     if (!r.ok) return { error: `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`, conflicts: r.conflicts };
-    return { refreshed: { shape: "gitWorktree", cwd: clone.dir, repo: clone.repo, branch, base: to, super_base: superBase, origin_url: origin,
+    return { clone: { shape: "gitWorktree", cwd: clone.dir, repo: clone.repo, branch, base: to, super_base: superBase, origin_url: origin,
       refreshed_from: m.base, ...(r.carried ? { carried: r.carried } : {}), ...(await clonePlace(clone.dir)) } };
   });
 }
@@ -51,8 +51,8 @@ export async function freshFirst(clone: { dir: string; repo: string } | null, ru
   if (r !== null && "error" in r) return { error: r.error, conflicts: r.conflicts };
   // The tool runs knowing the move this call just made (thisCall, below): its rows cannot say it yet (the walk records it
   // from this answer), so without it the tool would read the clone's old base and refuse its own refresh.
-  const out = r === null ? await run() : await thisCall.run(r.refreshed, run);
-  return r !== null && typeof out === "object" && out !== null ? { refreshed: r.refreshed, ...out } : out;
+  const out = r === null ? await run() : await thisCall.run(r.clone, run);
+  return r !== null && typeof out === "object" && out !== null ? { clone: r.clone, ...out } : out;
 }
 
 // The refresh made by the call now running, for that call only (an async context, gone when the call ends): never kept
