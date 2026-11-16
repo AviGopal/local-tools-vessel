@@ -429,6 +429,42 @@ describe("git_land", () => {
     expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true });
   });
 
+  it("[MUST-FAIL] a project with its own packages, none installed on this node, is not compiled: the node's state is said (qa)", async () => {
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "ui", "package.json"), JSON.stringify({ name: "ui", dependencies: { "ui-only-pkg": "1.0.0" } }));
+    commitAll(seed, "ui packages"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const c = await changeOf({ "ui/src/uses.ts": 'import { one } from "ui-only-pkg";\nexport const two: number = one + 1;\n' });
+    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    expect("tree" in r && r.typecheck).toEqual({ ran: false, passed: false, why: "ui's modules are not installed on this node: its project cannot be compiled here" });
+    // installed: compiled, and a correct change passes
+    const mods = join(T, "runtime", "demo", "ui", "node_modules", "ui-only-pkg");
+    mkdirSync(mods, { recursive: true });
+    writeFileSync(join(mods, "package.json"), JSON.stringify({ name: "ui-only-pkg", version: "1.0.0", types: "index.d.ts" }));
+    writeFileSync(join(mods, "index.d.ts"), "export declare const one: number;\n");
+    const again = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    expect("tree" in again && again.typecheck).toMatchObject({ ran: true, passed: true, projects: [{ dir: "ui", passed: true }] });
+  });
+
+  it("[MUST-FAIL] a change in two projects runs both, and passes only if both do", async () => {
+    const c = await changeOf({ "m.ts": "export const n: number = 1;\n", "ui/src/two.ts": 'export const s: number = "x";\n' });
+    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    const tc = ("tree" in r && r.typecheck) as { passed: boolean; projects: Array<{ dir: string; passed: boolean }> };
+    expect([tc.passed, tc.projects.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", true], ["ui", false]]]);
+  });
+
+  it("a change that only deletes a TypeScript file no project compiles has nothing to check", async () => {
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    mkdirSync(join(seed, "loose"), { recursive: true });
+    writeFileSync(join(seed, "loose", "gone.ts"), "export const g = 1;\n");
+    writeFileSync(join(seed, "base.ts"), "export const b = 1;\n"); // the root project has files of its own, as a real one does
+    commitAll(seed, "a loose file"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const c = await changeOf({ "loose/gone.ts": null, "notes.txt": "n\n" });
+    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    expect("tree" in r && r.typecheck).toMatchObject({ passed: true });
+  });
+
   it("[MUST-FAIL] a TypeScript file no project of the base compiles is not passed, and is named", async () => {
     const c = await changeOf({ "tools/loose.ts": "export const x: number = 1;\n" });
     const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);

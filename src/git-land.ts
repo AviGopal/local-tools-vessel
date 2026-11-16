@@ -364,9 +364,12 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const ts = changed.split("\n").filter((p) => TS_SOURCE.test(p));
   const projects = await projectsOf(t, ts);
   if (projects.size === 0) {
-    return ts.length === 0
-      ? { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" }
-      : { ran: false, passed: false, why: `no TypeScript project of the base covers ${ts.join(", ")}` };
+    if (ts.length === 0) return { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" };
+    // a file the change deletes has nothing to compile: only a file the tree still holds needs a project
+    const held = typeof dir === "string" ? ts.filter((f) => existsSync(join(dir, f))) : ts;
+    return held.length === 0
+      ? { ran: false, passed: true, why: "the change only deletes TypeScript files no project of the base compiles: nothing to typecheck" }
+      : { ran: false, passed: false, why: `no TypeScript project of the base covers ${held.join(", ")}` };
   }
   const installed = join(containmentZones(process.env).runtime, made.repo, "node_modules");
   const tsc = join(installed, "typescript", "bin", "tsc");
@@ -379,6 +382,16 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const quiet = silenced(patch, added.split("\n").filter(Boolean));
   if (quiet.length > 0) return { ran: false, passed: false, why: `the change silences the check in ${quiet.join(", ")}` };
   if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
+  // A project with its own package.json in the base resolves its own packages: with none installed for it on this node,
+  // its compiler could only say it cannot find them, which reads as the change's fault. That is the node's state, said
+  // as such (qa: human-surface-vessel's ui/ has no installed modules on node1).
+  for (const d of projects.keys()) {
+    if (d === "") continue;
+    const ownPackage = await t.out(["show", `${t.origin}:${d}package.json`]);
+    if (ownPackage !== null && !existsSync(join(containmentZones(process.env).runtime, made.repo, d, "node_modules"))) {
+      return { ran: false, passed: false, why: `${d.replace(/\/$/, "")}'s modules are not installed on this node: its project cannot be compiled here` };
+    }
+  }
   // Each project is compiled under the base's own config for it, with the node's installed modules for its directory
   // when there are any (resolution otherwise climbs to the root's); --listFiles says which files it compiled, so a
   // changed file no project compiles is known, never taken as passed.
