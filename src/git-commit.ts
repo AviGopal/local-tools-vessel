@@ -220,8 +220,10 @@ async function scanText(text: string, scanner: string, config: string, work: str
     return Array.isArray(found) && found.length > 0 ? { found } : { failed: "the secrets scan's report named nothing" };
   } catch { return { failed: "the secrets scan's report could not be read" }; }
 }
+// What a refused commit said: the hook's words (git sends a hook's stdout to its stderr) and git's own (its stdout, where
+// it says "nothing to commit"), redacted and scanned the same way. stdout last: the end is kept, and git speaks last.
 async function refusedSaying(c: Run, superDir: string, made: Made, scanner: string | null): Promise<{ stderr: string } | { stderr_withheld: string }> {
-  const known = redactSecrets(c.stderr, hidden()).text;
+  const known = redactSecrets([c.stderr, c.stdout].filter((t) => t.trim() !== "").join("\n"), hidden()).text;
   if (!scanner) return { stderr_withheld: "no secrets scanner on this node" };
   const work = mkdtempSync(join(tmpdir(), "commit-said-"));
   try {
@@ -271,7 +273,13 @@ export async function commitInClone(
     // the edit; eb1768f6 oscillated for 30 minutes).
     const head = await out(["rev-parse", "HEAD"], cwd);
     if (head && head !== made.base && (await out(["write-tree"], cwd)) === (await out(["rev-parse", "HEAD^{tree}"], cwd))) {
-      return { error: `nothing new to commit: the clone's tree is already its own commit ${head}`, head };
+      // and whether that commit still has to land: the remote as this clone last saw it (no fetch here)
+      const seen = `refs/remotes/origin/${made.branch}`;
+      const known = (await git(["rev-parse", "--verify", "--quiet", seen], cwd)).exit_code === 0;
+      const there = known && (await git(["merge-base", "--is-ancestor", head, seen], cwd)).exit_code === 0;
+      const landing = !known ? "whether the remote holds it is not known in this clone: land it if it does not"
+        : there ? "the remote holds it" : "the remote does not hold it, as this clone last saw it: land it";
+      return { error: `nothing new to commit: the clone's tree is already its own commit ${head}; ${landing}`, head };
     }
     const judges = await judgesOf((path) => out(["show", `${made.base}:${path}`], cwd), made);
     // The USER's protected list, as the super base this clone was made from states it.
@@ -282,7 +290,9 @@ export async function commitInClone(
     const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv, timeoutMs: COMMIT_TIMEOUT_MS });
     if (c.exit_code !== 0) {
       const said = await refusedSaying(c, superDir, made, scanner);
-      return { error: "the commit was refused (the pinned hook, or git)", ...said, exit_code: c.exit_code };
+      // git's own reason, when it gives one, is git's: the hook is named only when git did not say why
+      const byGit = /nothing to commit|nothing added to commit|empty commit message/i.test(`${c.stdout}\n${c.stderr}`);
+      return { error: byGit ? "the commit was refused by git (not the hook): see what it said" : "the commit was refused (the pinned hook, or git)", ...said, exit_code: c.exit_code };
     }
     const sha = await out(["rev-parse", "HEAD"], cwd);
     const tree = await out(["rev-parse", "HEAD^{tree}"], cwd);

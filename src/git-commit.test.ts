@@ -437,6 +437,17 @@ describe("git_commit", () => {
     const again = await commitInClone(cwd, "fix: once more", undefined, find)
     expect("error" in again && again.error).toContain("nothing new to commit")
     expect(["error" in again && again.head, "error" in again && again.error.includes((first as { sha: string }).sha)]).toEqual([(first as { sha: string }).sha, true])
+    // and says the commit still has to land: the remote, as this clone saw it, does not hold it (eb1768f6: committed at
+    // 09:53, never landed, and told at 15:36 only that "the pinned hook, or git" refused)
+    expect("error" in again && again.error).toContain("the remote does not hold it, as this clone last saw it: land it")
+  })
+
+  it("[MUST-FAIL] a commit git refuses for its own reason is said as git's, with git's words, never blamed on the hook", async () => {
+    const cwd = await clone("demo")
+    writeFileSync(join(cwd, "a.txt"), "changed\n")
+    const r = await commitInClone(cwd, "", undefined, find) // git refuses an empty message itself
+    expect("error" in r && r.error).toBe("the commit was refused by git (not the hook): see what it said")
+    expect((r as { stderr?: string }).stderr ?? "").toContain("empty commit message")
   })
 
   it("[MUST-FAIL] a refused commit says what the hook printed (its stdout and stderr both), cut short, without a key the change added", async () => {
