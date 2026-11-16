@@ -387,6 +387,7 @@ describe("git_commit", () => {
     const r = await commitInClone(cwd, message, undefined, find);
     expect("sha" in r).toBe(true);
     expect(g(cwd, "log", "-1", "--format=%B")).toBe(message);
+    expect("cwd" in r && r.cwd).toBe(cwd); // the clone it is in, for an owner row to bind a call's cwd to
     expect(existsSync(join(cwd, "PWNED")) || existsSync(join(cwd, "PWNED2")) || existsSync(join(T, "PWNED"))).toBe(false);
   });
 
