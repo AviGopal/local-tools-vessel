@@ -565,6 +565,38 @@ describe("git_land", () => {
     } finally { rmSync(mods); symlinkSync(real, mods); }
   });
 
+  it("[MUST-FAIL] an error the change adds inside an installed package counts, even when the base already fails (deployment)", async () => {
+    uiBase(true); uiModules(true);
+    baseWith({ "ui/src/old.ts": 'export const o: number = "already wrong";\n' });
+    const broken = join(T, "runtime", "demo", "ui", "node_modules", "broken-pkg");
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(join(broken, "package.json"), JSON.stringify({ name: "broken-pkg", version: "1.0.0", types: "index.d.ts" }));
+    writeFileSync(join(broken, "index.d.ts"), "export declare const v: NoSuchType;\n");
+    const r = await check({ "ui/src/uses-broken.ts": 'import { v } from "broken-pkg";\nexport const w = v;\n' });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed, x.base_errors])]).toEqual([false, [["ui", false, 1]]]);
+    baseWith({ "ui/src/old.ts": null });
+  });
+
+  it("[MUST-FAIL] a compiler that fails with no error line at all (a crash) does not pass on a clean base (qa, deployment)", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "data.json": null, "listed.ts": null });
+    const mods = join(T, "runtime", "demo", "node_modules");
+    const real = readlinkSync(mods);
+    const fake = join(T, "fake-crash-modules");
+    mkdirSync(join(fake, "typescript", "bin"), { recursive: true });
+    writeFileSync(join(fake, "typescript", "bin", "tsc"), [
+      'const p = process.argv[process.argv.indexOf("-p") + 1] ?? "";',
+      // the base compiles clean and lists its source; the change crashes with a stack trace and no error line
+      'if (p.includes("base-typecheck")) { console.log(process.cwd() + "/base.ts"); process.exit(0); }',
+      'console.log("RangeError: Maximum call stack size exceeded\\n    at checkSourceFile (tsc.js:1:1)"); process.exit(1);',
+    ].join("\n"));
+    rmSync(mods);
+    symlinkSync(fake, mods);
+    try {
+      const r = await check({ "m.ts": "export const n: number = 1;\n" });
+      expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+    } finally { rmSync(mods); symlinkSync(real, mods); }
+  });
+
   it("[MUST-FAIL] a change that deletes a TypeScript file in a base with no project at all has nothing to check", async () => {
     baseWith({ "tsconfig.json": null, "base.ts": null, "ui/tsconfig.json": null, "ui/package.json": null, "ui/src/ok.tsx": null, "data.json": null, "gone2.ts": "export const g = 1;\n" });
     const r = await check({ "gone2.ts": null, "notes2.txt": "n\n" });
