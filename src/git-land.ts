@@ -365,7 +365,10 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
   const ts = changed.split("\n").filter((p) => TS_SOURCE.test(p));
-  const projects = await projectsOf(t, ts);
+  // which project each changed file belongs to: a file of a project that could not be checked is that project's, never
+  // "covered by no project"
+  const ownerOf = new Map<string, string>();
+  const projects = await projectsOf(t, ts, ownerOf);
   if (projects.size === 0) {
     if (ts.length === 0) return { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" };
     // a file the change deletes has nothing to compile: only a file the tree still holds needs a project
@@ -395,6 +398,7 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const baseDir = await baseOut();
   const runs: ProjectRun[] = [];
   const covered = new Set<string>();
+  const skipped = new Set<string>();
   const said: string[] = [];
   for (const [d, config] of projects) {
     const name = d === "" ? "." : d.replace(/\/$/, "");
@@ -403,11 +407,13 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
       const why = `${name}'s modules are not installed on this node: its project cannot be compiled here`;
       runs.push({ dir: name, passed: false, exit_code: -1, checked: false, why });
       said.push(`[${name}] not checked: ${why}`);
+      skipped.add(d);
       continue;
     }
     if (typeof baseDir !== "string") {
       runs.push({ dir: name, passed: false, exit_code: -1, checked: false, why: baseDir.why });
       said.push(`[${name}] not checked: ${baseDir.why}`);
+      skipped.add(d);
       continue;
     }
     // A base whose project read no source of its own (the change adds the project's first file) had nothing to compile:
@@ -420,6 +426,7 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
       const why = `the base does not compile here either: ${before.unplaced[0]}`;
       runs.push({ dir: name, passed: false, exit_code: after.exit_code, checked: false, why });
       said.push(`[${name}] not checked: ${why}`);
+      skipped.add(d);
       continue;
     }
     const added = addedErrors(before.errors, after.errors);
@@ -429,7 +436,7 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
     if (mine.length > 0) said.push(`[${name}]\n${mine.join("\n")}`);
     else if (!passed) said.push(`[${name}] the compiler ended ${after.signalled ? "by a signal" : `with ${after.exit_code}`}`);
   }
-  const uncovered = ts.filter((f) => existsSync(join(dir, f)) && !covered.has(f));
+  const uncovered = ts.filter((f) => existsSync(join(dir, f)) && !covered.has(f) && !skipped.has(ownerOf.get(f) ?? "\0"));
   const out = [...(uncovered.length > 0 ? [`not compiled by any TypeScript project of the base: ${uncovered.join(", ")}`] : []), ...said].join("\n");
   const failed = runs.find((x) => !x.passed);
   // the compiler's errors lead its output: keep the start
@@ -472,7 +479,7 @@ function addedErrors(base: string[], change: string[]): string[] {
 /** The TypeScript projects that check a change, as each directory ("" for the root, else "a/b/") with the base's config
  * there: for each changed TypeScript file, the nearest directory upward that holds a tsconfig.json in the base. A change
  * with no TypeScript file is checked by the root project, when the base has one, as before. */
-async function projectsOf(t: Trusted, files: string[]): Promise<Map<string, string>> {
+async function projectsOf(t: Trusted, files: string[], ownerOf = new Map<string, string>()): Promise<Map<string, string>> {
   const found = new Map<string, string>();
   const none = new Set<string>();
   const has = async (d: string): Promise<boolean> => {
@@ -485,7 +492,10 @@ async function projectsOf(t: Trusted, files: string[]): Promise<Map<string, stri
   if (files.length === 0) await has("");
   for (const f of files) {
     const parts = f.split("/").slice(0, -1);
-    for (let i = parts.length; i >= 0; i--) if (await has(parts.slice(0, i).map((x) => `${x}/`).join(""))) break;
+    for (let i = parts.length; i >= 0; i--) {
+      const d = parts.slice(0, i).map((x) => `${x}/`).join("");
+      if (await has(d)) { ownerOf.set(f, d); break; }
+    }
   }
   return found;
 }

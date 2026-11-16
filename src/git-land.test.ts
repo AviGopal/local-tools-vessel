@@ -451,6 +451,8 @@ describe("git_land", () => {
     uiBase(true); uiModules(false);
     const r = await check({ "ui/src/Reports.tsx": "export const h = 1;\n" });
     expect([r.passed, r.projects] as unknown[]).toEqual([false, [{ dir: "ui", passed: false, exit_code: -1, checked: false, why: "ui's modules are not installed on this node: its project cannot be compiled here" }]]);
+    // its files are that project's, not "covered by no project" (qa, deployment: a false fact on d929's row)
+    expect([r.uncovered, r.out]).toEqual([undefined, "[ui] not checked: ui's modules are not installed on this node: its project cannot be compiled here"]);
     uiModules(true);
   });
 
@@ -500,6 +502,78 @@ describe("git_land", () => {
     baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n" });
     const r = await check({ "m.ts": 'export const n: number = "x";\n' });
     expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+  });
+
+  // qa's legs on a9276c89: each rule the comparison adds, pinned.
+  it("[MUST-FAIL] a base error the change only moves (a line inserted above it) is still the base's", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n', "data.json": null });
+    const r = await check({ "base.ts": 'export const z = 1;\nexport const b: number = "already wrong";\n' });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed, x.base_errors])]).toEqual([true, [[".", true, 1]]]);
+  });
+
+  it("[MUST-FAIL] a second copy of a base error is an error the change adds", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n', "data.json": null });
+    const r = await check({ "base.ts": 'export const b: number = "already wrong";\nexport const c: number = "already wrong";\n' });
+    expect(r.passed).toBe(false);
+  });
+
+  it("[MUST-FAIL] an error with no file location the base did not have is the change's", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "data.json": null });
+    const r = await check({ "base.ts": null }); // the project's only source deleted: the compiler finds no inputs
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+  });
+
+  it("[MUST-FAIL] a location-less error the change causes counts even when the base already fails (file not found)", async () => {
+    // the base lists its files and already has an error in one, so the exit status cannot decide; deleting the other
+    // makes the compiler say a listed file is missing, with no file location
+    baseWith({ "tsconfig.json": JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"] }, files: ["base.ts", "listed.ts"] }),
+      "base.ts": 'export const b: number = "already wrong";\n', "listed.ts": "export const l = 1;\n", "data.json": null });
+    const r = await check({ "listed.ts": null });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "listed.ts": null });
+  });
+
+  it("[MUST-FAIL] a compiler that fails only inside an installed package still fails the change that brought it in", async () => {
+    uiBase(true); uiModules(true);
+    const broken = join(T, "runtime", "demo", "ui", "node_modules", "broken-pkg");
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(join(broken, "package.json"), JSON.stringify({ name: "broken-pkg", version: "1.0.0", types: "index.d.ts" }));
+    writeFileSync(join(broken, "index.d.ts"), "export declare const v: NoSuchType;\n");
+    const r = await check({ "ui/src/uses-broken.ts": 'import { v } from "broken-pkg";\nexport const w = v;\n' });
+    expect(r.passed).toBe(false);
+  });
+
+  it("[MUST-FAIL] a change that deletes a TypeScript file in a base with no project at all has nothing to check", async () => {
+    baseWith({ "tsconfig.json": null, "base.ts": null, "ui/tsconfig.json": null, "ui/package.json": null, "ui/src/ok.tsx": null, "data.json": null, "gone2.ts": "export const g = 1;\n" });
+    const r = await check({ "gone2.ts": null, "notes2.txt": "n\n" });
+    expect(r).toEqual({ ran: false, passed: true, why: "the change only deletes TypeScript files no project of the base compiles: nothing to typecheck" });
+  });
+
+  it("[MUST-FAIL] packages the change carries in a project's node_modules are not what it is compiled against", async () => {
+    uiBase(true); uiModules(true);
+    const r = await check({
+      "ui/node_modules/carried-pkg/index.ts": "export const c: number = 1;\n", // a .d.ts would be refused as silencing the check first
+      "ui/src/uses-carried.ts": 'import { c } from "carried-pkg";\nexport const d = c;\n',
+    });
+    expect(r.passed).toBe(false);
+    expect(r.out).toContain("carried-pkg");
+  });
+
+  it("[MUST-FAIL] a second project with no package.json of its own is compiled with the root's modules, not left unchecked", async () => {
+    uiBase(false); uiModules(false);
+    const r = await check({ "ui/src/fine.ts": "export const f: number = 1;\n" });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed, x.checked])]).toEqual([true, [["ui", true, undefined]]]);
+    uiModules(true);
+  });
+
+  it("[MUST-FAIL] a change to no TypeScript file is still compiled by the root project (a data file a typed import reads)", async () => {
+    baseWith({
+      "tsconfig.json": JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"], module: "esnext", moduleResolution: "bundler", resolveJsonModule: true, esModuleInterop: true }, include: ["*.ts"] }),
+      "data.json": JSON.stringify({ n: 1 }), "base.ts": 'import data from "./data.json";\nexport const n: number = data.n;\n',
+    });
+    const r = await check({ "data.json": JSON.stringify({ n: "not a number" }) });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "data.json": null });
   });
 
   it("[MUST-FAIL] a fix the clone has not committed does not make its tree pass", async () => {
