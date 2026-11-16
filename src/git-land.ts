@@ -241,8 +241,11 @@ const CHECK_OUT_MAX = 4 * 1024;
 export type Typecheck =
   | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; projects?: ProjectRun[]; uncovered?: string[] }
   | { ran: false; passed: boolean; why: string };
-/** One TypeScript project the check ran: its directory in the tree ("." for the root), and how its compiler ended. */
-export type ProjectRun = { dir: string; passed: boolean; exit_code: number };
+/** One TypeScript project the check ran: its directory in the tree ("." for the root); whether the change passed it
+ * (it adds no error the base did not already have); and the base's own errors there, which are the base's, not the
+ * change's. checked false: the project cannot be compiled on this node at all (the base does not compile either), so
+ * nothing is said of the change there. */
+export type ProjectRun = { dir: string; passed: boolean; exit_code: number; checked?: false; why?: string; base_errors?: number };
 
 // A source a TypeScript project compiles.
 const TS_SOURCE = /\.(ts|tsx|mts|cts)$/;
@@ -358,7 +361,7 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
  * TypeScript compiler is that install's, run by this vessel's bun. Only the compiler runs as the shell user, with
  * nothing in its env but PATH, so a config that names a file only root may read cannot show it in the row.
  */
-async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string }): Promise<Typecheck> {
+async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string }, baseOut: () => Promise<string | { why: string }>): Promise<Typecheck> {
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
   const ts = changed.split("\n").filter((p) => TS_SOURCE.test(p));
@@ -382,44 +385,88 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const quiet = silenced(patch, added.split("\n").filter(Boolean));
   if (quiet.length > 0) return { ran: false, passed: false, why: `the change silences the check in ${quiet.join(", ")}` };
   if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
-  // A project with its own package.json in the base resolves its own packages: with none installed for it on this node,
-  // its compiler could only say it cannot find them, which reads as the change's fault. That is the node's state, said
-  // as such (qa: human-surface-vessel's ui/ has no installed modules on node1).
-  for (const d of projects.keys()) {
-    if (d === "") continue;
-    const ownPackage = await t.out(["show", `${t.origin}:${d}package.json`]);
-    if (ownPackage !== null && !existsSync(join(containmentZones(process.env).runtime, made.repo, d, "node_modules"))) {
-      return { ran: false, passed: false, why: `${d.replace(/\/$/, "")}'s modules are not installed on this node: its project cannot be compiled here` };
-    }
-  }
-  // Each project is compiled under the base's own config for it, with the node's installed modules for its directory
-  // when there are any (resolution otherwise climbs to the root's); --listFiles says which files it compiled, so a
-  // changed file no project compiles is known, never taken as passed.
+  // Each project is compiled twice, under the base's own config there: on the base and on the change, each with the
+  // node's installed modules for its directory when there are any (resolution otherwise climbs to the root's), and any
+  // node_modules the change carried removed. The change is judged by the errors it ADDS: an error the base already has
+  // is the base's (counted on the row, never laid on the change). A project whose own package.json names packages this
+  // node has not installed for it, or whose base has an error that belongs to no file (the project as a whole cannot be
+  // compiled here: a type root or a dependency missing), is not checked: said so, with why, and not passed.
+  // --listFiles says which files the change's compile read, so a changed file no project compiles is named.
+  const baseDir = await baseOut();
   const runs: ProjectRun[] = [];
   const covered = new Set<string>();
-  const errors: string[] = [];
+  const said: string[] = [];
   for (const [d, config] of projects) {
-    const at = join(dir, d);
-    mkdirSync(at, { recursive: true, mode: 0o755 });
-    writeFileSync(join(at, "tsconfig.json"), config);
-    if (d !== "") {
-      rmSync(join(at, "node_modules"), { recursive: true, force: true });
-      const own = join(containmentZones(process.env).runtime, made.repo, d, "node_modules");
-      if (existsSync(own)) symlinkSync(own, join(at, "node_modules"));
+    const name = d === "" ? "." : d.replace(/\/$/, "");
+    const own = join(containmentZones(process.env).runtime, made.repo, d, "node_modules");
+    if (d !== "" && (await t.out(["show", `${t.origin}:${d}package.json`])) !== null && !existsSync(own)) {
+      const why = `${name}'s modules are not installed on this node: its project cannot be compiled here`;
+      runs.push({ dir: name, passed: false, exit_code: -1, checked: false, why });
+      said.push(`[${name}] not checked: ${why}`);
+      continue;
     }
-    const r = await asShellUser([realpathSync(process.execPath), tsc, "--noEmit", "--listFiles", "-p", at], dir);
-    const lines = r.out.split("\n");
-    for (const l of lines) if (l.startsWith("./")) covered.add(l.slice(2));
-    const said = lines.filter((l) => !l.startsWith("./") && !l.includes("/node_modules/") && l.trim() !== "").join("\n");
-    if (said !== "") errors.push(`[${d === "" ? "." : d.replace(/\/$/, "")}]\n${said}`);
-    runs.push({ dir: d === "" ? "." : d.replace(/\/$/, ""), passed: r.exit_code === 0 && !r.signalled, exit_code: r.exit_code });
+    if (typeof baseDir !== "string") {
+      runs.push({ dir: name, passed: false, exit_code: -1, checked: false, why: baseDir.why });
+      said.push(`[${name}] not checked: ${baseDir.why}`);
+      continue;
+    }
+    // A base whose project read no source of its own (the change adds the project's first file) had nothing to compile:
+    // that is not a base that cannot compile, so it is taken as having no errors.
+    const compiled = await compileProject(tsc, baseDir, d, config, own);
+    const before = compiled.listed.some((f) => !f.split("/").includes("node_modules")) ? compiled : { ...compiled, errors: [], unplaced: [], exit_code: 0 };
+    const after = await compileProject(tsc, dir, d, config, own);
+    for (const f of after.listed) covered.add(f);
+    if (before.unplaced.length > 0) {
+      const why = `the base does not compile here either: ${before.unplaced[0]}`;
+      runs.push({ dir: name, passed: false, exit_code: after.exit_code, checked: false, why });
+      said.push(`[${name}] not checked: ${why}`);
+      continue;
+    }
+    const added = addedErrors(before.errors, after.errors);
+    const passed = added.length === 0 && after.unplaced.length === 0 && (after.exit_code === 0 || before.exit_code !== 0) && !after.signalled;
+    runs.push({ dir: name, passed, exit_code: after.exit_code, ...(before.errors.length > 0 ? { base_errors: before.errors.length } : {}) });
+    const mine = [...after.unplaced, ...added];
+    if (mine.length > 0) said.push(`[${name}]\n${mine.join("\n")}`);
+    else if (!passed) said.push(`[${name}] the compiler ended ${after.signalled ? "by a signal" : `with ${after.exit_code}`}`);
   }
   const uncovered = ts.filter((f) => existsSync(join(dir, f)) && !covered.has(f));
-  const out = [...(uncovered.length > 0 ? [`not compiled by any TypeScript project of the base: ${uncovered.join(", ")}`] : []), ...errors].join("\n");
+  const out = [...(uncovered.length > 0 ? [`not compiled by any TypeScript project of the base: ${uncovered.join(", ")}`] : []), ...said].join("\n");
   const failed = runs.find((x) => !x.passed);
   // the compiler's errors lead its output: keep the start
   return { ran: true, passed: failed === undefined && uncovered.length === 0, exit_code: failed?.exit_code ?? 0,
     out: out.slice(0, CHECK_OUT_MAX), truncated: out.length > CHECK_OUT_MAX, projects: runs, ...(uncovered.length > 0 ? { uncovered } : {}) };
+}
+
+/** One project of a written-out tree compiled under the base's config: the files it read, its errors that name a file
+ * (each without its line and column, so an error the change only moved is the same error), and those that name none. */
+async function compileProject(tsc: string, tree: string, d: string, config: string, own: string): Promise<{ listed: string[]; errors: string[]; unplaced: string[]; exit_code: number; signalled: boolean }> {
+  const at = join(tree, d);
+  mkdirSync(at, { recursive: true, mode: 0o755 });
+  writeFileSync(join(at, "tsconfig.json"), config);
+  if (d !== "") {
+    rmSync(join(at, "node_modules"), { recursive: true, force: true });
+    if (existsSync(own)) symlinkSync(own, join(at, "node_modules"));
+  }
+  const r = await asShellUser([realpathSync(process.execPath), tsc, "--noEmit", "--listFiles", "-p", at], tree);
+  const lines = r.out.split("\n").map((l) => l.trimEnd()).filter((l) => l !== "");
+  const listed = lines.filter((l) => l.startsWith("./")).map((l) => l.slice(2));
+  const errs = lines.filter((l) => !l.startsWith("./") && !l.includes("/node_modules/") && /\berror TS\d+:/.test(l));
+  const errors = errs.filter((l) => /^[^\s(]+\(\d+,\d+\): error TS/.test(l)).map((l) => l.replace(/\(\d+,\d+\)/, ""));
+  const unplaced = errs.filter((l) => !/^[^\s(]+\(\d+,\d+\): error TS/.test(l));
+  return { listed, errors, unplaced, exit_code: r.exit_code, signalled: r.signalled };
+}
+
+/** The change's errors the base does not have, as many times as the change has them more often. */
+function addedErrors(base: string[], change: string[]): string[] {
+  const left = new Map<string, number>();
+  for (const e of base) left.set(e, (left.get(e) ?? 0) + 1);
+  const out: string[] = [];
+  for (const e of change) {
+    const n = left.get(e) ?? 0;
+    if (n > 0) left.set(e, n - 1);
+    else out.push(e);
+  }
+  return out;
 }
 
 /** The TypeScript projects that check a change, as each directory ("" for the root, else "a/b/") with the base's config
@@ -576,7 +623,9 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     if (diff === null) return { error: "the change's diff could not be read" };
     const behind = "the clone's base is behind origin's branch: this change cannot land as it is; ask for a fresh clone and make the edits again";
     const dir = ff ? await timed(steps, "write_out", () => writeOut(t, made, work)) : { why: behind };
-    const typecheck: Typecheck = ff ? await timed(steps, "typecheck", () => typecheckTree(t, made, dir)) : { ran: false, passed: false, why: behind };
+    const typecheck: Typecheck = ff
+      ? await timed(steps, "typecheck", () => typecheckTree(t, made, dir, () => writeOut(t, made, work, t.origin, "base-typecheck")))
+      : { ran: false, passed: false, why: behind };
     const baseDir = gap === null || "error" in gap ? { why: "no gap" } : ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,

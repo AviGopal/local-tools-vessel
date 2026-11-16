@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
 import { diffClone, gapOf, landClone, passedIn } from "./git-land";
+import type { Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
 
@@ -403,78 +404,102 @@ describe("git_land", () => {
     expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true, exit_code: 0 });
   });
 
-  // A base with a second project of its own (a ui/ directory with its own tsconfig.json, as a vessel's front end has):
-  // a change there is compiled by that project, and a TypeScript file no project compiles is not passed (research:
-  // d929's tree called an undefined function in ui/ and its typecheck said passed, since only the root project ran).
-  const uiProject = () => {
+  // The typecheck compiles every project a changed TypeScript file belongs to, on the base and on the change, and judges
+  // the change by the errors it adds (research; d929's tree called an undefined function in ui/ while only the root ran).
+  // Each test commits the base it needs (null removes a file), so it holds alone and in any order.
+  const baseWith = (files: Record<string, string | null>) => {
     const seed = join(T, "seed");
     g(seed, "pull", "-q", "origin", "dev");
-    mkdirSync(join(seed, "ui", "src"), { recursive: true });
-    writeFileSync(join(seed, "ui", "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"], jsx: "preserve" }, include: ["src/**/*.ts", "src/**/*.tsx"] }));
-    writeFileSync(join(seed, "ui", "src", "ok.tsx"), "export const ok = 1;\n");
-    commitAll(seed, "a ui project"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    for (const [f, text] of Object.entries(files)) {
+      if (text === null) { rmSync(join(seed, f), { force: true }); continue; }
+      mkdirSync(join(seed, f, ".."), { recursive: true });
+      writeFileSync(join(seed, f), text);
+    }
+    if (Bun.spawnSync(["git", "-C", seed, "status", "--porcelain"]).stdout.toString().trim() === "") return; // already so
+    commitAll(seed, "base for a typecheck test"); g(seed, "push", "-q", "origin", "HEAD:dev");
+  };
+  const ROOT_TS = JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"] }, include: ["*.ts"] });
+  const UI_TS = JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"], jsx: "preserve" }, include: ["src/**/*.ts", "src/**/*.tsx"] });
+  const uiModules = (installed: boolean) => {
+    const mods = join(T, "runtime", "demo", "ui", "node_modules");
+    rmSync(mods, { recursive: true, force: true });
+    if (!installed) return;
+    mkdirSync(join(mods, "ui-only-pkg"), { recursive: true });
+    writeFileSync(join(mods, "ui-only-pkg", "package.json"), JSON.stringify({ name: "ui-only-pkg", version: "1.0.0", types: "index.d.ts" }));
+    writeFileSync(join(mods, "ui-only-pkg", "index.d.ts"), "export declare const one: number;\n");
+  };
+  const uiBase = (pkg: boolean) => baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "ui/tsconfig.json": UI_TS,
+    "ui/package.json": pkg ? JSON.stringify({ name: "ui", dependencies: { "ui-only-pkg": "1.0.0" } }) : null,
+    "ui/src/ok.tsx": pkg ? 'import { one } from "ui-only-pkg";\nexport const ok = one;\n' : "export const ok = 1;\n", "ui/src/old.ts": null });
+  const check = async (files: Record<string, string | null>) => {
+    const c = await changeOf(files);
+    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    return r.typecheck as Typecheck & { projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string };
   };
 
-  it("[MUST-FAIL] a change inside a second project is compiled by that project: an undefined call there does not pass", async () => {
-    uiProject();
-    const bad = await changeOf({ "ui/src/Reports.tsx": "export const h = parseHeadline(\"x\");\n" });
-    const r = await diffClone(bad.cwd, made.get(bad.cwd)!, ["file"]);
-    if (!("tree" in r)) throw new Error(JSON.stringify(r));
-    expect(r.typecheck).toMatchObject({ ran: true, passed: false });
-    const tc = r.typecheck as { out: string; projects: Array<{ dir: string; passed: boolean }> };
-    expect(tc.projects.map((x) => [x.dir, x.passed])).toEqual([["ui", false]]); // only the project that holds the change
-    expect(tc.out).toContain("parseHeadline");
-    const good = await changeOf({ "ui/src/Reports.tsx": "export const h = 1;\n" });
-    const ok = await diffClone(good.cwd, made.get(good.cwd)!, ["file"]);
-    expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true });
+  it("[MUST-FAIL] an undefined call in a second project's file does not pass, named in that project; a correct one passes", async () => {
+    uiBase(true); uiModules(true);
+    const bad = await check({ "ui/src/Reports.tsx": 'export const h = parseHeadline("x");\n' });
+    expect([bad.passed, bad.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [["ui", false]]]);
+    expect(bad.out).toContain("parseHeadline");
+    const good = await check({ "ui/src/Reports.tsx": 'import { one } from "ui-only-pkg";\nexport const h = one + 1;\n' });
+    expect([good.passed, good.projects?.map((x) => [x.dir, x.passed])]).toEqual([true, [["ui", true]]]);
   });
 
-  it("[MUST-FAIL] a project with its own packages, none installed on this node, is not compiled: the node's state is said (qa)", async () => {
-    const seed = join(T, "seed");
-    g(seed, "pull", "-q", "origin", "dev");
-    writeFileSync(join(seed, "ui", "package.json"), JSON.stringify({ name: "ui", dependencies: { "ui-only-pkg": "1.0.0" } }));
-    commitAll(seed, "ui packages"); g(seed, "push", "-q", "origin", "HEAD:dev");
-    const c = await changeOf({ "ui/src/uses.ts": 'import { one } from "ui-only-pkg";\nexport const two: number = one + 1;\n' });
-    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
-    expect("tree" in r && r.typecheck).toEqual({ ran: false, passed: false, why: "ui's modules are not installed on this node: its project cannot be compiled here" });
-    // installed: compiled, and a correct change passes
-    const mods = join(T, "runtime", "demo", "ui", "node_modules", "ui-only-pkg");
-    mkdirSync(mods, { recursive: true });
-    writeFileSync(join(mods, "package.json"), JSON.stringify({ name: "ui-only-pkg", version: "1.0.0", types: "index.d.ts" }));
-    writeFileSync(join(mods, "index.d.ts"), "export declare const one: number;\n");
-    const again = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
-    expect("tree" in again && again.typecheck).toMatchObject({ ran: true, passed: true, projects: [{ dir: "ui", passed: true }] });
+  it("[MUST-FAIL] a project whose own packages are not installed on this node is not checked, and says so (qa)", async () => {
+    uiBase(true); uiModules(false);
+    const r = await check({ "ui/src/Reports.tsx": "export const h = 1;\n" });
+    expect([r.passed, r.projects] as unknown[]).toEqual([false, [{ dir: "ui", passed: false, exit_code: -1, checked: false, why: "ui's modules are not installed on this node: its project cannot be compiled here" }]]);
+    uiModules(true);
+  });
+
+  it("[MUST-FAIL] a project whose base cannot be compiled at all is not checked, never blamed on the change (research)", async () => {
+    uiBase(false);
+    baseWith({ "ui/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: ["a-type-root-nobody-installed"], lib: ["es2022"] }, include: ["src/**/*.ts", "src/**/*.tsx"] }) });
+    const r = await check({ "ui/src/Reports.tsx": "export const h = 1;\n" });
+    expect(r.passed).toBe(false);
+    expect(r.projects?.map((x) => [x.dir, x.checked])).toEqual([["ui", false]]);
+    expect(String(r.projects?.[0]?.why)).toContain("the base does not compile here either");
+  });
+
+  it("[MUST-FAIL] an error the base already has is the base's: a change that adds none passes, one that adds one does not", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n' });
+    const clean = await check({ "m.ts": "export const n: number = 1;\n" });
+    expect([clean.passed, clean.projects?.map((x) => [x.dir, x.passed, x.base_errors])]).toEqual([true, [[".", true, 1]]]);
+    const worse = await check({ "m.ts": 'export const n: number = "new wrong";\n' });
+    expect([worse.passed, worse.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+    baseWith({ "base.ts": "export const b = 1;\n" });
   });
 
   it("[MUST-FAIL] a change in two projects runs both, and passes only if both do", async () => {
-    const c = await changeOf({ "m.ts": "export const n: number = 1;\n", "ui/src/two.ts": 'export const s: number = "x";\n' });
-    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
-    const tc = ("tree" in r && r.typecheck) as { passed: boolean; projects: Array<{ dir: string; passed: boolean }> };
-    expect([tc.passed, tc.projects.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", true], ["ui", false]]]);
+    uiBase(true); uiModules(true);
+    const r = await check({ "m.ts": "export const n: number = 1;\n", "ui/src/two.ts": 'export const s: number = "x";\n' });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", true], ["ui", false]]]);
+  });
+
+  it("[MUST-FAIL] a TypeScript file no project of the base compiles is named, and only that keeps the tree from passing", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n" });
+    const r = await check({ "tools/loose.ts": "export const x: number = 1;\n" });
+    expect([r.passed, r.uncovered, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, ["tools/loose.ts"], [[".", true]]]);
+  });
+
+  it("[MUST-FAIL] a TypeScript file in a base with no TypeScript project at all does not pass", async () => {
+    baseWith({ "tsconfig.json": null, "base.ts": null, "ui/tsconfig.json": null, "ui/package.json": null, "ui/src/ok.tsx": null });
+    const r = await check({ "lone.ts": "export const x = 1;\n" });
+    expect(r).toEqual({ ran: false, passed: false, why: "no TypeScript project of the base covers lone.ts" });
   });
 
   it("a change that only deletes a TypeScript file no project compiles has nothing to check", async () => {
-    const seed = join(T, "seed");
-    g(seed, "pull", "-q", "origin", "dev");
-    mkdirSync(join(seed, "loose"), { recursive: true });
-    writeFileSync(join(seed, "loose", "gone.ts"), "export const g = 1;\n");
-    writeFileSync(join(seed, "base.ts"), "export const b = 1;\n"); // the root project has files of its own, as a real one does
-    commitAll(seed, "a loose file"); g(seed, "push", "-q", "origin", "HEAD:dev");
-    const c = await changeOf({ "loose/gone.ts": null, "notes.txt": "n\n" });
-    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
-    expect("tree" in r && r.typecheck).toMatchObject({ passed: true });
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "loose/gone.ts": "export const g = 1;\n" });
+    const r = await check({ "loose/gone.ts": null, "notes.txt": "n\n" });
+    expect(r.passed).toBe(true);
   });
 
-  it("[MUST-FAIL] a TypeScript file no project of the base compiles is not passed, and is named", async () => {
-    const c = await changeOf({ "tools/loose.ts": "export const x: number = 1;\n" });
-    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
-    expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false, uncovered: ["tools/loose.ts"] });
-  });
-
-  it("[MUST-FAIL] a change at the root is still compiled by the root project", async () => {
-    const c = await changeOf({ "m.ts": 'export const n: number = "x";\n' });
-    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
-    expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false, projects: [{ dir: ".", passed: false }] });
+  it("[MUST-FAIL] a change at the root is compiled by the root project", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n" });
+    const r = await check({ "m.ts": 'export const n: number = "x";\n' });
+    expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
   });
 
   it("[MUST-FAIL] a fix the clone has not committed does not make its tree pass", async () => {
