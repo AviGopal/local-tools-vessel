@@ -237,10 +237,13 @@ const DIFF_MAX = 64 * 1024;
 const CHECK_OUT_MAX = 4 * 1024;
 
 /** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or did not run, and why. passed is
- * what git_land reads: true only when the compiler passed, or when the base has no TypeScript config to check by. */
+ * what git_land reads: true only when the compiler passed, or when the base has no TypeScript config to check by.
+ * checked false: no project could be compiled on this node at all, so nothing was compiled and nothing is said of the
+ * change (ran false, no passed: a check that did not run is not one that failed), with each project's why. */
 export type Typecheck =
   | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; projects?: ProjectRun[]; uncovered?: string[] }
-  | { ran: false; passed: boolean; why: string };
+  | { ran: false; passed: boolean; why: string }
+  | { ran: false; checked: false; why: string; projects: ProjectRun[]; uncovered?: string[] };
 /** One TypeScript project the check ran: its directory in the tree ("." for the root); whether the change passed it
  * (it adds no error the base did not already have); and the base's own errors there, which are the base's, not the
  * change's. checked false: the project cannot be compiled on this node at all (the base does not compile either), so
@@ -438,6 +441,12 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   }
   const uncovered = ts.filter((f) => existsSync(join(dir, f)) && !covered.has(f) && !skipped.has(ownerOf.get(f) ?? "\0"));
   const out = [...(uncovered.length > 0 ? [`not compiled by any TypeScript project of the base: ${uncovered.join(", ")}`] : []), ...said].join("\n");
+  // Nothing compiled: every project the change touches could not be compiled here. That is a check that did not run, not
+  // one that failed (a land grader read d929's passed false as "does not compile", agf_4x6rwwvu871p): ran false, checked
+  // false, no passed, and each project's why. git_land still lands only on passed true.
+  if (runs.length > 0 && runs.every((x) => x.checked === false)) {
+    return { ran: false, checked: false, why: said.join("; "), projects: runs, ...(uncovered.length > 0 ? { uncovered } : {}) };
+  }
   const failed = runs.find((x) => !x.passed);
   // the compiler's errors lead its output: keep the start
   return { ran: true, passed: failed === undefined && uncovered.length === 0, exit_code: failed?.exit_code ?? 0,

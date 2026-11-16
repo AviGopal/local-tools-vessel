@@ -435,7 +435,9 @@ describe("git_land", () => {
     const c = await changeOf(files);
     const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
-    return r.typecheck as Typecheck & { projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string };
+    // every field a typecheck may carry, read without narrowing (a check that did not run has no passed)
+    return r.typecheck as { ran: boolean; passed?: boolean; checked?: false; why?: string; exit_code?: number;
+      projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string };
   };
 
   it("[MUST-FAIL] an undefined call in a second project's file does not pass, named in that project; a correct one passes", async () => {
@@ -450,9 +452,10 @@ describe("git_land", () => {
   it("[MUST-FAIL] a project whose own packages are not installed on this node is not checked, and says so (qa)", async () => {
     uiBase(true); uiModules(false);
     const r = await check({ "ui/src/Reports.tsx": "export const h = 1;\n" });
-    expect([r.passed, r.projects] as unknown[]).toEqual([false, [{ dir: "ui", passed: false, exit_code: -1, checked: false, why: "ui's modules are not installed on this node: its project cannot be compiled here" }]]);
+    // its only project could not be compiled: the check did not run (agf_4x6rwwvu871p), never passed false
+    expect([r.ran, r.checked, "passed" in r, r.projects] as unknown[]).toEqual([false, false, false, [{ dir: "ui", passed: false, exit_code: -1, checked: false, why: "ui's modules are not installed on this node: its project cannot be compiled here" }]]);
     // its files are that project's, not "covered by no project" (qa, deployment: a false fact on d929's row)
-    expect([r.uncovered, r.out]).toEqual([undefined, "[ui] not checked: ui's modules are not installed on this node: its project cannot be compiled here"]);
+    expect([r.uncovered, r.why]).toEqual([undefined, "[ui] not checked: ui's modules are not installed on this node: its project cannot be compiled here"]);
     uiModules(true);
   });
 
@@ -460,9 +463,18 @@ describe("git_land", () => {
     uiBase(false);
     baseWith({ "ui/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: ["a-type-root-nobody-installed"], lib: ["es2022"] }, include: ["src/**/*.ts", "src/**/*.tsx"] }) });
     const r = await check({ "ui/src/Reports.tsx": "export const h = 1;\n" });
-    expect(r.passed).toBe(false);
+    expect([r.ran, "passed" in r]).toEqual([false, false]);
     expect(r.projects?.map((x) => [x.dir, x.checked])).toEqual([["ui", false]]);
     expect(String(r.projects?.[0]?.why)).toContain("the base does not compile here either");
+  });
+
+  it("[MUST-FAIL] one project checked beside one that cannot be: the check ran, and an unchecked project still keeps it from passing", async () => {
+    uiBase(true); uiModules(false);
+    const r = await check({ "ui/src/Reports.tsx": "export const h = 1;\n", "m.ts": "export const n: number = 1;\n" });
+    expect([r.ran, r.passed, r.projects?.map((x) => [x.dir, x.checked ?? true]).sort()]).toEqual([true, false, [[".", true], ["ui", false]]]);
+    const bad = await check({ "ui/src/Reports.tsx": "export const h = 1;\n", "m.ts": 'export const n: number = "wrong";\n' });
+    expect([bad.ran, bad.passed]).toEqual([true, false]);
+    uiModules(true);
   });
 
   it("[MUST-FAIL] an error the base already has is the base's: a change that adds none passes, one that adds one does not", async () => {
