@@ -170,7 +170,7 @@ function systemHooksDir(): string | null {
 
 export type CommitResult =
   | { shape: "gitCommitResult"; sha: string; tree: string; base: string; changed: string[]; needs_person: string[]; scan: "ran" | "skipped" }
-  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number };
+  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number; head?: string };
 
 // What a refused commit printed, as the reason the walk is shown: git's stderr, where git also sends everything a hook
 // prints (its stdout too). A hook may print what it read (a test's output, a scan's finding, a file in the tree), and
@@ -266,6 +266,13 @@ export async function commitInClone(
     if (add.exit_code !== 0) return { error: "git add failed", stderr: add.stderr.slice(-2000), exit_code: add.exit_code };
     const changed = (await out(["diff", "--cached", "--name-only", "--no-renames", made.base], cwd) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to commit: the clone does not differ from its base" };
+    // A tree the clone already committed is nothing new: said as such, with the commit that holds it, rather than as a
+    // refusal (git refuses an empty commit, and the walk read "the pinned hook, or git" as a check failing and undid
+    // the edit; eb1768f6 oscillated for 30 minutes).
+    const head = await out(["rev-parse", "HEAD"], cwd);
+    if (head && head !== made.base && (await out(["write-tree"], cwd)) === (await out(["rev-parse", "HEAD^{tree}"], cwd))) {
+      return { error: `nothing new to commit: the clone's tree is already its own commit ${head}`, head };
+    }
     const judges = await judgesOf((path) => out(["show", `${made.base}:${path}`], cwd), made);
     // The USER's protected list, as the super base this clone was made from states it.
     const list = await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`);

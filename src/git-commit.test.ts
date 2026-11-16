@@ -428,6 +428,16 @@ describe("git_commit", () => {
     expect(Bun.which("gitleaks")).not.toBeNull();
   });
 
+  it("[MUST-FAIL] a tree the clone already committed is nothing new, said with that commit, not as a refusal", async () => {
+    const cwd = await clone("demo")
+    writeFileSync(join(cwd, "a.txt"), "changed once\n")
+    const first = await commitInClone(cwd, "fix: once", undefined, find)
+    expect("sha" in first).toBe(true)
+    const again = await commitInClone(cwd, "fix: once more", undefined, find)
+    expect("error" in again && again.error).toContain("nothing new to commit")
+    expect(["error" in again && again.head, "error" in again && again.error.includes((first as { sha: string }).sha)]).toEqual([(first as { sha: string }).sha, true])
+  })
+
   it("[MUST-FAIL] a refused commit says what the hook printed (its stdout and stderr both), cut short, without a key the change added", async () => {
     const r = await refuse(`${"x".repeat(5000)}\naws_key=${ADDED}\nshort=abc\n`);
     const said = r.stderr ?? "";
