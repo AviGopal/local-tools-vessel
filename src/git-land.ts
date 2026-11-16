@@ -457,7 +457,8 @@ async function compileProject(tsc: string, tree: string, d: string, config: stri
   const r = await asShellUser([realpathSync(process.execPath), tsc, "--noEmit", "--listFiles", "-p", at], tree);
   const lines = r.out.split("\n").map((l) => l.trimEnd()).filter((l) => l !== "");
   const listed = lines.filter((l) => l.startsWith("./")).map((l) => l.slice(2));
-  const errs = lines.filter((l) => !l.startsWith("./") && !l.includes("/node_modules/") && /\berror TS\d+:/.test(l));
+  // every error the compiler gives counts, an installed package's included: one the base shares cancels in the comparison
+  const errs = lines.filter((l) => !l.startsWith("./") && /\berror TS\d+:/.test(l));
   const errors = errs.filter((l) => /^[^\s(]+\(\d+,\d+\): error TS/.test(l)).map((l) => l.replace(/\(\d+,\d+\)/, ""));
   const unplaced = errs.filter((l) => !/^[^\s(]+\(\d+,\d+\): error TS/.test(l));
   return { listed, errors, unplaced, exit_code: r.exit_code, signalled: r.signalled };

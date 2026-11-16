@@ -2,7 +2,7 @@
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
@@ -541,6 +541,28 @@ describe("git_land", () => {
     writeFileSync(join(broken, "index.d.ts"), "export declare const v: NoSuchType;\n");
     const r = await check({ "ui/src/uses-broken.ts": 'import { v } from "broken-pkg";\nexport const w = v;\n' });
     expect(r.passed).toBe(false);
+  });
+
+  it("[MUST-FAIL] a compiler ended by a signal does not pass, even when the base already has errors (qa)", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n', "data.json": null, "listed.ts": null });
+    // a stand-in compiler where the gate finds the installed one: on the base it reports the base's error; on the
+    // change it is killed by a signal before it says anything
+    const mods = join(T, "runtime", "demo", "node_modules");
+    const real = readlinkSync(mods);
+    const fake = join(T, "fake-modules");
+    mkdirSync(join(fake, "typescript", "bin"), { recursive: true });
+    writeFileSync(join(fake, "typescript", "bin", "tsc"), [
+      'const p = process.argv[process.argv.indexOf("-p") + 1] ?? "";',
+      // the base's compile reads its source (listed as tsc lists it, absolute) and has the base's error
+      'if (p.includes("base-typecheck")) { console.log(process.cwd() + "/base.ts"); console.log("base.ts(1,14): error TS2322: Type \'string\' is not assignable to type \'number\'."); process.exit(2); }',
+      'process.kill(process.pid, "SIGKILL");',
+    ].join("\n"));
+    rmSync(mods);
+    symlinkSync(fake, mods);
+    try {
+      const r = await check({ "m.ts": "export const n: number = 1;\n" });
+      expect([r.passed, r.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
+    } finally { rmSync(mods); symlinkSync(real, mods); }
   });
 
   it("[MUST-FAIL] a change that deletes a TypeScript file in a base with no project at all has nothing to check", async () => {
