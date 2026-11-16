@@ -10,12 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { withClones } from "./clones-lock.js";
-import { refreshed } from "./git-worktree.js";
+import { clonePlace, refreshed } from "./git-worktree.js";
 import { madeClone } from "./walk-rows.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
 export type Refreshed = { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string;
-  refreshed_from: string; carried?: "uncommitted" | "commits" };
+  refreshed_from: string; carried?: "uncommitted" | "commits"; head?: string; tree?: string };
 
 /** The clone brought to its copy's HEAD (refreshed), why it could not be (error, with the paths), or null when it is not
  *  behind or is not a clone a walk row records (then nothing is touched). */
@@ -39,7 +39,7 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
     const r = await refreshed(clone.dir, m.base, to, branch, source);
     if (!r.ok) return { error: `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`, conflicts: r.conflicts };
     return { refreshed: { shape: "gitWorktree", cwd: clone.dir, repo: clone.repo, branch, base: to, super_base: superBase, origin_url: origin,
-      refreshed_from: m.base, ...(r.carried ? { carried: r.carried } : {}) } };
+      refreshed_from: m.base, ...(r.carried ? { carried: r.carried } : {}), ...(await clonePlace(clone.dir)) } };
   });
 }
 

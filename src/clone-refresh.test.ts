@@ -83,6 +83,8 @@ describe("a clone behind the copy is brought onto it in place", () => {
     const to = moveOrigin("b.txt", "b3\n");
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made));
     expect(r).toMatchObject({ refreshed: { base: to, carried: "commits" } });
+    // where the clone is now, as fields (the walk reads its newest tree from them, never from words)
+    expect(r).toMatchObject({ refreshed: { head: g(c.cwd, "rev-parse", "HEAD"), tree: g(c.cwd, "rev-parse", "HEAD^{tree}") } });
     // (f) the refreshed clone is a new tree: git_land takes a verdict only on its own tree, so one on the old tree lands nothing
     expect(g(c.cwd, "rev-parse", "HEAD^{tree}")).not.toBe(oldTree);
     expect(g(c.cwd, "log", "--format=%s", `${to}..HEAD`)).toBe("own change");

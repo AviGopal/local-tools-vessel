@@ -291,6 +291,7 @@ describe("git_worktree", () => {
     const tip = g(demo, "rev-parse", "HEAD");
     const wm = await ask("sel-m2") as unknown as Record<string, unknown>;
     expect(wm).toMatchObject({ cwd: m.cwd, base: tip, refreshed_from: m.base, carried: "commits" });
+    expect(wm).toMatchObject({ head: g(m.cwd, "rev-parse", "HEAD"), tree: g(m.cwd, "rev-parse", "HEAD^{tree}") }) // where it is now
     expect(g(m.cwd, "merge-base", "--is-ancestor", tip, "HEAD")).toBe(""); // on the new tip
     expect(g(m.cwd, "log", "-1", "--format=%s")).toBe("m's change"); // its commit, replayed
     expect(readFileSync(join(m.cwd, "c.txt"), "utf8")).toBe("push\n"); // and the push's change under it

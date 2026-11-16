@@ -90,7 +90,8 @@ export async function intoTrusted(cwd: string, made: Made, work: string, transpo
 export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
       needs_person: string[]; verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
-  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person" };
+  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person";
+      clone?: { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; head: string; tree: string } };
 
 /**
  * Where the USER's protected list is read for a change: never from the change's own tree. A super-repo change is
@@ -152,7 +153,10 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     if (sc !== 0) return { error: `the secrets scan did not run cleanly (exit ${sc})` };
 
     const verdict = await approved(d, made, tree, needs_person);
-    if ("error" in verdict) return { ...verdict, tree, needs_person };
+    // refused: where the clone is now, as a row the walk records (its newest tree, read by no words), so the next move is a
+    // diff of this tree rather than the land asked again
+    if ("error" in verdict) return { ...verdict, tree, needs_person,
+      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, head, tree } };
 
     // No hooks run beside the credential: an empty directory this vessel owns.
     const hooksDir = mkdtempSync(join(work, "hooks-"));

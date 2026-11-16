@@ -120,7 +120,10 @@ describe("git_land", () => {
     const before = originHead();
     const { cwd, tree } = await change("a.txt", "two\n");
     table = [];
-    expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no verdict approves this tree");
+    const refused = await landClone(cwd, deps) as { error: string; clone?: Record<string, unknown> }
+    expect(String(refused.error)).toContain("no verdict approves this tree");
+    // refused: where the clone is now, as a row the walk records, so the next move is a diff of this tree
+    expect(refused.clone).toMatchObject({ shape: "gitWorktree", cwd, tree })
     table = personOn("0".repeat(40), "v1");
     expect("error" in (await landClone(cwd, deps))).toBe(true);
     expect(originHead()).toBe(before);

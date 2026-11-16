@@ -21,7 +21,7 @@ export { walkTreesDir };
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export type Worktree =
-  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string;
+  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string; head?: string; tree?: string;
       // What a refresh carried onto the new base: the clone's uncommitted edits, or its commits (replayed).
       carried?: "uncommitted" | "commits";
       // A clone of this request's whose change could not be carried onto the new base: where it is, and which paths the
@@ -121,7 +121,7 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     const r = await refreshed(stale.cwd, String(stale.made.base), base, branch, source);
     if (r.ok) {
       return { shape: "gitWorktree", cwd: stale.cwd, repo, branch, base, super_base: superBase, origin_url: origin, refreshed_from: String(stale.made.base),
-        ...(r.carried ? { carried: r.carried } : {}) };
+        ...(r.carried ? { carried: r.carried } : {}), ...(await clonePlace(stale.cwd)) };
     }
     if (r.changed) notCarried = { cwd: stale.cwd, from: String(stale.made.base), conflicts: r.conflicts, why: r.why };
   }
@@ -155,6 +155,13 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
 // Not ok: changed says whether the clone held a change (so a fresh clone does not hide it), conflicts which paths `to`
 // also changed, why in words. Nothing here edits a file or resolves a conflict.
 export type Refresh = { ok: true; carried?: "uncommitted" | "commits" } | { ok: false; changed: boolean; conflicts: string[]; why: string };
+// Where a clone is now: its HEAD and HEAD's tree, as fields, so a reader (the walk's newest tree) never parses a sha out
+// of words. Read after a move; nothing is said when either cannot be read.
+export async function clonePlace(cwd: string): Promise<{ head: string; tree: string } | Record<string, never>> {
+  const at = async (ref: string) => { const r = await git(["-C", cwd, "rev-parse", ref], tmpdir()); return r.exit_code === 0 ? r.stdout.trim() : ""; };
+  const [head, tree] = [await at("HEAD"), await at("HEAD^{tree}")];
+  return head && tree ? { head, tree } : {};
+}
 export async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
   const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
   const out = async (args: string[], timeoutMs?: number) => { const r = await run(args, timeoutMs); return r.exit_code === 0 ? r.stdout.trim() : null; };
