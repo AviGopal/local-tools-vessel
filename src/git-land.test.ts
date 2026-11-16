@@ -403,6 +403,44 @@ describe("git_land", () => {
     expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true, exit_code: 0 });
   });
 
+  // A base with a second project of its own (a ui/ directory with its own tsconfig.json, as a vessel's front end has):
+  // a change there is compiled by that project, and a TypeScript file no project compiles is not passed (research:
+  // d929's tree called an undefined function in ui/ and its typecheck said passed, since only the root project ran).
+  const uiProject = () => {
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    mkdirSync(join(seed, "ui", "src"), { recursive: true });
+    writeFileSync(join(seed, "ui", "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, types: [], lib: ["es2022"], jsx: "preserve" }, include: ["src/**/*.ts", "src/**/*.tsx"] }));
+    writeFileSync(join(seed, "ui", "src", "ok.tsx"), "export const ok = 1;\n");
+    commitAll(seed, "a ui project"); g(seed, "push", "-q", "origin", "HEAD:dev");
+  };
+
+  it("[MUST-FAIL] a change inside a second project is compiled by that project: an undefined call there does not pass", async () => {
+    uiProject();
+    const bad = await changeOf({ "ui/src/Reports.tsx": "export const h = parseHeadline(\"x\");\n" });
+    const r = await diffClone(bad.cwd, made.get(bad.cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.typecheck).toMatchObject({ ran: true, passed: false });
+    const tc = r.typecheck as { out: string; projects: Array<{ dir: string; passed: boolean }> };
+    expect(tc.projects.map((x) => [x.dir, x.passed])).toEqual([["ui", false]]); // only the project that holds the change
+    expect(tc.out).toContain("parseHeadline");
+    const good = await changeOf({ "ui/src/Reports.tsx": "export const h = 1;\n" });
+    const ok = await diffClone(good.cwd, made.get(good.cwd)!, ["file"]);
+    expect("tree" in ok && ok.typecheck).toMatchObject({ ran: true, passed: true });
+  });
+
+  it("[MUST-FAIL] a TypeScript file no project of the base compiles is not passed, and is named", async () => {
+    const c = await changeOf({ "tools/loose.ts": "export const x: number = 1;\n" });
+    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false, uncovered: ["tools/loose.ts"] });
+  });
+
+  it("[MUST-FAIL] a change at the root is still compiled by the root project", async () => {
+    const c = await changeOf({ "m.ts": 'export const n: number = "x";\n' });
+    const r = await diffClone(c.cwd, made.get(c.cwd)!, ["file"]);
+    expect("tree" in r && r.typecheck).toMatchObject({ ran: true, passed: false, projects: [{ dir: ".", passed: false }] });
+  });
+
   it("[MUST-FAIL] a fix the clone has not committed does not make its tree pass", async () => {
     const { cwd } = await changeOf({ "m.ts": 'export const n: number = "x";\n' });
     writeFileSync(join(cwd, "m.ts"), "export const n: number = 1;\n"); // fixed in the clone, not in the tree that lands

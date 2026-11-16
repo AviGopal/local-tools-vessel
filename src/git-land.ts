@@ -239,8 +239,13 @@ const CHECK_OUT_MAX = 4 * 1024;
 /** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or did not run, and why. passed is
  * what git_land reads: true only when the compiler passed, or when the base has no TypeScript config to check by. */
 export type Typecheck =
-  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean }
+  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; projects?: ProjectRun[]; uncovered?: string[] }
   | { ran: false; passed: boolean; why: string };
+/** One TypeScript project the check ran: its directory in the tree ("." for the root), and how its compiler ended. */
+export type ProjectRun = { dir: string; passed: boolean; exit_code: number };
+
+// A source a TypeScript project compiles.
+const TS_SOURCE = /\.(ts|tsx|mts|cts)$/;
 
 // What the typecheck reads besides the source: a change to any of these would choose how it is checked, so a tree that
 // changes one is not checked under it, and does not pass.
@@ -354,13 +359,18 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
  * nothing in its env but PATH, so a config that names a file only root may read cannot show it in the row.
  */
 async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string }): Promise<Typecheck> {
-  const config = await t.out(["show", `${t.origin}:tsconfig.json`]);
-  if (config === null) return { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" };
+  const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
+  if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
+  const ts = changed.split("\n").filter((p) => TS_SOURCE.test(p));
+  const projects = await projectsOf(t, ts);
+  if (projects.size === 0) {
+    return ts.length === 0
+      ? { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" }
+      : { ran: false, passed: false, why: `no TypeScript project of the base covers ${ts.join(", ")}` };
+  }
   const installed = join(containmentZones(process.env).runtime, made.repo, "node_modules");
   const tsc = join(installed, "typescript", "bin", "tsc");
   if (!existsSync(tsc)) return { ran: false, passed: false, why: `no TypeScript is installed for ${made.repo} on this node` };
-  const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
-  if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
   const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
   if (chosen.length > 0) return { ran: false, passed: false, why: `the change edits what chooses how it is checked: ${chosen.join(", ")}` };
   const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);
@@ -369,10 +379,55 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const quiet = silenced(patch, added.split("\n").filter(Boolean));
   if (quiet.length > 0) return { ran: false, passed: false, why: `the change silences the check in ${quiet.join(", ")}` };
   if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
-  writeFileSync(join(dir, "tsconfig.json"), config);
-  const r = await asShellUser([realpathSync(process.execPath), tsc, "--noEmit", "-p", dir], dir);
+  // Each project is compiled under the base's own config for it, with the node's installed modules for its directory
+  // when there are any (resolution otherwise climbs to the root's); --listFiles says which files it compiled, so a
+  // changed file no project compiles is known, never taken as passed.
+  const runs: ProjectRun[] = [];
+  const covered = new Set<string>();
+  const errors: string[] = [];
+  for (const [d, config] of projects) {
+    const at = join(dir, d);
+    mkdirSync(at, { recursive: true, mode: 0o755 });
+    writeFileSync(join(at, "tsconfig.json"), config);
+    if (d !== "") {
+      rmSync(join(at, "node_modules"), { recursive: true, force: true });
+      const own = join(containmentZones(process.env).runtime, made.repo, d, "node_modules");
+      if (existsSync(own)) symlinkSync(own, join(at, "node_modules"));
+    }
+    const r = await asShellUser([realpathSync(process.execPath), tsc, "--noEmit", "--listFiles", "-p", at], dir);
+    const lines = r.out.split("\n");
+    for (const l of lines) if (l.startsWith("./")) covered.add(l.slice(2));
+    const said = lines.filter((l) => !l.startsWith("./") && !l.includes("/node_modules/") && l.trim() !== "").join("\n");
+    if (said !== "") errors.push(`[${d === "" ? "." : d.replace(/\/$/, "")}]\n${said}`);
+    runs.push({ dir: d === "" ? "." : d.replace(/\/$/, ""), passed: r.exit_code === 0 && !r.signalled, exit_code: r.exit_code });
+  }
+  const uncovered = ts.filter((f) => existsSync(join(dir, f)) && !covered.has(f));
+  const out = [...(uncovered.length > 0 ? [`not compiled by any TypeScript project of the base: ${uncovered.join(", ")}`] : []), ...errors].join("\n");
+  const failed = runs.find((x) => !x.passed);
   // the compiler's errors lead its output: keep the start
-  return { ran: true, passed: r.exit_code === 0 && !r.signalled, exit_code: r.exit_code, out: r.out.slice(0, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+  return { ran: true, passed: failed === undefined && uncovered.length === 0, exit_code: failed?.exit_code ?? 0,
+    out: out.slice(0, CHECK_OUT_MAX), truncated: out.length > CHECK_OUT_MAX, projects: runs, ...(uncovered.length > 0 ? { uncovered } : {}) };
+}
+
+/** The TypeScript projects that check a change, as each directory ("" for the root, else "a/b/") with the base's config
+ * there: for each changed TypeScript file, the nearest directory upward that holds a tsconfig.json in the base. A change
+ * with no TypeScript file is checked by the root project, when the base has one, as before. */
+async function projectsOf(t: Trusted, files: string[]): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  const none = new Set<string>();
+  const has = async (d: string): Promise<boolean> => {
+    if (found.has(d)) return true;
+    if (none.has(d)) return false;
+    const c = await t.out(["show", `${t.origin}:${d}tsconfig.json`]);
+    if (c === null) none.add(d); else found.set(d, c);
+    return c !== null;
+  };
+  if (files.length === 0) await has("");
+  for (const f of files) {
+    const parts = f.split("/").slice(0, -1);
+    for (let i = parts.length; i >= 0; i--) if (await has(parts.slice(0, i).map((x) => `${x}/`).join(""))) break;
+  }
+  return found;
 }
 
 /**
