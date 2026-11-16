@@ -90,7 +90,7 @@ export async function intoTrusted(cwd: string, made: Made, work: string, transpo
 export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
       needs_person: string[]; verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
-  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person";
+  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person"; unserved?: string;
       clone?: { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; head: string; tree: string } };
 
 /**
@@ -108,6 +108,15 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
   const d = { ...DEFAULTS, ...deps };
   const made = await d.find(cwd);
   if ("error" in made) return made;
+  // THE BRANCH A REPOSITORY TAKES LANDINGS ON is the owner's to name (the USER: "dev only"): the newest owner repository
+  // row for the clone's repo, not retired, names it. With none, nothing lands, and the refusal is the owner's gap (unserved:
+  // no debit to the request); a clone made on another branch is refused, naming both. No branch is named here.
+  const repos = await d.rows({ shape: "repository", where: { repo: made.repo } });
+  if (!Array.isArray(repos)) return repos;
+  const owned = repos.filter((r) => r.role === "owner").sort((a, b) => Number(a.seq ?? 0) - Number(b.seq ?? 0)).at(-1);
+  const branch = owned !== undefined && owned.retired !== true && typeof owned.branch === "string" && owned.branch !== "" ? owned.branch : undefined;
+  if (branch === undefined) return { error: `no repository row names a working branch for ${made.repo}: nothing lands`, unserved: "repository" };
+  if (made.branch !== branch) return { error: `the clone is on ${made.branch}; ${made.repo} takes landings on ${branch} only` };
   const gitleaks = Bun.which("gitleaks", { PATH: process.env.PATH ?? "" });
   if (!gitleaks) return { error: "no secrets scanner (gitleaks) on this node: nothing would stop a leak, so nothing lands" };
   const superDir = containmentZones(process.env).supers[0];

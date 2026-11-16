@@ -46,7 +46,9 @@ const SCOPE = (excluded: string[]) => JSON.stringify({ autonomyScope: { excluded
 const made = new Map<string, Made>();
 const find = async (cwd: string) => made.get(cwd) ?? { error: "0 walk rows" };
 let table: Row[] = [];
-const rows = async (q: Query): Promise<Row[]> => table.filter((r) =>
+// the owner's repository row: demo takes landings on dev (a leg below changes it)
+let repoRows: Row[] = [{ id: "repo-demo", seq: 1, shape: "repository", role: "owner", repo: "demo", branch: "dev" } as Row];
+const rows = async (q: Query): Promise<Row[]> => [...repoRows, ...table].filter((r) =>
   (q.shape === undefined || r.shape === q.shape) && (q.ids === undefined || q.ids.includes(r.id)) &&
   Object.entries(q.where ?? {}).every(([k, v]) => String(r[k]) === String(v)));
 const deps = { find, rows, transports: ["file"] };
@@ -113,6 +115,31 @@ const scanned = (name: string, fn: () => Promise<void>) => it(SCANNER ? name : `
   const before = originHead();
   expect(String((await landClone(cwd, deps) as { error: string }).error)).toContain("no secrets scanner");
   expect(originHead()).toBe(before);
+});
+
+describe("git_land's branch", () => {
+  scanned("[MUST-FAIL] lands only on the branch the owner's repository row names: none named or retired refuses as the owner's gap, another refuses naming both", async () => {
+    const before = originHead();
+    const { cwd, tree } = await change("branch.txt", "b\n");
+    table = personOn(tree, "vb");
+    const saved = repoRows;
+    try {
+      repoRows = [];
+      const none = await landClone(cwd, deps) as { error: string; unserved?: string };
+      repoRows = [{ ...saved[0], retired: true } as Row];
+      const retired = await landClone(cwd, deps) as { error: string; unserved?: string };
+      repoRows = [{ ...saved[0], branch: "main" } as Row];
+      const other = await landClone(cwd, deps) as { error: string; unserved?: string };
+      repoRows = [{ ...saved[0], branch: "main" } as Row, { ...saved[0], id: "repo-demo-2", seq: 2, role: "described", branch: "dev" } as Row];
+      const notOwner = await landClone(cwd, deps) as { error: string };
+      expect([none.unserved, none.error]).toEqual(["repository", "no repository row names a working branch for demo: nothing lands"]);
+      expect([retired.unserved, other.unserved, other.error]).toEqual(["repository", undefined, "the clone is on dev; demo takes landings on main only"]);
+      expect(notOwner.error).toBe("the clone is on dev; demo takes landings on main only"); // only the owner's row names it
+      expect(originHead()).toBe(before);
+    } finally {
+      repoRows = saved;
+    }
+  });
 });
 
 describe("git_land", () => {
