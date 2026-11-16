@@ -222,7 +222,7 @@ async function scanText(text: string, scanner: string, config: string, work: str
 }
 // What a refused commit said: the hook's words (git sends a hook's stdout to its stderr) and git's own (its stdout, where
 // it says "nothing to commit"), redacted and scanned the same way. stdout last: the end is kept, and git speaks last.
-async function refusedSaying(c: Run, superDir: string, made: Made, scanner: string | null): Promise<{ stderr: string } | { stderr_withheld: string }> {
+export async function refusedSaying(c: Run, superDir: string, made: Made, scanner: string | null): Promise<{ stderr: string } | { stderr_withheld: string }> {
   const known = redactSecrets([c.stderr, c.stdout].filter((t) => t.trim() !== "").join("\n"), hidden()).text;
   if (!scanner) return { stderr_withheld: "no secrets scanner on this node" };
   const work = mkdtempSync(join(tmpdir(), "commit-said-"));

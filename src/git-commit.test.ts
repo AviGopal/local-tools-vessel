@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commitInClone } from "./git-commit";
+import { commitInClone, refusedSaying } from "./git-commit";
 import { makeWorktree } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
 import { callsRead, episodeRead, recordRead, walkCall } from "./walk-call-rows.test-helper";
@@ -440,6 +440,16 @@ describe("git_commit", () => {
     // and says the commit still has to land: the remote, as this clone saw it, does not hold it (eb1768f6: committed at
     // 09:53, never landed, and told at 15:36 only that "the pinned hook, or git" refused)
     expect("error" in again && again.error).toContain("the remote does not hold it, as this clone last saw it: land it")
+  })
+
+  it("[MUST-FAIL] what a refusal says carries git's own words from its stdout, after the hook's from its stderr (deployment L5)", async () => {
+    // git says "nothing to commit" on its stdout; the checks before git now catch that case, so it is fed here directly
+    const cwd = await clone("demo")
+    const m = await find(cwd)
+    if ("error" in m) throw new Error(m.error)
+    const said = await refusedSaying({ stdout: "nothing to commit, working tree clean\n", stderr: "hook: checked\n", exit_code: 1 }, SUPER, m, Bun.which("gitleaks"))
+    const text = "stderr" in said ? said.stderr : ""
+    expect([text.includes("nothing to commit, working tree clean"), text.indexOf("hook: checked") < text.indexOf("nothing to commit")]).toEqual([true, true])
   })
 
   it("[MUST-FAIL] a commit git refuses for its own reason is said as git's, with git's words, never blamed on the hook", async () => {
