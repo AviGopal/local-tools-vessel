@@ -665,7 +665,8 @@ describe("git_commit", () => {
     const pinned = () => readdirSync(tmpdir()).filter((n) => n.startsWith("pinned-hooks-")).length;
     const before = pinned();
     const cwd = await clone("demo");
-    expect(String((await commitInClone(cwd, "nothing", undefined, find) as { error: string }).error)).toContain("nothing to commit");
+    // a fresh clone (HEAD is its base) with nothing changed is said as such, never as a commit already made (deployment)
+    expect(String((await commitInClone(cwd, "nothing", undefined, find) as { error: string }).error)).toBe("nothing to commit: the clone does not differ from its base");
     writeFileSync(join(cwd, "a.txt"), "seven\n");
     await commitInClone(cwd, "something", undefined, find);
     expect(pinned()).toBe(before);

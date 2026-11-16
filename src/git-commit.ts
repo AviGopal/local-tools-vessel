@@ -287,7 +287,8 @@ export async function commitInClone(
     if ("error" in list) return { error: list.error };
     const needs_person = [...changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p))), ...protectedHits(changed, made.repo, list.excluded)];
 
-    const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv, timeoutMs: COMMIT_TIMEOUT_MS });
+    // git's own words in the C locale, so a refusal it gives its reason for is read as git's on any node (qa)
+    const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv: { ...extraEnv, LC_ALL: "C" }, timeoutMs: COMMIT_TIMEOUT_MS });
     if (c.exit_code !== 0) {
       const said = await refusedSaying(c, superDir, made, scanner);
       // git's own reason, when it gives one, is git's: the hook is named only when git did not say why
