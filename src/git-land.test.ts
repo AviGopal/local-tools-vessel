@@ -966,6 +966,16 @@ describe("what a gap's check keeps of its test run", () => {
     expect(kept).toContain("(fail) MUST-FAIL (3): what runs is the approved commit")
     expect(kept).toContain(" 1 fail")
   })
+  it("[MUST-FAIL] a failing test's block longer than the bound keeps its end: the assertion and the \"(fail)\" line", async () => {
+    const { keptCheckOut } = await import("./git-land")
+    const logged = Array.from({ length: 300 }, (_, i) => `console: step ${i} of the runner wrote this line`).join("\n")
+    const long = ["src/script-runner.test.ts:", passes(5, 0), logged, block, passes(5, 5), " 10 pass", " 1 fail"].join("\n")
+    expect(logged.length).toBeGreaterThan(4096)
+    const kept = keptCheckOut(long, 4096)
+    expect(kept.length).toBeLessThanOrEqual(4096)
+    expect(kept).toContain('Expected: "commit_unavailable"\nReceived: "no_super_repo_clone"')
+    expect(kept).toContain("(fail) MUST-FAIL (3): what runs is the approved commit")
+  })
   it("a run within the bound is kept whole, and one with no failing test keeps its end (a guard)", async () => {
     const { keptCheckOut } = await import("./git-land")
     expect(keptCheckOut("(pass) a\n 1 pass", 4096)).toBe("(pass) a\n 1 pass")
