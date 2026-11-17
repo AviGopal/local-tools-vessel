@@ -5,6 +5,8 @@
 // name: the call's own argument values (args[k] → <k>) and the failure row's own ids (its call_id, selection_ref and
 // input_refs). What is left is what the tool said, the same for every call that failed the same way.
 export type Row = { id: string; seq: number; shape: string; role?: string; [k: string]: unknown }
+/** The walk's word that a root offered no move for its owner's stall_rule selections (walk loop.ts stalls). */
+export const STALL = "stall"
 export type ClassKey = string
 export type Klass = { key: ClassKey; tool: string; kind?: string; refused?: string; blames?: string; waits_for?: string;
   status_band: string; signature: string; example: string; failures: string[]; roots: string[]; first_seq: number; last_seq: number; infra: boolean }
@@ -41,7 +43,22 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
   const sels = new Map(pool.filter((r) => r.shape === "selection").map((s) => [s.id, s]))
   const byId = new Map(pool.map((r) => [r.id, r]))
   const out = new Map<ClassKey, Klass>()
-  for (const f of pool.filter((r) => r.shape === "failure" && r.role === "walk" && typeof r.call_id === "string").sort((a, b) => a.seq - b.seq)) {
+  for (const f of pool.filter((r) => r.shape === "failure" && r.role === "walk" && (typeof r.call_id === "string" || r.kind === STALL)).sort((a, b) => a.seq - b.seq)) {
+    // A root the walk said has no move (kind stall: no call, no selection of its own) is a class of its own: tool stall,
+    // its root the row's, keyed by its fields alone. Never work for the walk (a walk cannot repair its own stall): the
+    // gap is the fact that the root sat with no move, for whoever reads gaps.
+    if (f.kind === STALL) {
+      const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([STALL, STALL])).digest("hex").slice(0, 24)
+      const root = typeof f.root === "string" && f.root !== "" ? f.root : "move:stall"
+      if (ownRoots.get(key)?.has(root) === true) continue
+      const k = out.get(key) ?? { key, tool: STALL, kind: STALL, status_band: band(f.status), signature: "", example: "",
+        failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: true }
+      k.failures.push(f.id)
+      if (!k.roots.includes(root)) k.roots.push(root)
+      k.last_seq = f.seq
+      out.set(key, k)
+      continue
+    }
     // A refusal that says it waits (waits_for: a gate waiting on a person's verdict, lifted from the tool's answer) is
     // the gate working, not a failure: no class, so never an infra gap nor work for the walk. records stamps it blames
     // callee for the fold's sake (no debit); here it is not a failure at all.

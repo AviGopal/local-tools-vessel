@@ -122,6 +122,18 @@ describe("walk_failure_detect", () => {
     expect(gapRows().at(-1)).toMatchObject({ status: "open", reopened: 1 });
   });
 
+  it("[MUST-FAIL] roots the walk said have no move are filed as one stall gap, not walkable, and it closes on quiet alone", async () => {
+    rule();
+    // the stall row as the walk writes it: no call, no selection; its root named
+    const stall = (root: string) => rows.push({ id: `st${++head}`, seq: head, shape: "failure", role: "walk", kind: "stall", root, selections: 60, since_seq: head - 1, input_refs: [root] });
+    for (const root of ["82ac", "5449", "010a"]) stall(root);
+    const r = await report();
+    expect(r.classes[0]).toMatchObject({ action: "opened", tool: "stall", walkable: false, roots: 3 });
+    expect(gapRows()[0]).toMatchObject({ tool: "stall", status: "open", walkable: false });
+    filler(1100); // no root said stalled since: quiet alone closes it (there is no tool to call)
+    expect((await report()).classes[0].action).toBe("closed");
+  });
+
   it("[MUST-FAIL] failures on a gap's own repair are not counted toward it", async () => {
     rule();
     for (const root of ["w1", "w2", "w3"]) missing(root, `/trees/${root}`);

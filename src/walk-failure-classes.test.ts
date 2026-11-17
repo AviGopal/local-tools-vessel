@@ -20,6 +20,16 @@ describe("walk failure classes", () => {
     expect(k[0]).toMatchObject({ tool: "git_diff", roots: ["w1", "w2"], signature: "no such directory: <cwd>" })
   })
 
+  test("[MUST-FAIL] a root the walk said has no move (kind stall: no call, no selection) is a class of its own, never work for the walk", () => {
+    // the stall row in the form the walk writes it (walk loop.ts stalls): no call_id, no selection_ref, its root named
+    const stall = (id: string, seq: number, root: string) => ({ id, seq, shape: "failure", role: "walk", kind: "stall", root, selections: 60, since_seq: seq - 1, input_refs: [root] })
+    const rows = [stall("st1", 100, "82ac"), stall("st2", 200, "5449"), ...call("w1", "git_diff", {}, { status: 422, body: "x" })]
+    const k = classesOf(rows)
+    const st = k.find((c) => c.tool === "stall")
+    expect([k.length, st?.roots, st?.failures, st?.infra, st?.signature]).toEqual([2, ["82ac", "5449"], ["st1", "st2"], true, ""])
+    expect(k.find((c) => c.tool === "git_diff")?.roots).toEqual(["w1"]) // a call's failure classed as before
+  })
+
   test("[MUST-FAIL] the literal unbound placeholder is one class across roots (157 on node1)", () => {
     const body = "no such directory: {{ sig.in[0].cwd }}"
     const rows = Array.from({ length: 5 }, (_, i) => call(`w${i}`, "git_diff", { cwd: "{{ sig.in[0].cwd }}" }, { status: 422, body })).flat()

@@ -14,7 +14,7 @@
 // writes nothing new. A class whose failures records stamped as blaming the callee (an outage, a timeout, a crash in
 // what was called) is filed walkable false: shown, not offered to the walk, no one's debit (records reads that field). Failures on a gap's own
 // repair are not counted toward it. Nothing here names a tool, a shape of failure or a threshold.
-import { classesOf, type Klass, type Row } from "./walk-failure-classes";
+import { STALL, classesOf, type Klass, type Row } from "./walk-failure-classes";
 import { resolveRecords } from "./walk-rows";
 
 export const WRITER = "walk-failure-detector";
@@ -67,7 +67,9 @@ const writeGap = async (row: Record<string, unknown>): Promise<boolean> => {
 
 // Whether the class's tool was called since `after` and that call did not fail this way: a move of the same tool (a
 // started hop of it, or a selection of it with no hop) with no failure of its own call or selection.
+// A stall class has no tool to call: quiet alone (no root said stalled for quiet_rows rows) is its evidence.
 const exercised = (pool: Row[], k: Klass, after: number): boolean => {
+  if (k.tool === STALL) return true;
   const failed = new Set(pool.filter((r) => r.shape === "failure" && r.role === "walk").flatMap((f) => [String(f.call_id), String(f.selection_ref)]));
   return pool.some((r) => r.seq > after && r.role === "walk" && (
     (r.shape === "hop" && r.phase === "started" && String(r.pointer_type) === k.tool && !failed.has(String(r.call_id))) ||
