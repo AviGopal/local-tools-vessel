@@ -942,3 +942,34 @@ describe("git_land: the USER's protected list", () => {
     expect("error" in (await protectedListAt(async () => SCOPE([]), "base"))).toBe(true);
   });
 });
+
+describe("what a gap's check keeps of its test run", () => {
+  // 90b4's shape: the failing test's block early, much passing output after it, the summary at the end.
+  const passes = (n: number, from: number) => Array.from({ length: n }, (_, i) => `(pass) script runner > case ${from + i} keeps its output in order [${i}.0ms]`).join("\n")
+  const block = [
+    "error: expect(received).toBe(expected)",
+    "",
+    'Expected: "commit_unavailable"',
+    'Received: "no_super_repo_clone"',
+    "",
+    "      at <anonymous> (src/script-runner.test.ts:88:5)",
+    "(fail) MUST-FAIL (3): what runs is the approved commit, never the working tree > no super-repo clone on this node -> refused [3.10ms]",
+  ].join("\n")
+  const run = ["src/script-runner.test.ts:", passes(20, 0), block, passes(160, 20), "", " 180 pass", " 1 fail", "Ran 111 tests across 1 files. [2.41s]"].join("\n")
+  it("[MUST-FAIL] a run longer than the bound keeps the first failing test's assertion whole, and the summary", async () => {
+    const { keptCheckOut } = await import("./git-land")
+    expect(run.length).toBeGreaterThan(4096 * 2)
+    expect(run.slice(-4096)).not.toContain('Expected: "commit_unavailable"') // a plain tail cut loses it
+    const kept = keptCheckOut(run, 4096)
+    expect(kept.length).toBeLessThanOrEqual(4096)
+    expect(kept).toContain('Expected: "commit_unavailable"\nReceived: "no_super_repo_clone"')
+    expect(kept).toContain("(fail) MUST-FAIL (3): what runs is the approved commit")
+    expect(kept).toContain(" 1 fail")
+  })
+  it("a run within the bound is kept whole, and one with no failing test keeps its end (a guard)", async () => {
+    const { keptCheckOut } = await import("./git-land")
+    expect(keptCheckOut("(pass) a\n 1 pass", 4096)).toBe("(pass) a\n 1 pass")
+    const green = [passes(200, 0), " 200 pass", " 0 fail"].join("\n")
+    expect(keptCheckOut(green, 4096)).toBe(green.slice(-4096))
+  })
+})

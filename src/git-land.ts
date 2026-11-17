@@ -248,6 +248,23 @@ const DIFF_MAX = 64 * 1024;
 
 // What the typecheck said, cut like the diff: a grader reads errors, not a whole log.
 const CHECK_OUT_MAX = 4 * 1024;
+// A test run's output, kept within max: whole when it fits; otherwise the first failing test's block whole (its error,
+// the assertion and what was received, which the runner prints just before its "(fail)" line), then as much of the end
+// (the summary) as the rest of max holds. A plain tail cut lost the assertion whenever later output passed max (5 of 7
+// diffs on one gap); the one who fixes it reads this. With no failing test, the end, as before.
+export const keptCheckOut = (out: string, max: number): string => {
+  if (out.length <= max) return out;
+  const lines = out.split("\n");
+  const failed = lines.findIndex((l) => l.startsWith("(fail) "));
+  if (failed < 0) return out.slice(-max);
+  let from = failed;
+  while (from > 0 && !/^\((pass|fail|skip|todo)\) /.test(lines[from - 1])) from--;
+  const block = lines.slice(from, failed + 1).join("\n");
+  if (block.length >= max) return block.slice(0, max);
+  const gap = "\n…\n";
+  const rest = max - block.length - gap.length;
+  return rest > 0 ? block + gap + out.slice(-rest) : block;
+};
 
 /** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or did not run, and why. passed is
  * what git_land reads: true only when the compiler passed, or when the base has no TypeScript config to check by.
@@ -597,7 +614,7 @@ async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef |
   const red = gap.only_tests.length === 0 ? b.exit_code !== 0 : gap.only_tests.some((n) => !before.has(n));
   if (!red) return { ...id, ran: false, passed: false, why: "the gap's test already passes on the base" };
   const r = await runCheck(dir, gap.test_file);
-  const tail = { exit_code: r.exit_code, out: r.out.slice(-CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+  const tail = { exit_code: r.exit_code, out: keptCheckOut(r.out, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
   if (r.passed === null) return { ...id, ran: true, passed: false, ...tail, out: `the test run wrote no report\n${tail.out}`, regressed: [] };
   const passed = r.passed;
   const named = gap.only_tests.length === 0 ? r.exit_code === 0 : gap.only_tests.every((n) => passed.has(n));
