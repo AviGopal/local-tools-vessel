@@ -965,6 +965,18 @@ describe("what a gap's check keeps of its test run", () => {
     expect(kept).toContain('Expected: "commit_unavailable"\nReceived: "no_super_repo_clone"')
     expect(kept).toContain("(fail) MUST-FAIL (3): what runs is the approved commit")
     expect(kept).toContain(" 1 fail")
+    expect(kept.startsWith("error: expect(received).toBe(expected)")).toBe(true) // the block starts after the last result line
+  })
+  it("[MUST-FAIL] a run of exactly the bound is kept whole, and a block too long to leave room for the summary is kept alone", async () => {
+    const { keptCheckOut } = await import("./git-land")
+    const small = "(pass) a\n(fail) b\n 1 fail"
+    expect(keptCheckOut(small, small.length)).toBe(small)
+    const fail = run.indexOf("error: expect(received)")
+    const own = run.slice(fail, run.indexOf("[3.10ms]", fail) + "[3.10ms]".length)
+    for (const room of [2, 3]) {
+      const kept = keptCheckOut(run, own.length + room) // no room for the gap and any summary: the block alone
+      expect(kept).toBe(own)
+    }
   })
   it("[MUST-FAIL] a failing test's block longer than the bound keeps its end: the assertion and the \"(fail)\" line", async () => {
     const { keptCheckOut } = await import("./git-land")
