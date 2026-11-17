@@ -967,7 +967,7 @@ describe("what a gap's check keeps of its test run", () => {
     expect(kept).toContain(" 1 fail")
     expect(kept.startsWith("error: expect(received).toBe(expected)")).toBe(true) // the block starts after the last result line
   })
-  it("[MUST-FAIL] a run of exactly the bound is kept whole, and a block too long to leave room for the summary is kept alone", async () => {
+  it("[GUARD] a run of exactly the bound is kept whole, and a block too long to leave room for the summary is kept alone", async () => {
     const { keptCheckOut } = await import("./git-land")
     const small = "(pass) a\n(fail) b\n 1 fail"
     expect(keptCheckOut(small, small.length)).toBe(small)
