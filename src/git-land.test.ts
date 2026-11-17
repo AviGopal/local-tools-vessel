@@ -797,6 +797,21 @@ describe("git_land", () => {
     expect(await check({ "calc.ts": forge })).toMatchObject({ ran: true, passed: false, regressed: ["add > zero"] });
   });
 
+  it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {
+    // the base from the cases above: add subtracts, so "add > adds" fails there. This change still fails it, then prints
+    // much on the runner's own stream while "add > zero" runs, so a plain cut of the run's end would keep only that.
+    const gap = { gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] };
+    const noisy = 'const noise = Array.from({ length: 80 }, (_, i) => "noise line " + i + " " + "x".repeat(60)).join("\\n");\n' +
+      "export const add = (a: number, b: number): number => { if (a === 0) console.error(noise); return a - b; };\n";
+    const { cwd } = await changeOf({ "calc.ts": noisy });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"], gap as never);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.check).toMatchObject({ ran: true, passed: false, truncated: true });
+    const out = String((r.check as { out?: unknown }).out);
+    expect(out).toContain("noise line 79"); // the end is kept too
+    expect(out).toContain("Expected: 3"); // and the failing test's own words
+  });
+
   it("[MUST-FAIL] a test passed only when the runner's report has it with no failure, error or skip", () => {
     const xml = '<?xml version="1.0"?><testsuites name="bun test" tests="4"><testsuite name="calc.test.ts" file="calc.test.ts">' +
       '<testcase name="top" classname="" /><testsuite name="add &amp; sub"><testcase name="adds" classname="add" />' +
@@ -966,6 +981,20 @@ describe("what a gap's check keeps of its test run", () => {
     expect(kept).toContain("(fail) MUST-FAIL (3): what runs is the approved commit")
     expect(kept).toContain(" 1 fail")
     expect(kept.startsWith("error: expect(received).toBe(expected)")).toBe(true) // the block starts after the last result line
+  })
+  it("[MUST-FAIL] of two failing tests, the first's assertion is the one kept, never the second's", async () => {
+    const { keptCheckOut } = await import("./git-land")
+    const failing = (name: string, want: string, got: string) => [
+      "error: expect(received).toBe(expected)", "", `Expected: "${want}"`, `Received: "${got}"`, "",
+      `(fail) ${name} [1.00ms]`].join("\n")
+    const two = ["src/script-runner.test.ts:", passes(5, 0), failing("first > refuses", "FIRST_WANTED", "FIRST_GOT"), passes(10, 5),
+      failing("second > refuses", "SECOND_WANTED", "SECOND_GOT"), passes(160, 15), "", " 175 pass", " 2 fail"].join("\n")
+    expect(two.length).toBeGreaterThan(4096 * 2)
+    expect(two.slice(-4096)).not.toContain("SECOND_WANTED") // the end alone holds neither
+    const kept = keptCheckOut(two, 4096)
+    expect(kept).toContain('Expected: "FIRST_WANTED"\nReceived: "FIRST_GOT"')
+    expect(kept).not.toContain("SECOND_WANTED")
+    expect(kept).toContain(" 2 fail")
   })
   it("[GUARD] a run of exactly the bound is kept whole, and a block too long to leave room for the summary is kept alone", async () => {
     const { keptCheckOut } = await import("./git-land")
