@@ -438,6 +438,14 @@ function inRepo(path: string): string {
   return path;
 }
 
+// AN OK EDIT NAMES THE FILE AS IT LEFT IT: `after`, the sha256 of the file's bytes on disk after the call. Every ok
+// edit of one file otherwise answers the same {path, ok}, so a reader that compares results (the walk's news rule,
+// keyed by the owner's news_key row) cannot tell a different edit, a revert included, from a repeat: the edit is never
+// diffed or judged, and the root sits. With it, an edit that leaves different bytes is a different result, and one that
+// leaves the same bytes as before is the same.
+const afterOf = async (path: string): Promise<string> =>
+  new Bun.CryptoHasher("sha256").update(await Bun.file(path).arrayBuffer()).digest("hex");
+
 const fsEdit: ResolverHandler = async (ctx) => {
   // Read from impulse.pointer too — callers (patch_with_tools) dispatch via the
   // impulse envelope, so top-level-only reads (the prior bug) made every call
@@ -487,7 +495,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
   }
   try {
     const text = await Bun.file(path).text();
-    if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, () => new_string)); return { shape: "fileEditResult", path, ok: true }; }
+    if (text.includes(old_string)) { await Bun.write(path, text.replace(old_string, () => new_string)); return { shape: "fileEditResult", path, ok: true, after: await afterOf(path) }; }
     // NORMALIZED FALLBACK (task #18): the drafter often reproduces ambiguous unicode
     // (em/en-dash, curly quotes, NBSP) imperfectly, so an otherwise-correct edit fails
     // exact-match. Normalize both sides length-preservingly (char-for-char) and, if the
@@ -497,14 +505,14 @@ const fsEdit: ResolverHandler = async (ctx) => {
     const oi = nText.indexOf(nOld);
     if (oi !== -1 && nOld.length > 0 && nText.indexOf(nOld, oi + 1) === -1) {
       await Bun.write(path, text.slice(0, oi) + new_string + text.slice(oi + nOld.length));
-      return { shape: "fileEditResult", path, ok: true, normalized_match: true };
+      return { shape: "fileEditResult", path, ok: true, normalized_match: true, after: await afterOf(path) };
     }
     // AN EDIT ALREADY MADE. Asked again after it ended ok, its old_string is gone and its new_string is in the file:
     // answering "not found" would say the edit failed when it is done. Said as it is, the next step is the one after
     // the edit. Only when the new text is not blank and is there exactly once, so a deletion or a common line is never
     // taken for this.
     if (new_string.trim().length > 0 && text.split(new_string).length === 2) {
-      return { shape: "fileEditResult", path, ok: true, applied: false, why: "this edit is already in the file: its new_string is there and its old_string is not" };
+      return { shape: "fileEditResult", path, ok: true, applied: false, why: "this edit is already in the file: its new_string is there and its old_string is not", after: await afterOf(path) };
     }
     // ANCHOR-MISS DIAGNOSTIC (2026-08-02). A bare "not found" tells the drafter
     // nothing, so it retries with another invented anchor — 120 misses in 24h, and
