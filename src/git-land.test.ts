@@ -132,9 +132,13 @@ describe("git_land's branch", () => {
       const other = await landClone(cwd, deps) as { error: string; unserved?: string };
       repoRows = [{ ...saved[0], branch: "main" } as Row, { ...saved[0], id: "repo-demo-2", seq: 2, role: "described", branch: "dev" } as Row];
       const notOwner = await landClone(cwd, deps) as { error: string };
+      // the NEWEST owner row decides: an older row naming dev does not outlive a newer one naming main
+      repoRows = [saved[0], { ...saved[0], id: "repo-demo-newer", seq: 3, branch: "main" } as Row];
+      const newer = await landClone(cwd, deps) as { error: string };
       expect([none.unserved, none.error]).toEqual(["repository", "no repository row names a working branch for demo: nothing lands"]);
       expect([retired.unserved, other.unserved, other.error]).toEqual(["repository", undefined, "the clone is on dev; demo takes landings on main only"]);
       expect(notOwner.error).toBe("the clone is on dev; demo takes landings on main only"); // only the owner's row names it
+      expect(newer.error).toBe("the clone is on dev; demo takes landings on main only");
       expect(originHead()).toBe(before);
     } finally {
       repoRows = saved;
