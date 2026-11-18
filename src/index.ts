@@ -374,6 +374,11 @@ const shell: ResolverHandler = async (ctx) => {
     .catch(refusedOrError);
 };
 
+// A file that is not there (still not, after the retries) is the request's fault, answered 404: the walk writes it as a
+// failure of that status, so "this path is absent" is a fact any reader can tell from the status, not prose in a body.
+// It carries no field but its message, so nothing is lost by throwing. Any other read error keeps the {error} channel.
+const absent = (path: string): Error => Object.assign(new Error(`no such file: ${path}`), { status: 404 });
+
 const fsRead: ResolverHandler = async (ctx) => {
   const rawPath = str(ctx.body, "impulse", "pointer", "path") ?? str(ctx.body, "path");
   const path = readPath(rawPath);
@@ -383,7 +388,9 @@ const fsRead: ResolverHandler = async (ctx) => {
     try { const content = await Bun.file(path).text(); return { shape: "fileContent", path, content, bytes: Buffer.byteLength(content) }; }
     catch (e) {
       const msg = (e as Error)?.message ?? "";
-      if (attempt < 5 && /ENOENT|no such file/i.test(msg)) { await new Promise((r) => setTimeout(r, 80)); continue; }
+      const missing = /ENOENT|no such file/i.test(msg);
+      if (attempt < 5 && missing) { await new Promise((r) => setTimeout(r, 80)); continue; }
+      if (missing) throw absent(rawPath ?? path);
       return { error: msg };
     }
   }
