@@ -19,7 +19,10 @@ afterAll(() => {
 let rows: Row[] = [];
 let head = 0;
 const writes: Row[] = [];
+// a shape records refuses to read (it answers an error, not a list)
+let refused = "";
 beforeEach(() => {
+  refused = "";
   rows = [];
   head = 0;
   writes.length = 0;
@@ -33,6 +36,7 @@ beforeEach(() => {
       return Response.json(row);
     }
     if (p.head === true) return Response.json({ at_seq: head });
+    if (p.shape !== undefined && p.shape === refused) return Response.json({ error: "record_read refused" }, { status: 400 });
     let out = rows;
     if (p.shape !== undefined) out = out.filter((r) => r.shape === p.shape);
     if (p.ids !== undefined) out = out.filter((r) => p.ids.includes(r.id));
@@ -166,5 +170,79 @@ describe("walk_failure_detect", () => {
     const r = await detect();
     expect("error" in r && r.error).toContain("no owner failure_rule");
     expect(writes.length).toBe(0);
+  });
+});
+
+describe("walk_failure_detect and the owner's infra windows", () => {
+  // the walk's stop at an install restart, as its stop() writes it: status 0, no kind
+  const stop = (root: string) => fail(root, "fs_read", "/x", { status: 0, body: "the walk was stopped before the call ended" });
+  const window = (from: number, to: number, over: Row = {}) => rows.push({ id: `iw${++head}`, seq: head, shape: "infra_window", role: "owner",
+    window_id: "install-walk-1", from_seq: from, to_seq: to, statuses: [0], reason: "install of walk-vessel", ...over });
+  const stops = () => { const from = head + 1; for (const root of ["w1", "w2", "w3"]) stop(root); return { from, to: head } };
+  it("[MUST-FAIL] calls cut inside an owner's window are no failures to file: no class", async () => {
+    rule({ min_count: 3, min_roots: 3 });
+    const s = stops();
+    window(s.from, s.to);
+    expect((await report()).classes).toEqual([]);
+  });
+  it("without a window the same cuts are a class, as before (a guard)", async () => {
+    rule({ min_count: 3, min_roots: 3 });
+    stops();
+    expect((await report()).classes.map((c) => c.action)).toEqual(["opened"]);
+  });
+  it("a window naming another status, not the owner's, retracted, or written before the cuts leaves them counted (guards)", async () => {
+    for (const mark of [
+      (s: { from: number; to: number }) => window(s.from, s.to, { statuses: [502] }),
+      (s: { from: number; to: number }) => window(s.from, s.to, { role: "described" }),
+      (s: { from: number; to: number }) => { window(s.from, s.to); window(s.from, s.to, { retracted: true }) },
+    ]) {
+      rows = []; head = 0; writes.length = 0
+      rule({ min_count: 3, min_roots: 3, write: false });
+      mark(stops());
+      expect((await report()).classes.map((c) => c.action)).toEqual(["opened"]);
+    }
+    rows = []; head = 0; writes.length = 0
+    rule({ min_count: 3, min_roots: 3, write: false });
+    window(1, 1000); // written before the cuts: its span ends at its own seq
+    stops();
+    expect((await report()).classes.map((c) => c.action)).toEqual(["opened"]);
+  });
+  it("[MUST-FAIL] a call cut inside a window is no call made without failing: an open quiet class stays open", async () => {
+    rule();
+    for (const [root, cwd] of [["w1", "/trees/a"], ["w2", "/trees/b"], ["w2", "/trees/c"]]) missing(root, cwd);
+    await report();
+    filler(1100);
+    const from = head + 1;
+    fail("w4", "git_diff", "/trees/w4", { status: 0, body: "the walk was stopped before the call ended" });
+    window(from, head);
+    const r = await report();
+    expect(r.classes.find((c) => c.tool === "git_diff")?.action).toBe("quiet_unexercised");
+    expect(gapRows().filter((g) => g.status === "closed").length).toBe(0);
+    ok("w5", "git_diff"); // a call that ended: closes it, as before
+    expect((await report()).classes.find((c) => c.tool === "git_diff")?.action).toBe("closed");
+  });
+  it("[MUST-FAIL] the owner's windows cannot be read: nothing is decided, nothing written, an open class untouched", async () => {
+    rule();
+    for (const [root, cwd] of [["w1", "/trees/a"], ["w2", "/trees/b"], ["w2", "/trees/c"]]) missing(root, cwd);
+    await report();
+    const before = writes.length;
+    filler(1100); // quiet past window and quiet_rows: a run that read would decide this class now
+    ok("w4", "git_diff");
+    refused = "infra_window";
+    const r = await detect();
+    expect("error" in r).toBe(true);
+    expect(writes.length).toBe(before);
+    expect(gapRows().at(-1)?.status).toBe("open");
+  });
+  it("[MUST-FAIL] a cut outside the window's span still counts, after its end or before its start", async () => {
+    rule({ min_count: 3, min_roots: 3, write: false });
+    const s = stops();
+    window(s.from, s.to - 1); // the last cut falls outside
+    expect((await report()).classes.map((c) => c.action)).toEqual(["below"]);
+    rows = []; head = 0; writes.length = 0
+    rule({ min_count: 3, min_roots: 3, write: false });
+    const t = stops();
+    window(t.from + 3, t.to); // the first cut (its selection, hop, failure: t.from .. t.from + 2) falls before it
+    expect((await report()).classes.map((c) => c.action)).toEqual(["below"]);
   });
 });

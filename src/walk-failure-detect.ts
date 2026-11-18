@@ -15,6 +15,7 @@
 // what was called) is filed walkable false: shown, not offered to the walk, no one's debit (records reads that field). Failures on a gap's own
 // repair are not counted toward it. Nothing here names a tool, a shape of failure or a threshold.
 import { STALL, classesOf, type Klass, type Row } from "./walk-failure-classes";
+import { cutInWindow } from "./infra-window";
 import { resolveRecords } from "./walk-rows";
 
 export const WRITER = "walk-failure-detector";
@@ -89,7 +90,14 @@ export const detect = async (): Promise<Report> => {
   const parts = await Promise.all(["failure", "selection", "hop"].map((shape) => read({ shape, after_seq: from })));
   const bad = parts.find((p) => !Array.isArray(p)) as { error: string } | undefined;
   if (bad !== undefined) return bad;
-  const pool = (parts as Row[][]).flat();
+  // A failure cut inside one of the owner's infra windows (an install's restart, an outage) did not fail its move:
+  // left out of every class, as records leaves it out of every failed move. Nor did its call end: exercised() reads the
+  // rows as read, so a cut call is no call made without failing, and closes no class.
+  const windows = await read({ shape: "infra_window" });
+  if (!Array.isArray(windows)) return windows;
+  const cut = cutInWindow(windows);
+  const asRead = (parts as Row[][]).flat();
+  const pool = asRead.filter((r) => !cut(r));
   // The rows a direct call was made from (its selection's from): read by id, since a request can be older than the window.
   const fromIds = [...new Set(pool.filter((r) => r.shape === "selection" && typeof r.from === "string").map((r) => String(r.from)))];
   const asked = fromIds.length === 0 ? [] : await read({ ids: fromIds });
@@ -140,7 +148,7 @@ export const detect = async (): Promise<Report> => {
     const filed: Filed = { gap_id, class: key, tool: String(g.tool), count: Number(g.count ?? 0), roots: Number(g.root_count ?? 0), walkable: g.walkable !== false, action: "unchanged" };
     if (at - last >= rule.quiet_rows) {
       const tool = { ...(k ?? {}), tool: String(g.tool) } as Klass;
-      if (exercised(pool, tool, last)) {
+      if (exercised(asRead, tool, last)) {
         filed.action = "closed";
         await put({ ...Object.fromEntries(Object.entries(g).filter(([f]) => !["id", "seq", "t", "writer", "role", "by_key"].includes(f))),
           status: "closed", closed_reason: `no failure of this class for ${at - last} rows, and its tool was called since without it`, head: at });
