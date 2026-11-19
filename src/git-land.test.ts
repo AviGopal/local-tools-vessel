@@ -1077,8 +1077,11 @@ const superOrigin = (name: string, files: Record<string, string>) => {
 // and which commits it compared, and answers as the rule does: 1 with a line per widening, 0 none, 2 cannot judge.
 describe("git_land onto the super-repo: the gate's authority only narrows", () => {
   const CALLS = join(OUT, "widening-calls.txt");
+  const VIEW = join(OUT, "widening-git-view.txt");
   const RULE = '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do case "$1" in --policy) P="$2"; shift ;; --super) S="$2"; shift ;; --base) B="$2"; shift ;; --head) H="$2"; shift ;; esac; shift; done\n' +
     `mode="$(jq -r .mode "$P")"\necho "$mode $B $H" >> "${CALLS}"\n` +
+    // what the git the rule runs reads of its config: the land's isolation, or a value leaked from outside it
+    `for k in core.fsmonitor protocol.allow core.hooksPath test.leak; do printf '%s=%s;' "$k" "$(git -C "$S" config --get "$k")"; done >> "${VIEW}"; echo >> "${VIEW}"\n` +
     '[ "$mode" = unjudgeable ] && { echo "cannot judge: the policy says so"; exit 2; }\n[ "$mode" = lax ] && exit 0\n' +
     'git -C "$S" diff --name-status --no-renames "$B" "$H" | awk -F"\\t" \'$1 != "A" && $2 ~ /^gate\\/fixtures\\// { print "fixture " $1 ": " $2; n++ } END { exit n > 0 }\'\n';
   const POLICY = (mode: string) => JSON.stringify({ mode }) + "\n";
@@ -1098,6 +1101,31 @@ describe("git_land onto the super-repo: the gate's authority only narrows", () =
     expect(superHead()).toBe(before);
     // judged with origin's policy, origin's branch as the base and the change as the head
     expect((await calls()).at(-1)).toBe("strict refs/remotes/origin/dev refs/land/head");
+  });
+
+  scanned("[MUST-FAIL] the rule's git reads only the land's isolation: no fsmonitor, no transport, no hooks, nothing from a system config", async () => {
+    const sys = join(T, "hostile-system-gitconfig");
+    const ran = join(OUT, "system-config-ran");
+    writeFileSync(join(T, "hostile.sh"), `#!/bin/sh\ntouch "${ran}"\n`, { mode: 0o755 });
+    writeFileSync(sys, `[test]\n\tleak = yes\n[core]\n\tfsmonitor = ${join(T, "hostile.sh")}\n\thooksPath = ${T}\n[protocol]\n\tallow = always\n`);
+    // and what this process carries for git: a system config path, and config given as if by -c
+    const keep = { sys: process.env.GIT_CONFIG_SYSTEM, params: process.env.GIT_CONFIG_PARAMETERS };
+    process.env.GIT_CONFIG_SYSTEM = sys;
+    process.env.GIT_CONFIG_PARAMETERS = "'test.leak'='yes'";
+    const before = superHead();
+    try {
+      const { cwd } = superChange({ "gate/fixtures/accepted.json": '{"seen":1}\n' });
+      expect(String((await landClone(cwd, deps) as { error: string }).error)).toBe("authority_widening: fixture M: gate/fixtures/accepted.json");
+    } finally {
+      for (const [k, v] of [["GIT_CONFIG_SYSTEM", keep.sys], ["GIT_CONFIG_PARAMETERS", keep.params]] as const) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
+    const view = readFileSync(VIEW, "utf8").trim().split("\n").at(-1) ?? "";
+    expect(view).toMatch(/^core\.fsmonitor=false;protocol\.allow=never;core\.hooksPath=\/.+;test\.leak=;$/);
+    expect(view).not.toContain(`core.hooksPath=${T};`);
+    expect(existsSync(ran)).toBe(false);
+    expect(superHead()).toBe(before);
   });
 
   scanned("[MUST-FAIL] the change's own rule and policy never judge it: rewriting both to pass still refuses", async () => {

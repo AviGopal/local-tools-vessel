@@ -205,14 +205,15 @@ async function widening(t: Trusted, work: string): Promise<{ error: string; wide
   const dir = mkdtempSync(join(work, "widening-"));
   writeFileSync(join(dir, "widening.sh"), `${rule}\n`);
   writeFileSync(join(dir, "gate-policy.json"), `${policy}\n`);
-  // Every git the rule runs is as isolated as the land's own steps: no system or user config, no credential, no
-  // transport, no hooks, no fsmonitor, and no attributes (a diff driver or textconv the change names never runs).
+  // Every git the rule runs is as isolated as the land's own steps: no system config (twice over: none read, and the one
+  // named is empty) and no user config (HOME is this land's fresh directory), no credential, no transport, no hooks, no
+  // fsmonitor, and no attributes (a diff driver or textconv the change names never runs).
   const hooks = mkdtempSync(join(work, "widening-hooks-"));
   chmodSync(hooks, 0o555);
   const config: Array<[string, string]> = [["protocol.allow", "never"], ["credential.helper", ""], ["core.hooksPath", hooks],
     ["core.fsmonitor", "false"], ["core.attributesFile", "/dev/null"], ["attr.tree", EMPTY_TREE]];
   const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: work, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_COUNT: String(config.length) };
+    GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_COUNT: String(config.length) };
   config.forEach(([k, v], i) => { env[`GIT_CONFIG_KEY_${i}`] = k; env[`GIT_CONFIG_VALUE_${i}`] = v; });
   const r = await runBounded(["bash", join(dir, "widening.sh"), "--policy", join(dir, "gate-policy.json"), "--super", t.repo, "--base", t.origin, "--head", "refs/land/head"],
     { cwd: dir, env, stepMs: STEP_MS });
