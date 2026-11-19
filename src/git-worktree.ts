@@ -21,7 +21,7 @@ export { walkTreesDir };
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 export type Worktree =
-  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string; head?: string; tree?: string;
+  | { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string; head?: string; tree?: string; committed_tree?: string;
       // What a refresh carried onto the new base: the clone's uncommitted edits, or its commits (replayed).
       carried?: "uncommitted" | "commits";
       // A clone of this request's whose change could not be carried onto the new base: where it is, and which paths the
@@ -102,7 +102,8 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     && isRepo(o.cwd) && typeof o.made.branch === "string" && o.made.branch !== "");
   if (ownClone) {
     const m = ownClone.made as Record<string, string>;
-    return { shape: "gitWorktree", cwd: ownClone.cwd, repo, branch: m.branch, base: m.base, super_base: superBase, origin_url: m.origin_url };
+    return { shape: "gitWorktree", cwd: ownClone.cwd, repo, branch: m.branch, base: m.base, super_base: superBase, origin_url: m.origin_url,
+      ...(await committedTree(ownClone.cwd)) };
   }
   // The request's own clone made at an older base (the copy has moved on since: a push landed) is brought to the new base
   // in place when nothing in it has changed: the new base is fetched from the copy into it and its own branch moved there.
@@ -121,13 +122,13 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     const r = await refreshed(stale.cwd, String(stale.made.base), base, branch, source);
     if (r.ok) {
       return { shape: "gitWorktree", cwd: stale.cwd, repo, branch, base, super_base: superBase, origin_url: origin, refreshed_from: String(stale.made.base),
-        ...(r.carried ? { carried: r.carried } : {}), ...(await clonePlace(stale.cwd)) };
+        ...(r.carried ? { carried: r.carried } : {}), ...(await clonePlace(stale.cwd)), ...(await committedTree(stale.cwd)) };
     }
     if (r.changed) notCarried = { cwd: stale.cwd, from: String(stale.made.base), conflicts: r.conflicts, why: r.why };
   }
   const also = notCarried ? { not_carried: notCarried } : {};
   const reused = await unchangedClone(trees, repo, base, origin, h);
-  if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin, ...also };
+  if (reused) return { shape: "gitWorktree", cwd: reused, repo, branch, base, super_base: superBase, origin_url: origin, ...also, ...(await committedTree(reused)) };
   const id = `${repo}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
   const cwd = agentWritableDir(join(trees, id));
   const steps: string[][] = [
@@ -141,7 +142,7 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
     const r = await git(args, tmpdir(), { timeoutMs: 300_000 });
     if (r.exit_code !== 0) return { error: `git ${args.find((a) => !a.startsWith("-") && a !== cwd)} failed: ${r.stderr.slice(-500)}` };
   }
-  return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin, ...also };
+  return { shape: "gitWorktree", cwd, repo, branch, base, super_base: superBase, origin_url: origin, ...also, ...(await committedTree(cwd)) };
 }
 
 // Bring a clone made at `from` to `to`. The copy's branch is fetched into it (the same upload-pack form the clone was made
@@ -161,6 +162,16 @@ export async function clonePlace(cwd: string): Promise<{ head: string; tree: str
   const at = async (ref: string) => { const r = await git(["-C", cwd, "rev-parse", ref], tmpdir()); return r.exit_code === 0 ? r.stdout.trim() : ""; };
   const [head, tree] = [await at("HEAD"), await at("HEAD^{tree}")];
   return head && tree ? { head, tree } : {};
+}
+// The tree a commit in the clone holds (committed_tree), said only of a clone holding nothing uncommitted (no changed or
+// untracked file): a clone with an edit not yet committed is not that tree, so a reader that checks a change only once it
+// is committed never takes the clone for one. Apart from `tree` (where a refresh left the clone, whatever it carried),
+// so what a landing reads is not changed by it. Nothing is said when the tree or the clone's state cannot be read.
+export async function committedTree(cwd: string): Promise<{ committed_tree: string } | Record<string, never>> {
+  const tree = await git(["-C", cwd, "rev-parse", "HEAD^{tree}"], tmpdir());
+  if (tree.exit_code !== 0 || tree.stdout.trim() === "") return {};
+  const dirty = await git(["-C", cwd, "status", "--porcelain", "--untracked-files=all"], tmpdir());
+  return dirty.exit_code === 0 && dirty.stdout.trim() === "" ? { committed_tree: tree.stdout.trim() } : {};
 }
 export async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
   const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);

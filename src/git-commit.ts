@@ -169,7 +169,7 @@ function systemHooksDir(): string | null {
 }
 
 export type CommitResult =
-  | { shape: "gitCommitResult"; sha: string; tree: string; base: string; cwd: string; changed: string[]; needs_person: string[]; scan: "ran" | "skipped" }
+  | { shape: "gitCommitResult"; sha: string; tree: string; committed_tree: string; base: string; cwd: string; changed: string[]; needs_person: string[]; scan: "ran" | "skipped" }
   | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number; head?: string };
 
 // What a refused commit printed, as the reason the walk is shown: git's stderr, where git also sends everything a hook
@@ -302,7 +302,9 @@ export async function commitInClone(
     const scan = /secrets scan skipped|gitleaks not installed/i.test(c.stdout + c.stderr) ? "skipped" : "ran";
     // cwd: the clone the commit is in, so an owner row can ask for a commit in the same clone a call works in
     // (requires {for: git_diff, needs: gitCommitResult, where: {cwd: {x-pointer: cwd}}}: research, ac963889)
-    return { shape: "gitCommitResult", sha, tree, base: made.base, cwd, changed, needs_person, scan };
+    // committed_tree: the same tree under the name every answer that says a clone holds a commit's tree gives it
+    // (git-worktree.ts committedTree), so one reader finds it on either.
+    return { shape: "gitCommitResult", sha, tree, committed_tree: tree, base: made.base, cwd, changed, needs_person, scan };
   } finally {
     try { chmodSync(hooks, 0o700); rmSync(hooks, { recursive: true, force: true }); } catch { /* best effort: a temp dir */ }
   }

@@ -76,6 +76,19 @@ describe("a clone behind the copy is brought onto it in place", () => {
     expect(await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at({ ...c.made, base: to }))).toBeNull();
   });
 
+  it("[MUST-FAIL] a refresh carrying commits says its committed tree; one carrying an uncommitted edit says none, and says tree as before", async () => {
+    const c = await clone();
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3c\n4\n5\n"); commitAll(c.cwd, "own change"); asOwner(c.cwd);
+    const to = moveOrigin("b.txt", "b-ct1\n");
+    const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made));
+    expect(r).toMatchObject({ clone: { base: to, carried: "commits", tree: g(c.cwd, "rev-parse", "HEAD^{tree}"), committed_tree: g(c.cwd, "rev-parse", "HEAD^{tree}") } });
+    const u = await clone();
+    writeFileSync(join(u.cwd, "a.txt"), "1\n2u\n3\n4\n5\n"); asOwner(u.cwd);
+    moveOrigin("b.txt", "b-ct2\n");
+    const ru = await refreshInPlace({ dir: u.cwd, repo: "demo" }, process.env, at(u.made)) as { clone: Record<string, unknown> };
+    expect([ru.clone.carried, ru.clone.tree, "committed_tree" in ru.clone]).toEqual(["uncommitted", g(u.cwd, "rev-parse", "HEAD^{tree}"), false]);
+  });
+
   it("[MUST-FAIL] (b) its own commit is replayed onto the copy's HEAD, and the diff from the copy is only that commit", async () => {
     const c = await clone();
     writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3x\n4\n5\n"); commitAll(c.cwd, "own change"); asOwner(c.cwd);

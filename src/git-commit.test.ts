@@ -374,6 +374,64 @@ describe("git_worktree", () => {
     globalThis.fetch = realFetch;
   });
 
+  // committed_tree: the tree a commit in the clone holds, said only of a clean clone, so a check made once a change is
+  // committed never takes a clone with an uncommitted edit for its commit. `tree` (what a landing reads) is not changed:
+  // still absent on a handout, and on a refresh still where it left the clone.
+  it("[MUST-FAIL] a fresh clone says its committed tree, and no tree", async () => {
+    const w = await makeWorktree("demo") as unknown as Record<string, unknown>;
+    expect(w.committed_tree).toBe(g(String(w.cwd), "rev-parse", "HEAD^{tree}"));
+    expect("tree" in w).toBe(false);
+  });
+
+  it("[MUST-FAIL] a request's own clone handed back says its committed tree when clean, and none with a changed or untracked file", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    for (const [id, root] of [["sel-ct", "R-CT"], ["sel-ct2", "R-CT"], ["sel-ct3", "R-CT"], ["sel-ct4", "R-CT"]]) sel(id, root);
+    st.open = ["R-CT"];
+    const c = await ask("sel-ct");
+    asOwner(c.cwd);
+    writeFileSync(join(c.cwd, "ct.txt"), "1\n"); commitAll(c.cwd, "a committed change"); asOwner(c.cwd);
+    const clean = await ask("sel-ct2") as unknown as Record<string, unknown>;
+    expect([clean.cwd, clean.committed_tree, "tree" in clean]).toEqual([c.cwd, g(c.cwd, "rev-parse", "HEAD^{tree}"), false]);
+    writeFileSync(join(c.cwd, "ct.txt"), "2\n"); asOwner(c.cwd); // an edit not committed
+    const edited = await ask("sel-ct3") as unknown as Record<string, unknown>;
+    expect([edited.cwd, "committed_tree" in edited, "tree" in edited]).toEqual([c.cwd, false, false]);
+    g(c.cwd, "checkout", "--", "ct.txt"); writeFileSync(join(c.cwd, "new.txt"), "n\n"); asOwner(c.cwd); // an untracked file
+    const untracked = await ask("sel-ct4") as unknown as Record<string, unknown>;
+    expect("committed_tree" in untracked).toBe(false);
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] a closed request's unchanged clone handed to another says its committed tree, and no tree", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    for (const [id, root] of [["sel-ru", "R-RU"], ["sel-rv", "R-RV"]]) sel(id, root);
+    st.open = ["R-RU", "R-RV"];
+    const u = await ask("sel-ru");
+    st.open = ["R-RV"]; // R-RU closes: its unchanged clone goes to the next request
+    const v = await ask("sel-rv") as unknown as Record<string, unknown>;
+    expect([v.cwd, v.committed_tree, "tree" in v]).toEqual([u.cwd, g(u.cwd, "rev-parse", "HEAD^{tree}"), false]);
+    globalThis.fetch = realFetch;
+  });
+
+  it("[MUST-FAIL] once the copy has moved on, a refresh carrying commits says its committed tree; one carrying an uncommitted edit says none, and both say tree as before", async () => {
+    process.env.METABOB_API_KEY = "test-node-key";
+    const { st, sel, ask } = stubRecords();
+    const demo = join(CLONES, "demo");
+    for (const [id, root] of [["sel-cc", "R-CC"], ["sel-cc2", "R-CC"], ["sel-cu", "R-CU"], ["sel-cu2", "R-CU"]]) sel(id, root);
+    st.open = ["R-CC", "R-CU"];
+    const cc = await ask("sel-cc");
+    writeFileSync(join(cc.cwd, "cc.txt"), "c\n"); commitAll(cc.cwd, "cc's change"); asOwner(cc.cwd);
+    const cu = await ask("sel-cu");
+    writeFileSync(join(cu.cwd, "cu.txt"), "u\n"); asOwner(cu.cwd);
+    writeFileSync(join(demo, "ct-push.txt"), "p\n"); commitAll(demo, "a push");
+    const a = await ask("sel-cc2") as unknown as Record<string, unknown>;
+    expect([a.carried, a.tree, a.committed_tree]).toEqual(["commits", g(cc.cwd, "rev-parse", "HEAD^{tree}"), g(cc.cwd, "rev-parse", "HEAD^{tree}")]);
+    const b = await ask("sel-cu2") as unknown as Record<string, unknown>;
+    expect([b.carried, b.tree, "committed_tree" in b]).toEqual(["uncommitted", g(cu.cwd, "rev-parse", "HEAD^{tree}"), false]);
+    globalThis.fetch = realFetch;
+  });
+
   it("refuses a name that is not a repo's, and a repo this node has no copy of", async () => {
     expect("error" in (await makeWorktree("../etc"))).toBe(true);
     expect(String((await makeWorktree("no-such-vessel") as { error: string }).error)).toContain("no copy");
@@ -429,6 +487,13 @@ describe("git_commit", () => {
   it("the secrets scanner these tests need is on PATH: without it the redaction tests would prove nothing", () => {
     expect(Bun.which("gitleaks")).not.toBeNull();
   });
+
+  it("[MUST-FAIL] a commit says its tree as committed_tree too, the name a clean clone's answer gives it", async () => {
+    const cwd = await clone("demo")
+    writeFileSync(join(cwd, "a.txt"), "committed tree\n")
+    const r = await commitInClone(cwd, "fix: committed tree", undefined, find) as unknown as Record<string, unknown>
+    expect([r.committed_tree, r.tree]).toEqual([g(cwd, "rev-parse", "HEAD^{tree}"), g(cwd, "rev-parse", "HEAD^{tree}")])
+  })
 
   it("[MUST-FAIL] a tree the clone already committed is nothing new, said with that commit, not as a refusal", async () => {
     const cwd = await clone("demo")
