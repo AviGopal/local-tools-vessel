@@ -1081,7 +1081,8 @@ describe("git_land onto the super-repo: the gate's authority only narrows", () =
   const RULE = '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do case "$1" in --policy) P="$2"; shift ;; --super) S="$2"; shift ;; --base) B="$2"; shift ;; --head) H="$2"; shift ;; esac; shift; done\n' +
     `mode="$(jq -r .mode "$P")"\necho "$mode $B $H" >> "${CALLS}"\n` +
     // what the git the rule runs reads of its config: the land's isolation, or a value leaked from outside it
-    `for k in core.fsmonitor protocol.allow core.hooksPath test.leak; do printf '%s=%s;' "$k" "$(git -C "$S" config --get "$k")"; done >> "${VIEW}"; echo >> "${VIEW}"\n` +
+    `for k in core.fsmonitor protocol.allow core.hooksPath test.leak; do printf '%s=%s;' "$k" "$(git -C "$S" config --get "$k")"; done >> "${VIEW}"; ` +
+    `printf 'nosystem=%s;system=%s;home=%s;' "$GIT_CONFIG_NOSYSTEM" "$GIT_CONFIG_SYSTEM" "$HOME" >> "${VIEW}"; echo >> "${VIEW}"\n` +
     '[ "$mode" = unjudgeable ] && { echo "cannot judge: the policy says so"; exit 2; }\n[ "$mode" = lax ] && exit 0\n' +
     'git -C "$S" diff --name-status --no-renames "$B" "$H" | awk -F"\\t" \'$1 != "A" && $2 ~ /^gate\\/fixtures\\// { print "fixture " $1 ": " $2; n++ } END { exit n > 0 }\'\n';
   const POLICY = (mode: string) => JSON.stringify({ mode }) + "\n";
@@ -1122,8 +1123,10 @@ describe("git_land onto the super-repo: the gate's authority only narrows", () =
       }
     }
     const view = readFileSync(VIEW, "utf8").trim().split("\n").at(-1) ?? "";
-    expect(view).toMatch(/^core\.fsmonitor=false;protocol\.allow=never;core\.hooksPath=\/.+;test\.leak=;$/);
+    expect(view).toMatch(/^core\.fsmonitor=false;protocol\.allow=never;core\.hooksPath=\/.+;test\.leak=;nosystem=1;system=\/dev\/null;home=\/.+;$/);
     expect(view).not.toContain(`core.hooksPath=${T};`);
+    // HOME is the land's own fresh directory, never this process's, so no user config is read either
+    expect(view).not.toContain(`home=${process.env.HOME ?? "/nonexistent-home"};`);
     expect(existsSync(ran)).toBe(false);
     expect(superHead()).toBe(before);
   });
