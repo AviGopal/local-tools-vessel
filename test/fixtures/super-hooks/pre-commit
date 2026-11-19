@@ -1,0 +1,669 @@
+#!/usr/bin/env bash
+#
+# substrate super-repo pre-commit hook.
+#
+# Enforces placement rules so the super-repo stays a thin coordinator over
+# repos/* + docs/ + openspec/. New cruft is rejected at commit time; the
+# message tells you where it should live instead.
+#
+# Placement rules apply only to NEWLY ADDED or RENAMED-INTO-SUPER-REPO files.
+# Modifying existing tracked files is never blocked by placement — pre-existing
+# cruft is grandfathered until separately removed. The env ratchet (below) is the
+# exception: it judges every added line under scripts/substrate/units/, so a
+# modification there can be refused.
+#
+# Bypass: `git commit --no-verify` (use sparingly; prefer fixing placement).
+#
+# Rule summary (full guidance: scripts/git-hooks/README.md):
+#   - Files must live under repos/, docs/, openspec/, scripts/, packages/, validation/,
+#     .claude/, .github/, or .githooks/. The super-repo root holds only a
+#     small allowlist of project files (CLAUDE.md, README.md, .gitignore,
+#     .gitmodules, etc.).
+#   - No new top-level *.md outside docs/ or openspec/.
+#   - No new test files outside a real test suite (must live alongside the
+#     code under repos/<vessel>/test/ or repos/<vessel>/tests/).
+#   - No new image / screenshot / playwright artefact files anywhere outside
+#     repos/* (they belong in submodule asset trees or get gitignored).
+#   - No new ad-hoc *.sh / *.ts / *.js / *.mjs / *.py at root — scripts go
+#     in scripts/.
+#   - No NEW Environment=/EnvironmentFile= line under scripts/substrate/units/ that
+#     sets a non-bootstrap name (the env ratchet, below).
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Colors
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+GREEN=$'\033[0;32m'
+DIM=$'\033[2m'
+NC=$'\033[0m'
+
+# Allowed files at the super-repo root (basename match, exact).
+ROOT_ALLOWLIST=(
+  CLAUDE.md
+  README.md
+  LICENSE
+  LICENSE.md
+  .gitignore
+  .gitmodules
+  .gitattributes
+  .editorconfig
+  .nvmrc
+  .tool-versions
+  .prettierrc
+  .prettierrc.json
+  .prettierrc.yaml
+  .prettierignore
+  .eslintrc.js
+  .eslintrc.json
+  .eslintignore
+  .dockerignore
+  .env.example
+  Dockerfile.substrate
+  docker-compose.yml
+  package.json
+  bun.lock
+  package-lock.json
+  yarn.lock
+  pnpm-lock.yaml
+  tsconfig.json
+  tsconfig.base.json
+)
+
+# Allowed top-level directories. Anything under these is delegated to the
+# submodule / area's own conventions.
+ALLOWED_TOPLEVEL_DIRS=(
+  repos
+  docs
+  openspec
+  scripts
+  packages
+  validation
+  .claude
+  .github
+  .githooks
+  .well-known
+)
+
+# Image / artefact extensions that are never allowed at the super-repo level.
+ARTEFACT_EXTENSIONS='png|jpg|jpeg|gif|webp|svg|bmp|ico|mp4|mov|webm|pdf|zip|tar|gz|tgz'
+
+# Files to inspect for PLACEMENT: newly added (A) or renamed-to (R) entries.
+# Placement only applies to new files — a modify-only commit has none to place.
+# Do NOT `exit 0` here: the secrets scans below (SOPS on ACMR, gitleaks on the
+# full --staged diff) MUST still run on modify-only commits, else a credential
+# embedded by EDITING a tracked file (the leak class the rules exist for) sails
+# through unscanned. When STAGED is empty the placement loop simply iterates zero
+# times and control falls through to those scans.
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=AR)
+
+violations=()
+
+is_root_allowlisted() {
+  local name="$1"
+  # Exact-match allowlist
+  for entry in "${ROOT_ALLOWLIST[@]}"; do
+    [[ "$name" == "$entry" ]] && return 0
+  done
+  # Pattern: any .env template (e.g. .env.devbob.example, .env.k8s.example).
+  # Real .env files are caught by the .gitignore patterns; templates always
+  # end in .example.
+  [[ "$name" == .env.*.example ]] && return 0
+  return 1
+}
+
+is_under_allowed_toplevel() {
+  local path="$1"
+  local first="${path%%/*}"
+  for dir in "${ALLOWED_TOPLEVEL_DIRS[@]}"; do
+    [[ "$first" == "$dir" ]] && return 0
+  done
+  return 1
+}
+
+flag() {
+  local file="$1" reason="$2" remedy="$3"
+  violations+=("${file}|${reason}|${remedy}")
+}
+
+for file in "${STAGED[@]}"; do
+  base="$(basename "$file")"
+  ext="${base##*.}"
+  ext_lower="${ext,,}"
+
+  # repos/ handling:
+  #   - A submodule pointer bump appears as exactly "repos/<name>" (depth 2).
+  #     Skip it — the submodule's own hooks govern its internals.
+  #   - A direct file addition inside a non-submodule vessel tree appears as
+  #     "repos/<name>/path/to/file" (depth 3+). Apply cross-cutting checks:
+  #     no artefacts, no committed node_modules, no secrets.
+  if [[ "$file" == repos/* ]]; then
+    IFS='/' read -ra _parts <<< "$file"
+    if [[ ${#_parts[@]} -le 2 ]]; then
+      continue  # submodule pointer bump or new submodule registration
+    fi
+    # Direct file in a vessel tree — apply the cross-cutting checks below,
+    # but skip the "unrecognised top-level directory" check (repos/ is allowed).
+    if [[ "$file" == repos/*/node_modules/* ]]; then
+      flag "$file" \
+        "node_modules committed into a vessel repo" \
+        "add node_modules/ to the vessel's .gitignore; dependencies install at runtime"
+      continue
+    fi
+    if [[ "$ext_lower" =~ ^($ARTEFACT_EXTENSIONS)$ ]]; then
+      if [[ "$file" != repos/*/assets/* && "$file" != repos/*/public/* && "$file" != repos/*/docs/assets/* ]]; then
+        flag "$file" \
+          "binary/artefact committed into a vessel repo outside an asset directory" \
+          "screenshots and playwright output should be gitignored; illustrative assets go in assets/ or docs/assets/"
+      fi
+    fi
+    continue
+  fi
+
+  # Files under other allowed top-level dirs follow that area's conventions.
+  # We still enforce a couple of cross-cutting rules below (artefacts,
+  # one-off tests).
+  if [[ "$file" == */* ]]; then
+    if ! is_under_allowed_toplevel "$file"; then
+      flag "$file" \
+        "new file in unrecognised top-level directory" \
+        "move under repos/<vessel>/, docs/, openspec/, scripts/, or packages/"
+      continue
+    fi
+  else
+    # File at the super-repo root.
+    if ! is_root_allowlisted "$base"; then
+      case "$base" in
+        *.md)
+          flag "$file" \
+            "new markdown file at super-repo root" \
+            "move stateless docs to docs/, future-change proposals to openspec/changes/<date>-<slug>/"
+          ;;
+        *.sh|*.ts|*.tsx|*.js|*.mjs|*.cjs|*.py)
+          flag "$file" \
+            "new script at super-repo root" \
+            "move to scripts/ (and review whether it's actually needed — most one-off scripts belong in commit history, not the tree)"
+          ;;
+        test-*|*-test.*|*.test.*|tests-*)
+          flag "$file" \
+            "new test file at super-repo root" \
+            "tests live alongside their code under repos/<vessel>/test{,s}/, never in the super-repo"
+          ;;
+        *.html|*.txt|*.yaml|*.yml|*.json)
+          flag "$file" \
+            "new data/config file at super-repo root" \
+            "move under the owning area (repos/<vessel>/, scripts/, packages/, openspec/) — the super-repo root is reserved for project metadata"
+          ;;
+        *)
+          if [[ "$ext_lower" =~ ^($ARTEFACT_EXTENSIONS)$ ]]; then
+            flag "$file" \
+              "new binary/artefact at super-repo root" \
+              "binary assets go in repos/<vessel>/ (or are gitignored if they're test/playwright output)"
+          else
+            flag "$file" \
+              "new file at super-repo root not in allowlist" \
+              "extend the allowlist in scripts/git-hooks/pre-commit only if the file is genuinely project-wide metadata"
+          fi
+          ;;
+      esac
+      continue
+    fi
+  fi
+
+  # Cross-cutting rules (apply to docs/, scripts/, packages/, openspec/, etc.,
+  # but NOT to repos/* which is submodule territory).
+
+  # No screenshots / images / artefacts outside repos/ submodules and the
+  # docs/assets path (which is reserved for embedded illustrations).
+  if [[ "$ext_lower" =~ ^($ARTEFACT_EXTENSIONS)$ ]]; then
+    if [[ "$file" != docs/assets/* && "$file" != docs/*/assets/* ]]; then
+      flag "$file" \
+        "binary/artefact outside repos/* and docs/assets/" \
+        "playwright/screenshots are session artefacts (gitignore them); illustrative assets go in docs/assets/<topic>/"
+    fi
+  fi
+
+  # No one-off test files outside repos/<vessel>/test{,s}/. The super-repo
+  # itself never holds tests; tests live with the code they test.
+  # Exception: validation/ workspaces and prompts intentionally contain
+  # fixture files that mimic real test code — those are inputs to the
+  # benchmark harness, not project tests.
+  if [[ "$base" =~ ^test- || "$base" =~ -test\. || "$base" =~ \.test\. || "$base" =~ ^tests- ]]; then
+    if [[ "$file" != validation/* ]]; then
+      flag "$file" \
+        "test file outside a submodule test suite" \
+        "tests belong in repos/<vessel>/test{,s}/ alongside the code they cover; the super-repo never holds tests"
+    fi
+  fi
+done
+
+if [[ ${#violations[@]} -gt 0 ]]; then
+  # Print placement findings and exit before running gitleaks — fixing
+  # placement first keeps the secrets-scanner output focused.
+  printf '%s\n' "${RED}━━━ super-repo placement check failed ━━━${NC}"
+  printf '%s\n\n' "${DIM}rules: scripts/git-hooks/README.md${NC}"
+
+for v in "${violations[@]}"; do
+  IFS='|' read -r file reason remedy <<<"$v"
+  printf '  %s%s%s\n' "${YELLOW}✗${NC} " "$file" ""
+  printf '      %sreason:%s %s\n' "$DIM" "$NC" "$reason"
+  printf '      %sfix:   %s %s\n\n' "$DIM" "$NC" "$remedy"
+done
+
+cat <<EOF
+${DIM}Why this exists${NC}
+  The super-repo coordinates docs (docs/), future-change specs (openspec/),
+  scripts (scripts/), and submodule pointers (repos/*). Loose files at the
+  root, ad-hoc tests, screenshots, and exploratory writeups should live
+  inside their owning area or — if they only matter for one commit — in the
+  commit history itself, not as files.
+
+${DIM}Common moves${NC}
+  Stateless reference doc          ->  docs/<topic>.md
+  Future change proposal           ->  openspec/changes/<date>-<slug>/proposal.md
+  One-off helper script            ->  scripts/<verb>-<noun>.sh
+  Submodule WIP / asset            ->  repos/<vessel>/...
+  Playwright / screenshot output   ->  add the directory to .gitignore
+
+${DIM}Bypass${NC}
+  git commit --no-verify   ${DIM}(use sparingly; the rules exist to keep blame readable)${NC}
+EOF
+
+  exit 1
+fi
+
+# ─── env ratchet: behaviour switches in units can only shrink ───
+#
+# WHY THIS IS A GATE. An Environment= line in a unit is frozen at process start, invisible to traces
+# and the walk, and unlearnable (CLAUDE.md law 1): a behaviour switch there steers the substrate where
+# nothing can observe it. The system must not be able to break itself that way by commit. So a staged
+# change under scripts/substrate/units/ (unit files and every *.d/*.conf drop-in) is refused when it
+# ADDS an Environment= line setting a name that scripts/git-hooks/env-ratchet/bootstrap-allowlist.txt
+# does not carry (bootstrap = ports, hosts, ids, endpoints, paths, secrets-file refs), or adds an
+# EnvironmentFile= line loading a path that list does not carry. A new drop-in that sets a
+# non-bootstrap name is refused by the same rule and named as a new drop-in.
+#
+# WHAT IT JUDGES: added lines only (`git diff --cached -U0 --no-renames`), so existing lines are
+# grandfathered and removing one is always allowed. A changed line is a removed line plus an added one:
+# changing the VALUE of a grandfathered behaviour switch is refused too (the change belongs in a shape),
+# and so is moving a drop-in to another unit (a new site). The lists are read from the INDEX, so a
+# commit is judged by the lists it carries:
+#   - bootstrap-allowlist.txt: every entry needs a reason (two words or more), visible in the diff; a
+#     name the HEAD copy of grandfathered-behaviour.txt carries cannot be added (no reclassification).
+#   - grandfathered-behaviour.txt: SHRINK-ONLY. A staged name the HEAD copy lacks is refused, unless it
+#     MOVES here from HEAD's allowlist (a tightening: reclassified behaviour, out of the allowlist in the
+#     same commit). When HEAD has no copy (the seeding commit), its names must already be set by a unit
+#     at HEAD. The committed-tree check bounds the list by a frozen copy as well.
+# No allowlist in the index while a unit line needs judging = refused (fail closed). Nothing staged
+# under units/ or the lists = this block does nothing.
+#
+# NOT COVERED (named, not papered over): PassEnvironment=, `ExecStart=/usr/bin/env X=…`, a value set
+# inside a script the unit runs, backslash-continued lines, and drop-ins written into /etc at runtime
+# by hand or by a script.
+# BYPASSED COMMITS (--no-verify, or a clone with no hook installed) are caught by the committed-tree
+# check validation/scripts/env-ratchet-committed-tree.test.sh — but only where the glue corpus runs
+# (this hook, the acceptance run). pull-sync never runs it, so it does NOT block a bypassed commit
+# from converging. The blocking form is the gate fixture validation/scripts/gate/fixtures/env-ratchet-units.sh,
+# run by scripts/substrate/gate/shadow-eval.sh on every gate candidate once it is in the accepted corpus;
+# it embeds both lists, so a new bootstrap name needs that fixture edited too (a widening: operator review).
+er_main() {
+  local units=scripts/substrate/units/ dir=scripts/git-hooks/env-ratchet
+  local allow="$dir/bootstrap-allowlist.txt" grand="$dir/grandfathered-behaviour.txt"
+  local -a errs=()
+  local f line rest n p added_lines lists_staged new_files allow_names allow_paths
+  er_entries() { sed -e 's/^[[:space:]]*//' -e '/^#/d' -e '/^$/d'; }
+  er_units_names() { # stdin: unit-file lines -> the names their Environment= lines set
+    sed -nE 's/^[[:space:]]*Environment[[:space:]]*=(.*)$/\1/p' \
+      | /usr/bin/grep -oE '(^|[[:space:]])"?[A-Za-z_][A-Za-z0-9_]*=' | sed -E 's/^[[:space:]]*"?//; s/=$//' || true
+  }
+  added_lines="$(git diff --cached -U0 --no-color --no-ext-diff --no-renames --diff-filter=ACMR -- "$units" 2>/dev/null \
+    | awk '/^\+\+\+ /{f=substr($0,5); sub(/^b\//,"",f); next} /^\+/{print f "\t" substr($0,2)}' \
+    | awk -F'\t' '$1 ~ /^scripts\/substrate\/units\/([^\/]+\.(service|timer|socket|path|target|mount)|[^\/]+\.d\/[^\/]+\.conf)$/' \
+    | /usr/bin/grep -E $'\t''[[:space:]]*(Environment|EnvironmentFile)[[:space:]]*=' || true)"
+  lists_staged="$(git diff --cached --name-only --no-renames -- "$allow" "$grand" 2>/dev/null || true)"
+  [[ -n "$added_lines" || -n "$lists_staged" ]] || return 0
+  new_files="$(git diff --cached --name-only --no-renames --diff-filter=A -- "$units" 2>/dev/null || true)"
+
+  local allow_txt grand_txt head_grand_txt has_allow=0 has_head=0
+  if git cat-file -e ":$allow" 2>/dev/null; then has_allow=1; allow_txt="$(git show ":$allow" | er_entries)"; else allow_txt=""; fi
+  grand_txt="$(git show ":$grand" 2>/dev/null | er_entries || true)"
+  git rev-parse -q --verify HEAD >/dev/null 2>&1 && has_head=1
+  head_grand_txt=""
+  [[ $has_head == 1 ]] && head_grand_txt="$(git show "HEAD:$grand" 2>/dev/null | er_entries || true)"
+  allow_names="$(printf '%s\n' "$allow_txt" | awk '$1 ~ /^[A-Za-z_][A-Za-z0-9_]*$/ {print $1}')"
+  allow_paths="$(printf '%s\n' "$allow_txt" | awk '$1 ~ /^\// {print $1}')"
+
+  # The lists themselves.
+  if [[ -n "$lists_staged" ]]; then
+    if [[ $has_allow == 1 ]]; then
+      while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        n="$(awk '{print $1}' <<<"$line")"
+        if ! [[ "$n" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || "$n" == /* ]]; then
+          errs+=("$allow|entry '$n' is neither an environment NAME nor an absolute EnvironmentFile path"); continue
+        fi
+        [[ "$(awk '{print NF}' <<<"$line")" -ge 3 ]] \
+          || errs+=("$allow|entry $n has no reason (NAME then a reason of two words or more)")
+      done <<<"$allow_txt"
+      while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        /usr/bin/grep -qxF -- "$n" <<<"$(awk '{print $1}' <<<"$head_grand_txt")" \
+          && errs+=("$allow|$n is a grandfathered BEHAVIOUR switch at HEAD; it cannot be reclassified bootstrap by edit")
+      done <<<"$allow_names"
+    fi
+    local head_set
+    if [[ $has_head == 1 ]] && git cat-file -e "HEAD:$grand" 2>/dev/null; then
+      head_set="$(printf '%s\n' "$head_grand_txt" | awk '{print $1}')"
+    elif [[ $has_head == 1 ]]; then
+      # Seeding: the list may only name what a unit at HEAD already sets.
+      head_set="$(git grep -h -E '^[[:space:]]*Environment[[:space:]]*=' HEAD -- "$units" 2>/dev/null | er_units_names | sort -u)"
+    else
+      head_set=""
+    fi
+    # TIGHTENING is not widening: a name HEAD's allowlist carries as bootstrap may MOVE here (it leaves the
+    # staged allowlist in the same commit). Its unit lines already exist; it only loses the right to new ones.
+    local head_allow=""
+    [[ $has_head == 1 ]] && head_allow="$(git show "HEAD:$allow" 2>/dev/null | er_entries | awk '$1 ~ /^[A-Za-z_][A-Za-z0-9_]*$/ {print $1}' || true)"
+    while IFS= read -r n; do
+      [[ -n "$n" ]] || continue
+      /usr/bin/grep -qxF -- "$n" <<<"$head_set" && continue
+      /usr/bin/grep -qxF -- "$n" <<<"$head_allow" && ! /usr/bin/grep -qxF -- "$n" <<<"$allow_names" && continue
+      errs+=("$grand|adds $n — the grandfathered behaviour list only shrinks (a bootstrap name may move here, out of the allowlist)")
+    done < <(printf '%s\n' "$grand_txt" | awk '{print $1}')
+  fi
+
+  # The unit lines.
+  if [[ -n "$added_lines" && $has_allow == 0 ]]; then
+    errs+=("$allow|not in the index, so no Environment=/EnvironmentFile= line under $units can be judged (fail closed)")
+  elif [[ -n "$added_lines" ]]; then
+    while IFS=$'\t' read -r f line; do
+      local where="$f"
+      /usr/bin/grep -qxF -- "$f" <<<"$new_files" && [[ "$f" == *.d/*.conf ]] && where="$f (new drop-in)"
+      if [[ "$line" =~ ^[[:space:]]*EnvironmentFile[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+        p="${BASH_REMATCH[1]}"; p="${p#-}"; p="${p#\"}"; p="${p%\"}"; p="${p%"${p##*[![:space:]]}"}"
+        /usr/bin/grep -qxF -- "$p" <<<"$allow_paths" \
+          || errs+=("$where|EnvironmentFile=$p is not an allowlisted env file (pinned: $(printf '%s ' $allow_paths))")
+        continue
+      fi
+      while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        /usr/bin/grep -qxF -- "$n" <<<"$allow_names" && continue
+        if /usr/bin/grep -qxF -- "$n" <<<"$(awk '{print $1}' <<<"$grand_txt")"; then
+          errs+=("$where|sets $n, a grandfathered BEHAVIOUR switch: its existing lines may only be removed, not added or changed")
+        else
+          errs+=("$where|sets $n, which is not a bootstrap name (bootstrap-allowlist.txt)")
+        fi
+      done < <(printf '%s\n' "$line" | er_units_names)
+    done <<<"$added_lines"
+  fi
+
+  [[ ${#errs[@]} -eq 0 ]] && return 0
+  printf '%s\n' "${RED:-}━━━ env ratchet: behaviour switches in units can only shrink ━━━${NC:-}"
+  local e
+  for e in "${errs[@]}"; do
+    printf '  %s %s\n      %s\n' "${YELLOW:-}✗${NC:-}" "${e%%|*}" "${e#*|}"
+  done
+  cat <<ER_EOF
+
+${DIM:-}Why${NC:-}
+  An Environment= line is frozen at process start and invisible to traces and the walk (CLAUDE.md law 1).
+  Behaviour belongs in a shaped impulse read at use time; units may only set bootstrap names.
+
+${DIM:-}What to do${NC:-}
+  Behaviour switch      ->  read it from a shaped impulse instead; remove the unit line
+  Genuinely bootstrap   ->  add NAME + a reason to scripts/git-hooks/env-ratchet/bootstrap-allowlist.txt
+  New env file          ->  add its absolute path + a reason to the same list
+
+${DIM:-}Bypass${NC:-}
+  git commit --no-verify   ${DIM:-}(visible in review; the ratchet exists because a runtime switch broke a fleet)${NC:-}
+ER_EOF
+  return 1
+}
+er_main || exit 1
+# ─── end env ratchet ───
+
+# ─── ignored paths stay untracked ───
+# .gitignore names runtime state (leases/, pool/, gaps/, state/, the host-sync stream, ...). `git add -f` and
+# `git add -A` over a force-listed path still commit it, and once tracked, every node rewrites the file in its
+# clone: the clone carries a permanent modification, and a later commit touching it stalls that node's glue
+# pull. An autonomous "drift sync" commit force-added leases/*.json this way. Refuse any staged
+# ADDITION whose path .gitignore ignores. Modifying an already-tracked file is not refused here; untracking
+# those is a separate, reviewed commit.
+mapfile -t ADDED_IGNORED < <(git diff --cached --name-only --diff-filter=AR -z | xargs -0 -r git check-ignore --no-index -- 2>/dev/null || true)
+if [[ ${#ADDED_IGNORED[@]} -gt 0 ]]; then
+  printf '%s\n' "${RED}━━━ staged addition of path(s) that .gitignore ignores ━━━${NC}"
+  for f in "${ADDED_IGNORED[@]}"; do
+    printf '  %s%s%s %s  %s(%s)%s\n' "$YELLOW" "✗" "$NC" "$f" "$DIM" "$(git check-ignore --no-index -v -- "$f" 2>/dev/null | cut -f1)" "$NC"
+  done
+  cat <<EOF
+
+${DIM}What to do${NC}
+  These paths are runtime state by .gitignore. Unstage them:  ${DIM}git restore --staged <path>${NC}
+  If one is genuinely source, change .gitignore in the same commit so the rule no longer matches it.
+EOF
+  exit 1
+fi
+
+# ─── SOPS encryption check ───
+# The super-repo doesn't host secrets/ today, but if anything ever lands
+# under <area>/secrets/*.secrets.yaml we want it encrypted before commit.
+# Catches the same SOPS-edit-then-forget-to-reencrypt mistake the deployment
+# repo's hook catches.
+mapfile -t STAGED_SECRETS < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)secrets/.*\.secrets\.ya?ml$' || true)
+
+if [[ ${#STAGED_SECRETS[@]} -gt 0 ]]; then
+  if ! command -v sops >/dev/null 2>&1; then
+    printf '%s\n' "${RED}━━━ sops not installed; cannot verify encryption of staged secrets/ files ━━━${NC}"
+    printf '  install: %sbrew install sops%s | %sgo install go.mozilla.org/sops/v3/cmd/sops@latest%s\n' \
+      "$DIM" "$NC" "$DIM" "$NC"
+    printf '  staged: %s\n' "${STAGED_SECRETS[*]}"
+    exit 1
+  fi
+  unencrypted=()
+  for sf in "${STAGED_SECRETS[@]}"; do
+    if ! status="$(sops filestatus "$sf" 2>/dev/null)"; then
+      unencrypted+=("$sf  (sops could not parse)")
+      continue
+    fi
+    case "$status" in
+      *'"encrypted":true'*) ;;
+      *) unencrypted+=("$sf") ;;
+    esac
+  done
+
+  if [[ ${#unencrypted[@]} -gt 0 ]]; then
+    printf '%s\n' "${RED}━━━ sops: staged secrets file is not encrypted ━━━${NC}"
+    for f in "${unencrypted[@]}"; do
+      printf '  %s%s%s %s\n' "$YELLOW" "✗" "$NC" "$f"
+    done
+    cat <<EOF
+
+${DIM}What to do${NC}
+  1. Re-encrypt the file:    ${DIM}sops -e -i <file>${NC}
+  2. Verify it is encrypted: ${DIM}sops filestatus <file>${NC}
+  3. Re-stage and re-commit.
+
+${DIM}Bypass${NC}
+  git commit --no-verify   ${DIM}(only if the file genuinely has no secrets)${NC}
+EOF
+    exit 1
+  fi
+fi
+
+# ─── secrets scan ───
+# Run gitleaks against the staged diff. We had a real Anthropic API key
+# committed at one point; this layer is the second barrier (the first being
+# the .gitignore patterns that refuse to track .env / secrets.yaml / *.key).
+#
+# Gitleaks installation is not enforced — if it's missing we print a hint
+# and let the commit proceed. The cost of blocking developers without the
+# binary outweighs the value, and the gitignore + placement rules already
+# catch the most common shapes.
+if command -v gitleaks >/dev/null 2>&1; then
+  # --staged   scan only what's about to be committed
+  # --redact   replace matched secrets with [REDACTED] in the report so the
+  #            terminal scrollback / hook log does not itself become a leak
+  # --no-banner suppress the gitleaks ascii banner; we want the hook quiet
+  #             on the success path
+  # --config   the project rule set lives beside this hook, not at the repo
+  #            root, so gitleaks' auto-discovery does not find it. Without
+  #            this flag the substrate-specific credential shapes (mb_ API
+  #            keys, session tokens) fall back to generic heuristics that
+  #            miss the token form entirely.
+  if ! gitleaks protect --staged --redact --no-banner \
+        --config "$(dirname "${BASH_SOURCE[0]}")/.gitleaks.toml" 2>&1; then
+    printf '\n%s\n' "${RED}━━━ gitleaks: secrets detected in staged diff ━━━${NC}"
+    cat <<EOF
+${DIM}What to do${NC}
+  1. Remove the secret from the file before committing.
+  2. Rotate the leaked credential immediately — assume it is compromised
+     once it has touched the staging tree.
+  3. If gitleaks is flagging a false positive (e.g. a placeholder value in
+     a docs example), add an inline allowlist comment:
+       ${DIM}some-value-that-looks-like-a-secret  # gitleaks:allow${NC}
+     or extend the project rule set in scripts/git-hooks/.gitleaks.toml.
+
+${DIM}Bypass${NC}
+  git commit --no-verify   ${DIM}(only after rotating the credential)${NC}
+EOF
+    exit 1
+  fi
+else
+  printf '%s\n' "${YELLOW}note:${NC} gitleaks is not installed; secrets scan was skipped."
+  printf '%s\n' "      install: ${DIM}brew install gitleaks${NC} | ${DIM}go install github.com/gitleaks/gitleaks/v8@latest${NC} | ${DIM}https://github.com/gitleaks/gitleaks/releases${NC}"
+fi
+
+# ── human-surface: a UI source change must carry its rebuilt bundle ──────────
+#
+# WHY THIS IS A GATE AND NOT A CONVENTION. repos/human-surface-vessel/ui/dist is
+# TRACKED because the substrate updates itself by pulling this repo and nothing
+# rebuilds on pull — git is the only channel that reaches a running surface. So
+# a commit that changes ui/src without its dist ships source the deployment
+# will never render, and fails SILENTLY: the vessel boots, /health is green,
+# and a person sees yesterday's page. That exact state ran on two deployments
+# for a full day.
+#
+# Deliberately narrow: it only asks whether dist was rebuilt alongside src, not
+# whether the bundle is byte-correct. Where it runs is split by workspace volume,
+# not by author: a container's super-repo clone made on a fresh volume runs this
+# hook through setup-git-push's wrapper, so a substrate-authored UI change without
+# its bundle is refused there and filed as a gap; a clone that predates that
+# wrapper, and any commit path that skips hooks, is not covered. That remaining
+# hole is named as such rather than papered over.
+mapfile -t UI_SRC_STAGED < <(
+  git diff --cached --name-only --diff-filter=ACMR \
+    | grep -E '^repos/human-surface-vessel/ui/(src/|index\.html$|vite\.config|package\.json$)' || true
+)
+if [[ ${#UI_SRC_STAGED[@]} -gt 0 ]]; then
+  mapfile -t UI_DIST_STAGED < <(
+    git diff --cached --name-only --diff-filter=ACMRD \
+      | grep -E '^repos/human-surface-vessel/ui/dist/' || true
+  )
+  if [[ ${#UI_DIST_STAGED[@]} -eq 0 ]]; then
+    printf '\n%s\n' "${RED}━━━ human-surface: UI source staged without a rebuilt bundle ━━━${NC}"
+    printf '%s\n' "staged UI source:"
+    printf '  %s\n' "${UI_SRC_STAGED[@]}"
+    cat <<'EOF'
+
+ui/dist is tracked on purpose: the substrate pulls this repo to update itself
+and nothing rebuilds on pull, so an unbuilt change reaches no running surface.
+It fails silently — the vessel stays healthy and serves the previous bundle.
+
+Rebuild and stage it:
+  docker run --rm -v "$PWD":/w -w /w/repos/human-surface-vessel/ui \
+    -e HOME=/tmp oven/bun:1 sh -c 'bun install --silent && bun run build'
+  git add repos/human-surface-vessel/ui/dist
+
+Bypass (only when the change genuinely cannot affect the bundle):
+  git commit --no-verify
+EOF
+    exit 1
+  fi
+fi
+
+# ── glue tests: the validation/scripts tests run on every commit touching what they cover ──
+#
+# WHY THIS IS A GATE. validation/scripts/*.test.{sh,ts} guard pull-sync, the unit drop-ins
+# and the seeder — glue that runs before any substrate exists to host a validating
+# activity. Run only by hand, they were gates with no call sites: nothing could observe
+# them fail, so their passes proved nothing.
+#
+# WHAT IT JUDGES: the STAGED tree, never the working tree. The index is exported with
+# `git checkout-index -a --prefix` into a temp dir and the STAGED run-glue-tests.sh runs
+# against that export (--root), so an unstaged fix cannot rescue a staged break and an
+# unstaged break cannot fail a clean commit. Gitlinks export as empty dirs, so tests that
+# read a submodule worktree SKIP here (counted, never reported as passed).
+#
+# WHEN: a staged path under scripts/substrate/, validation/scripts/, the seeder, the
+# vendored packages, this hook, or its env-ratchet lists. Set GLUE_TESTS_FAST=1 to run the declared --fast subset
+# instead (it drops pull-sync-hold-channel, ~21s of the run).
+# HOW LONG (measured, the whole hook, wall clock, in a disposable container from the
+# image a node runs, 16 CPUs and no CPU limit, as on the live node, with the live node busy
+# alongside): 78s, 111s and 88s over three runs (glue tests 29 files); the base before the
+# tracked-red work took 62-80s (23 files). The in-container commit path this must fit
+# (vessel-mitosis-cutover's runGit commit) passes no timeout to git; the bound around it is the
+# compose ceiling COMPOSE_CEILING_MS, 15 min (development-vessel src/compose-slots.ts), so the
+# worst run leaves about 8x headroom. Re-measure when adding a slow test.
+mapfile -t GLUE_STAGED < <(
+  git diff --cached --name-only --diff-filter=ACMRD \
+    | grep -E '^(scripts/substrate/|validation/scripts/|scripts/bootstrap-seeder\.ts$|packages/write-containment/|scripts/git-hooks/pre-commit$|scripts/git-hooks/env-ratchet/)' || true
+)
+if [[ ${#GLUE_STAGED[@]} -gt 0 ]]; then
+  if ! git cat-file -e :validation/scripts/run-glue-tests.sh 2>/dev/null; then
+    printf '\n%s\n' "${RED}━━━ glue tests: validation/scripts/run-glue-tests.sh is not in the index ━━━${NC}"
+    printf '%s\n' "staged: ${GLUE_STAGED[*]}"
+    exit 1
+  fi
+  GLUE_TREE="$(mktemp -d "${TMPDIR:-/tmp}/glue-staged.XXXXXX")"
+  GLUE_LOGS="$(mktemp -d "${TMPDIR:-/tmp}/glue-logs.XXXXXX")"
+  trap 'rm -rf "$GLUE_TREE"' EXIT
+  git checkout-index -a --prefix="$GLUE_TREE/"
+  # TRACKED RED (check-first): a red glue test every failing case of which an OPEN gap names in its
+  # only_tests is let through (run-glue-tests.sh header; the predicate is the staged
+  # scripts/substrate/lib/gap-tracked-red.sh, the same file pull-sync's test gate sources). The store
+  # is the LIVE one, read through development-vessel's substrateGap resolver at the address the
+  # emitted client config names (`client-config`: DEV_VESSEL_ENDPOINT when set, else
+  # .substrate.gapStoreEndpoint of the cockpit's config file) — no pinned default, and never this
+  # clone's gaps/gaps.json, a gitignored and possibly months-stale cache. No config, no field or an
+  # unreachable store = no exemption: a red test stays refused, and the output says why.
+  GLUE_ARGS=(--root "$GLUE_TREE" --log-dir "$GLUE_LOGS" --gap-store client-config)
+  [[ "${GLUE_TESTS_FAST:-0}" == 1 ]] && GLUE_ARGS+=(--fast)
+  printf '%s\n' "${DIM}glue tests: running against the staged tree (${GLUE_STAGED[0]}$([[ ${#GLUE_STAGED[@]} -gt 1 ]] && echo " +$(( ${#GLUE_STAGED[@]} - 1 ))"))${NC}"
+  glue_rc=0
+  glue_out="$(bash "$GLUE_TREE/validation/scripts/run-glue-tests.sh" "${GLUE_ARGS[@]}" 2>&1)" || glue_rc=$?
+  printf '%s\n' "$glue_out"
+  if [[ $glue_rc -eq 3 ]]; then
+    # ENVIRONMENT, NOT A TEST FAILURE: the gap store refused the node key (401), so whether a red
+    # check-first test is tracked is unknown. Still blocking (a gate that opens on a fault in its own
+    # input is worse than none), under its own banner so nobody goes looking for a broken test.
+    printf '\n%s\n' "${RED}━━━ glue tests: environment fault — credential refused (401) — key stale? no test failed ━━━${NC}"
+    printf '%s\n' "$glue_out" | grep -E '^(UNKNOWN|unknown:)' | sed 's/^/  /' || true
+    cat <<EOF
+
+The gap store refused this node's key, so the tracked-red exemption for the red glue test(s)
+above could not be read. Refresh METABOB_API_KEY (or the client config's store address) and
+commit again. Logs: ${GLUE_LOGS}/<test>.log
+EOF
+    exit 1
+  fi
+  if [[ $glue_rc -ne 0 ]]; then
+    printf '\n%s\n' "${RED}━━━ glue tests failed against the staged tree ━━━${NC}"
+    printf '%s\n' "$glue_out" | grep -E '^(FAIL|failed:)' | sed 's/^/  /' || true
+    cat <<EOF
+
+Each failing test's full output is in ${GLUE_LOGS}/<test>.log. The tests ran against the
+index, not the working tree: fix the staged content (git add) and commit again.
+Run by hand: bash validation/scripts/run-glue-tests.sh
+
+Bypass (only when the failure is known and unrelated to this commit):
+  git commit --no-verify
+EOF
+    exit 1
+  fi
+  rm -rf "$GLUE_LOGS"
+fi
+
+exit 0

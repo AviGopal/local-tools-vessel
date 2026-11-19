@@ -1,0 +1,7 @@
+{
+  "gate_paths": ["scripts/substrate/*", "validation/scripts/*"],
+  "non_root_paths": ["scripts/substrate/operator-only.sh"],
+  "fixture_paths": ["validation/scripts/gate/fixtures/*"],
+  "classifier": { "fixture_ordinary_status": ["A"] },
+  "soak_ticks": { "default": 1, "max": 12 }
+}

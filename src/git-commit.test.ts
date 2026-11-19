@@ -716,6 +716,35 @@ describe("git_commit", () => {
     });
   });
 
+  // The super-repo's real hook (test/fixtures/super-hooks/pre-commit, copied byte for byte), pinned from the super base:
+  // its placement rule decides a super commit, whatever the clone says of its own copy.
+  const REAL_HOOK = readFileSync(join(import.meta.dir, "..", "test", "fixtures", "super-hooks", "pre-commit"), "utf8");
+  it("[GUARD] the super base's hook refuses a file outside the allowed top-level directories, saying why, though the clone rewrote its own copy", async () => {
+    await withSuperHook(REAL_HOOK, async () => {
+      const s = await clone("super");
+      mkdirSync(join(s, "newtop"));
+      writeFileSync(join(s, "newtop", "x.md"), "misplaced\n");
+      mkdirSync(join(s, "scripts", "git-hooks"), { recursive: true });
+      writeFileSync(join(s, "scripts", "git-hooks", "pre-commit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      g(s, "config", "core.hooksPath", "scripts/git-hooks");
+      asOwner(s);
+      const r = await commitInClone(s, "a new top-level directory", undefined, find) as { error: string; stderr?: string; stderr_withheld?: string };
+      expect(r.error).toBe("the commit was refused (the pinned hook, or git)");
+      if (Bun.which("gitleaks")) expect(r.stderr).toContain("new file in unrecognised top-level directory");
+      expect(g(s, "rev-parse", "HEAD")).toBe(String(made.get(s)?.base));
+    });
+  });
+
+  it("a docs/ file commits under the super base's hook (the control)", async () => {
+    await withSuperHook(REAL_HOOK, async () => {
+      const s = await clone("super");
+      mkdirSync(join(s, "docs"), { recursive: true });
+      writeFileSync(join(s, "docs", "placed.md"), "placed\n");
+      const r = await commitInClone(s, "a doc", undefined, find);
+      expect("sha" in r ? "committed" : JSON.stringify(r)).toBe("committed");
+    });
+  });
+
   it("[MUST-FAIL] keeps the node's record-only hooks, but never its pre-commit, which would chain to the clone's own", async () => {
     const ledger = mkdtempSync(join(tmpdir(), "ledger-hooks-"));
     writeFileSync(join(ledger, "post-commit"), `#!/bin/sh\necho recorded >> "${OUT}/ledger.txt"\n`, { mode: 0o755 });

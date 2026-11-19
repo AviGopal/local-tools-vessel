@@ -2,7 +2,7 @@
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
@@ -1024,3 +1024,177 @@ describe("what a gap's check keeps of its test run", () => {
     expect(keptCheckOut(green, 4096)).toBe(green.slice(-4096))
   })
 })
+
+// A super-repo origin of its own for a describe: a bare repository seeded with `files`, the owner's repository row naming
+// its working branch while the describe runs, and super clones of it with one committed change and a person's r 1 on it.
+const superOrigin = (name: string, files: Record<string, string>) => {
+  const origin = join(T, `${name}.git`);
+  const seed = join(T, `${name}-seed`);
+  const write = (dir: string, edits: Record<string, string | null>) => {
+    for (const [p, text] of Object.entries(edits)) {
+      if (text === null) rmSync(join(dir, p));
+      else { mkdirSync(join(dir, p, ".."), { recursive: true }); writeFileSync(join(dir, p), text, { mode: 0o755 }); }
+    }
+  };
+  let n = 0;
+  let keepRepos: Row[] = [];
+  beforeAll(() => {
+    keepRepos = repoRows;
+    repoRows = [...repoRows, { id: "repo-super", seq: 1, shape: "repository", role: "owner", repo: "super", branch: "dev" } as Row];
+    g(T, "init", "-q", "--bare", "-b", "dev", origin);
+    g(T, "clone", "-q", origin, seed);
+    write(seed, files);
+    commitAll(seed, "super origin"); g(seed, "push", "-q", "origin", "HEAD:dev");
+  });
+  afterAll(() => { repoRows = keepRepos; });
+  return {
+    /** origin's branch moved by one commit: each path written, or removed when null. */
+    moveOrigin: (edits: Record<string, string | null>) => {
+      g(seed, "pull", "-q", "origin", "dev");
+      write(seed, edits);
+      commitAll(seed, "origin moves"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    },
+    /** A super clone of origin's branch with one committed change; its tree, with a person's r 1 on it. */
+    superChange: (edits: Record<string, string | null>, before?: (cwd: string) => void): { cwd: string; tree: string } => {
+      const cwd = join(T, "clones", `${name}-${++n}`);
+      g(T, "clone", "-q", "-b", "dev", origin, cwd);
+      made.set(cwd, { cwd, repo: "super", branch: "dev", base: g(cwd, "rev-parse", "HEAD"), super_base: g(SUPER, "rev-parse", "HEAD"), origin_url: origin });
+      write(cwd, edits);
+      before?.(cwd);
+      commitAll(cwd, "super change");
+      asOwner(cwd);
+      const tree = g(cwd, "rev-parse", "HEAD^{tree}");
+      table = personOn(tree, `v-${name}-${n}`).map((r) => ({ ...r, repo: "super" }) as Row);
+      return { cwd, tree };
+    },
+    superHead: () => g(origin, "rev-parse", "dev"),
+    tree: () => g(origin, "rev-parse", "dev^{tree}"),
+  };
+};
+
+// A change onto the super-repo may not widen the node gate's authority. What counts as a widening is the super-repo's
+// rule (scripts/substrate/gate/widening.sh, tested there); here it is a stand-in that says which policy it was handed
+// and which commits it compared, and answers as the rule does: 1 with a line per widening, 0 none, 2 cannot judge.
+describe("git_land onto the super-repo: the gate's authority only narrows", () => {
+  const CALLS = join(OUT, "widening-calls.txt");
+  const RULE = '#!/usr/bin/env bash\nwhile [ $# -gt 0 ]; do case "$1" in --policy) P="$2"; shift ;; --super) S="$2"; shift ;; --base) B="$2"; shift ;; --head) H="$2"; shift ;; esac; shift; done\n' +
+    `mode="$(jq -r .mode "$P")"\necho "$mode $B $H" >> "${CALLS}"\n` +
+    '[ "$mode" = unjudgeable ] && { echo "cannot judge: the policy says so"; exit 2; }\n[ "$mode" = lax ] && exit 0\n' +
+    'git -C "$S" diff --name-status --no-renames "$B" "$H" | awk -F"\\t" \'$1 != "A" && $2 ~ /^gate\\/fixtures\\// { print "fixture " $1 ": " $2; n++ } END { exit n > 0 }\'\n';
+  const POLICY = (mode: string) => JSON.stringify({ mode }) + "\n";
+  const files: Record<string, string> = {
+    "scripts/substrate/gate/widening.sh": RULE, "scripts/substrate/gate/gate-policy.json": POLICY("strict"),
+    "scripts/substrate/autonomy-scope.json": SCOPE(["scripts/substrate/"]), "gate/fixtures/accepted.json": "{}\n", "README.md": "super\n",
+  };
+  const { moveOrigin, superChange, superHead, tree: originTree } = superOrigin("super-origin", files);
+  const calls = () => (existsSync(CALLS) ? Bun.file(CALLS).text() : Promise.resolve("")).then((t) => t.split("\n").filter(Boolean));
+
+  scanned("[MUST-FAIL] a change that edits an accepted gate fixture is refused as a widening, even on a person's r 1, naming it", async () => {
+    const before = superHead();
+    const { cwd } = superChange({ "gate/fixtures/accepted.json": '{"loosened":true}\n' });
+    const r = await landClone(cwd, deps) as { error: string; widening?: string[] };
+    expect(r.error).toBe("authority_widening: fixture M: gate/fixtures/accepted.json");
+    expect(r.widening).toEqual(["fixture M: gate/fixtures/accepted.json"]);
+    expect(superHead()).toBe(before);
+    // judged with origin's policy, origin's branch as the base and the change as the head
+    expect((await calls()).at(-1)).toBe("strict refs/remotes/origin/dev refs/land/head");
+  });
+
+  scanned("[MUST-FAIL] the change's own rule and policy never judge it: rewriting both to pass still refuses", async () => {
+    const before = superHead();
+    const { cwd } = superChange({ "gate/fixtures/accepted.json": "[]\n", "scripts/substrate/gate/widening.sh": "#!/bin/sh\nexit 0\n",
+      "scripts/substrate/gate/gate-policy.json": POLICY("lax") });
+    expect(String((await landClone(cwd, deps) as { error: string }).error)).toBe("authority_widening: fixture M: gate/fixtures/accepted.json");
+    expect(superHead()).toBe(before);
+  });
+
+  scanned("[MUST-FAIL] a rule that cannot judge the change, or no rule at origin, refuses: never read as no widening", async () => {
+    try {
+      moveOrigin({ "scripts/substrate/gate/gate-policy.json": POLICY("unjudgeable") });
+      const a = superChange({ "README.md": "docs only\n" });
+      const before = superHead();
+      expect(String((await landClone(a.cwd, deps) as { error: string }).error))
+        .toBe("the gate-widening rule could not judge the change (exit 2: cannot judge: the policy says so): nothing lands");
+      expect(superHead()).toBe(before);
+      moveOrigin({ "scripts/substrate/gate/gate-policy.json": POLICY("strict"), "scripts/substrate/gate/widening.sh": null });
+      const b = superChange({ "README.md": "docs only\n" });
+      expect(String((await landClone(b.cwd, deps) as { error: string }).error)).toContain("has no scripts/substrate/gate/widening.sh");
+      moveOrigin({ "scripts/substrate/gate/gate-policy.json": null, "scripts/substrate/gate/widening.sh": RULE });
+      const c = superChange({ "README.md": "docs only\n" });
+      expect(String((await landClone(c.cwd, deps) as { error: string }).error)).toContain("has no scripts/substrate/gate/gate-policy.json");
+    } finally {
+      moveOrigin({ "scripts/substrate/gate/gate-policy.json": POLICY("strict"), "scripts/substrate/gate/widening.sh": RULE });
+    }
+  });
+
+  scanned("[GUARD] a key in a super-repo doc is refused by the scan's rule, an inline allow comment notwithstanding; origin does not move", async () => {
+    const secret = ["mb", "_", "R".repeat(20), "y".repeat(20)].join("");
+    const before = superHead();
+    for (const text of [`token: ${secret}\n`, `token: ${secret} # gitleaks:allow\n`]) {
+      const { cwd } = superChange({ "docs/setup.md": text });
+      const r = await landClone(cwd, deps) as { error: string; rules?: string[] };
+      expect([r.error, r.rules]).toEqual(["the secrets scan found something in the change", ["substrate-api-key"]]);
+      expect(JSON.stringify(r)).not.toContain(secret);
+    }
+    expect(superHead()).toBe(before);
+  });
+
+  scanned("a docs-only change, and a new gate fixture, are no widening: each lands on a person's r 1 (controls)", async () => {
+    const docs = superChange({ "README.md": "a docs-only change\n" });
+    const d = await landClone(docs.cwd, deps);
+    expect("pushed" in d ? d.changed : JSON.stringify(d)).toEqual(["README.md"]);
+    expect(originTree()).toBe(docs.tree);
+    const added = superChange({ "gate/fixtures/new.json": "{}\n" });
+    const a = await landClone(added.cwd, deps);
+    expect("pushed" in a ? a.changed : JSON.stringify(a)).toEqual(["gate/fixtures/new.json"]);
+  });
+});
+
+// The same check with the super-repo's real rule, as committed there (test/fixtures/gate/widening.sh, copied byte for
+// byte), and a gate policy with the keys it reads: a stand-in alone could pass while the rule's arguments, exit codes
+// or lines differ from what git_land reads.
+describe("git_land onto the super-repo, judged by the real widening rule", () => {
+  const FIX = join(import.meta.dir, "..", "test", "fixtures", "gate");
+  const POLICY = readFileSync(join(FIX, "gate-policy.json"), "utf8");
+  const ACCEPTED = "validation/scripts/gate/fixtures/accepted.json";
+  const { superChange, superHead, tree: originTree } = superOrigin("super-real", {
+    "scripts/substrate/gate/widening.sh": readFileSync(join(FIX, "widening.sh"), "utf8"), "scripts/substrate/gate/gate-policy.json": POLICY,
+    "scripts/substrate/autonomy-scope.json": SCOPE(["scripts/substrate/"]), [ACCEPTED]: "{}\n", "README.md": "super\n",
+  });
+  const EDITED = `authority_widening: M ${ACCEPTED} (accepted fixture edited or removed)`;
+
+  scanned("[MUST-FAIL] an accepted fixture edited, a gate path dropped or the soak lowered is refused, each named as the rule names it", async () => {
+    const before = superHead();
+    expect((await landClone(superChange({ [ACCEPTED]: "[]\n" }).cwd, deps) as { error: string }).error).toBe(EDITED);
+    const loosened = JSON.parse(POLICY) as { gate_paths: string[]; soak_ticks: { default: number } };
+    loosened.gate_paths = loosened.gate_paths.filter((p) => p !== "validation/scripts/*");
+    loosened.soak_ticks.default = 0;
+    const r = await landClone(superChange({ "scripts/substrate/gate/gate-policy.json": JSON.stringify(loosened) }).cwd, deps) as { error: string; widening?: string[] };
+    expect(r.widening).toEqual(["scripts/substrate/gate/gate-policy.json drops gate_paths entry 'validation/scripts/*'",
+      "scripts/substrate/gate/gate-policy.json lowers soak_ticks.default 1 -> 0"]);
+    expect(superHead()).toBe(before);
+  });
+
+  scanned("[MUST-FAIL] what the change's clone configures never runs while the rule judges, and the verdict is the same", async () => {
+    const before = superHead();
+    const ran = join(OUT, "clone-config-ran");
+    const { cwd } = superChange({ [ACCEPTED]: '{"x":1}\n', ".gitattributes": "* diff=evil\n" });
+    writeFileSync(join(cwd, "evil.sh"), `#!/bin/sh\ntouch "${ran}"\n`, { mode: 0o755 });
+    g(cwd, "config", "diff.evil.textconv", join(cwd, "evil.sh"));
+    g(cwd, "config", "core.fsmonitor", join(cwd, "evil.sh"));
+    asOwner(cwd);
+    const r = await landClone(cwd, deps) as { error: string };
+    expect(r.error).toBe(EDITED);
+    expect(existsSync(ran)).toBe(false);
+    expect(superHead()).toBe(before);
+  });
+
+  scanned("a README-only change and a new fixture are no widening under the real rule: each lands (controls)", async () => {
+    const docs = superChange({ "README.md": "a docs-only change\n" });
+    expect("pushed" in (await landClone(docs.cwd, deps))).toBe(true);
+    expect(originTree()).toBe(docs.tree);
+    const added = superChange({ "validation/scripts/gate/fixtures/new.json": "{}\n" });
+    expect("pushed" in (await landClone(added.cwd, deps))).toBe(true);
+    expect(originTree()).toBe(added.tree);
+  });
+});

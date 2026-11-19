@@ -9,6 +9,7 @@
 //   - the changed paths and which of them need a person are recomputed here (git-commit.ts's answer is advisory);
 //   - a secrets scan must run (gitleaks is required: missing, the landing is refused), with the super base's config
 //     and inline allow comments ignored. A finding is named by its rule, never its text;
+//   - onto the super-repo, the change may not widen the node gate's authority, as origin's own widening rule says it;
 //   - a verdict row must approve this tree: a person's r 1 (records stamps person rows from the person's own key), or,
 //     when no path needs a person, a grader's r 1 made from exactly the request and the walk's gitDiff row of this tree.
 //     Any grader's r 0 on the tree blocks it unless a person approves.
@@ -90,7 +91,7 @@ export async function intoTrusted(cwd: string, made: Made, work: string, transpo
 export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
       needs_person: string[]; verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
-  | { error: string; stderr?: string; rules?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person"; unserved?: string;
+  | { error: string; stderr?: string; rules?: string[]; widening?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person"; unserved?: string;
       clone?: { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; head: string; tree: string } };
 
 /**
@@ -160,6 +161,10 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
       return { error: "the secrets scan found something in the change", rules };
     }
     if (sc !== 0) return { error: `the secrets scan did not run cleanly (exit ${sc})` };
+    if (made.repo === "super") {
+      const widened = await widening(t, work);
+      if (widened !== undefined) return { ...widened, tree, needs_person };
+    }
 
     const verdict = await approved(d, made, tree, needs_person);
     // refused: where the clone is now, as a row the walk records (its newest tree, read by no words), so the next move is a
@@ -178,6 +183,43 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
   }
+}
+
+// THE GATE'S AUTHORITY MAY ONLY NARROW ON A LANDING. A super-repo change that edits an accepted gate fixture, drops a
+// gate path, or loosens the gate policy is refused here, before the push, whatever any verdict says: a person's approval
+// of a change to what judges changes is not approval to widen what the gate accepts, and the node gate refuses such a
+// change only at install, after it is already on a public branch. What counts as a widening is stated once, in the
+// super-repo's widening.sh; the copy that judges is origin's (the branch the change would move), run with origin's gate
+// policy, never the change's own, so a change cannot rewrite the rule it is judged by. Its answer is read by exit
+// status: 1 is a widening (each line names one), 0 none, and anything else, or no rule at origin, refuses: what cannot
+// be judged does not land.
+const WIDENING_RULE = "scripts/substrate/gate/widening.sh";
+const GATE_POLICY = "scripts/substrate/gate/gate-policy.json";
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+async function widening(t: Trusted, work: string): Promise<{ error: string; widening?: string[] } | undefined> {
+  const rule = await t.out(["show", `${t.origin}:${WIDENING_RULE}`]);
+  const policy = await t.out(["show", `${t.origin}:${GATE_POLICY}`]);
+  if (rule === null || policy === null) {
+    return { error: `origin's super-repo has no ${rule === null ? WIDENING_RULE : GATE_POLICY}: nothing would tell a widening of the gate, so nothing lands` };
+  }
+  const dir = mkdtempSync(join(work, "widening-"));
+  writeFileSync(join(dir, "widening.sh"), `${rule}\n`);
+  writeFileSync(join(dir, "gate-policy.json"), `${policy}\n`);
+  // Every git the rule runs is as isolated as the land's own steps: no system or user config, no credential, no
+  // transport, no hooks, no fsmonitor, and no attributes (a diff driver or textconv the change names never runs).
+  const hooks = mkdtempSync(join(work, "widening-hooks-"));
+  chmodSync(hooks, 0o555);
+  const config: Array<[string, string]> = [["protocol.allow", "never"], ["credential.helper", ""], ["core.hooksPath", hooks],
+    ["core.fsmonitor", "false"], ["core.attributesFile", "/dev/null"], ["attr.tree", EMPTY_TREE]];
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: work, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_COUNT: String(config.length) };
+  config.forEach(([k, v], i) => { env[`GIT_CONFIG_KEY_${i}`] = k; env[`GIT_CONFIG_VALUE_${i}`] = v; });
+  const r = await runBounded(["bash", join(dir, "widening.sh"), "--policy", join(dir, "gate-policy.json"), "--super", t.repo, "--base", t.origin, "--head", "refs/land/head"],
+    { cwd: dir, env, stepMs: STEP_MS });
+  if (r.exit_code === 0) return undefined;
+  const said = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 20);
+  if (r.exit_code === 1) return { error: `authority_widening: ${said.join("; ")}`, widening: said };
+  return { error: `the gate-widening rule could not judge the change (exit ${r.exit_code}${said.length > 0 ? `: ${said.join("; ")}` : ""}): nothing lands` };
 }
 
 // A request is what a person or the owner asked: an exogenous row that is not a grade and not the owner's configuration.
