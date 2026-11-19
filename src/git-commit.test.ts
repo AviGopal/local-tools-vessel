@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone, refusedSaying } from "./git-commit";
-import { makeWorktree } from "./git-worktree";
+import { committedTree, makeWorktree } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
 import { callsRead, episodeRead, recordRead, walkCall } from "./walk-call-rows.test-helper";
 
@@ -746,5 +746,30 @@ describe("git_commit", () => {
     writeFileSync(join(cwd, "a.txt"), "seven\n");
     await commitInClone(cwd, "something", undefined, find);
     expect(pinned()).toBe(before);
+  });
+});
+
+// committed_tree is what a diff waits on, so a clone git cannot read says none: never "", never git's echo of its
+// argument, never a tree for a clone whose state is unknown.
+describe("committedTree: a clone git cannot read says no committed tree", () => {
+  it("[MUST-FAIL] a clone with no commit yet (HEAD's tree unreadable), clean, says none", async () => {
+    const cwd = join(T, "unborn");
+    mkdirSync(cwd, { recursive: true });
+    g(cwd, "init", "-q");
+    asOwner(cwd);
+    expect(await committedTree(cwd)).toEqual({});
+  });
+
+  it("[MUST-FAIL] a clone whose index git cannot read (status fails) says none, though HEAD's tree reads", async () => {
+    const cwd = join(T, "bad-index");
+    mkdirSync(cwd, { recursive: true });
+    g(cwd, "init", "-q");
+    asOwner(cwd);
+    writeFileSync(join(cwd, "a.txt"), "a\n"); commitAll(cwd, "one commit"); asOwner(cwd);
+    expect(await committedTree(cwd)).toEqual({ committed_tree: g(cwd, "rev-parse", "HEAD^{tree}") });
+    writeFileSync(join(cwd, ".git", "index"), "not an index");
+    asOwner(cwd);
+    expect(() => g(cwd, "status", "--porcelain")).toThrow(/index/);
+    expect(await committedTree(cwd)).toEqual({});
   });
 });
