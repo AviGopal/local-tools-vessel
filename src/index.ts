@@ -31,7 +31,7 @@ import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { detect } from "./walk-failure-detect.js";
 import { diffClone, gapOf, isGapCheckFile, landClone } from "./git-land.js";
 import { readRows } from "./walk-rows.js";
-import { behind, cloneOf } from "./clone-freshness.js";
+import { behind, cloneOf, editedClone } from "./clone-freshness.js";
 import { freshFirst, madeCurrent } from "./clone-refresh.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 import { runBounded } from "./bounded-run.js";
@@ -1045,7 +1045,10 @@ for (const [name, handler] of resolvers) {
     const clone = cloneOf((body?.impulse as { pointer?: unknown } | undefined)?.pointer ?? body, process.env);
     // A clone behind the copy is brought onto it first (clone-refresh.ts), so the call works in a clone that can land; one
     // that cannot be carried is said, and the tool does not run in it.
-    const out = await freshFirst(clone, () => handler(ctx), process.env);
+    const done = await freshFirst(clone, () => handler(ctx), process.env);
+    // An edit that changed a file in a walk clone says which clone (cwd), whatever the call's pointer named.
+    const edited = editedClone(done, process.env);
+    const out = edited === null ? done : { ...(done as Record<string, unknown>), cwd: edited };
     if (clone === null || typeof out !== "object" || out === null) return out;
     const why = await behind(clone, process.env).catch(() => null);
     // First: the walk keeps the start of a long answer (a cut hop) and of a refusal (its failure row), so a note at the

@@ -102,3 +102,35 @@ describe("an ok edit names the file as it left it", () => {
     expect("after" in (await edit(file, "const z = 0;", "const z = 0;"))).toBe(false);
   });
 });
+
+describe("an edit that changed a file in a walk clone names the clone", () => {
+  const clone = join(trees, "demo-vessel-mwabc123-1a2b3c4d");
+  it("[MUST-FAIL] an applied edit says cwd: the clone its path is in", async () => {
+    const file = join(dir, "cwd-applied.ts");
+    writeFileSync(file, "export const n = 1;\n");
+    expect(await edit(file, "n = 1", "n = 2")).toMatchObject({ shape: "fileEditResult", ok: true, cwd: clone });
+  });
+
+  it("an edit already in the file, a refused edit, or a path in no clone says no cwd", async () => {
+    const file = join(dir, "cwd-already.ts");
+    writeFileSync(file, "export const m = 1;\n");
+    await edit(file, "m = 1", "m = 2");
+    const again = await edit(file, "m = 1", "m = 2");
+    const refused = await edit(file, "not in the file", "x");
+    const outside = join(T, "outside.ts");
+    writeFileSync(outside, "export const o = 1;\n");
+    const there = await edit(outside, "o = 1", "o = 2");
+    expect([again.applied, "cwd" in again, "cwd" in refused, "cwd" in there]).toEqual([false, false, false, false]);
+  });
+
+  it("[MUST-FAIL] every tool that changes a file names the clone, and none that found its change already made does", async () => {
+    const { editedClone } = await import("./clone-freshness");
+    const env = { WALK_TREES_DIR: trees };
+    const path = join(dir, "x.ts");
+    const said = ["fileWriteResult", "fileEditResult", "codeInsertResult", "codeReplaceResult", "codeAddImportResult"].map((shape) => editedClone({ shape, path }, env));
+    expect(said).toEqual([clone, clone, clone, clone, clone]);
+    expect([editedClone({ shape: "codeAddImportResult", path, action: "already_present" }, env), editedClone({ shape: "fileEditResult", path, applied: false }, env),
+      editedClone({ shape: "fileEditResult", path, error: "x" }, env), editedClone({ shape: "fileContent", path }, env), editedClone({ shape: "fileEditResult", path: join(trees, "x.ts") }, env)])
+      .toEqual([null, null, null, null, null]);
+  });
+});

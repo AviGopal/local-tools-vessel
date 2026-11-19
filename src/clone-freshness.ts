@@ -23,6 +23,19 @@ export function cloneOf(pointer: unknown, env: Env): { dir: string; repo: string
   return null;
 }
 
+// The answers of the tools that change a file.
+const EDITS = new Set(["fileWriteResult", "fileEditResult", "codeInsertResult", "codeReplaceResult", "codeAddImportResult"]);
+
+/** The walk clone an edit changed a file in, when it changed one: an edit answer with no error, not one that found the
+ *  change already made (applied: false, already_present), whose path is in a walk clone. A reader can then tell an edit
+ *  of this clone from one of another, and an edit newer than the clone's last commit from one older. */
+export function editedClone(answer: unknown, env: Env): string | null {
+  if (typeof answer !== "object" || answer === null) return null;
+  const a = answer as Record<string, unknown>;
+  if (!EDITS.has(String(a.shape)) || "error" in a || a.applied === false || a.action === "already_present") return null;
+  return typeof a.path === "string" ? cloneOf({ path: a.path }, env)?.dir ?? null : null;
+}
+
 /** Why a change made in this clone cannot land, when this node's copy of its repository has moved past it; else null. */
 export async function behind(clone: { dir: string; repo: string }, env: Env): Promise<string | null> {
   const zones = containmentZones(env);
