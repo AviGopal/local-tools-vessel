@@ -23,8 +23,21 @@
 //     super-repo clone ("nothing lands there by a tool write").
 // So: a command is REFUSED when it has a write whose LITERAL target resolves into a
 // super-repo clone (a relative target against the effective cwd, or an absolute
-// path), or a mutating git subcommand whose repository (cwd, `cd X`, or `git -C X`)
-// is inside one. Read commands run unchanged, with the same cwd as before.
+// path), or a git command that is not a read form whose repository (cwd, `cd X`,
+// `git -C X`, `--git-dir`, GIT_DIR) is inside one. Read commands run unchanged, with
+// the same cwd as before. In the other protected zones (vessel clones, compose worktrees,
+// runtime), a git command that would set a program git runs there (a config write, -c,
+// --config-env, a GIT_*/PAGER variable, a transport program option) is refused early,
+// with a reason, while the lane's ordinary writes there stay allowed.
+// WHAT CLOSES THAT CLASS IS NOT THIS CHECK. It is lexical and cannot be complete: a
+// wrapper it does not unwrap, a file written under .git, an exported GIT_DIR or a linked
+// worktree all reach the same config. What closes it is ownership: the zones, the super
+// clone and their .git are root's, and the shell runs as an unprivileged user that cannot
+// write them; a walk's clone is that user's own workspace, where every git a tool runs is
+// git as that same user (git-commit.ts git()), so a program planted there gains nothing;
+// and git as this vessel refuses a repository another user owns (git's ownership check,
+// which vesselGit never widens: root-git-foreign-repo.test.ts). This check gives the
+// early, explained refusal; it is not the boundary.
 //
 // A LANE GRANT bypasses the gate: a write grant (write-containment's HMAC, same key,
 // same TTL) signed over the exact cwd string the request sends. No caller mints one
@@ -39,15 +52,44 @@
 // longer offers the shell at all.
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { containmentZones, verifyWriteGrant, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD, type Env } from "./write-containment.js";
+import { containmentZones, verifyWriteGrant, WRITE_CONTAINMENT_ERROR, WRITE_GRANT_FIELD, zoneOf, type Env } from "./write-containment.js";
 
 export { WRITE_GRANT_FIELD };
 
-/** git subcommands that change a repository's index, refs, working tree or remote. */
-export const MUTATING_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
-  "commit", "push", "reset", "add", "rm", "mv", "checkout", "restore", "switch", "rebase", "merge",
-  "stash", "clean", "cherry-pick", "revert", "am", "apply", "pull", "tag", "init", "clone", "update-ref",
+/**
+ * git subcommands that only read the repository. The gate's own definition of a read: anything else
+ * in the live super-repo clone is refused, so a subcommand git adds later is refused until named here.
+ */
+const GIT_READS = new Set([
+  "status", "log", "diff", "show", "rev-parse", "rev-list", "cat-file", "ls-files", "ls-tree", "blame", "grep",
+  "describe", "shortlog", "merge-base", "show-ref", "for-each-ref", "diff-tree", "name-rev",
 ]);
+/** Read-form options that still write a file or run a program. */
+const GIT_READ_WRITERS = ["--output", "-O", "--open-files-in-pager"];
+/** Options naming a program a transport runs. */
+const GIT_EXEC_OPTIONS = ["--upload-pack", "--receive-pack", "--exec"];
+/** xargs options that take the next word as their value. */
+const XARGS_VALUE_OPTIONS = ["-I", "-E", "-a", "-d", "-P", "-n", "-s", "-L"];
+
+/** Is `git <sub> <rest>` a read form? config, remote, branch, submodule, symbolic-ref and worktree read only in some forms. */
+function gitRead(sub: string, rest: string[]): boolean {
+  const opts = rest.filter((a) => a.startsWith("-"));
+  // an option's separate value (config's -f get: a file named "get") is not a word of the command
+  const words = rest.filter((a, i) => !a.startsWith("-") && !(sub === "config" && ["-f", "--file", "--blob"].includes(rest[i - 1] ?? "")));
+  const optIs = (o: string, names: string[]): boolean => names.some((n) => o === n || o.startsWith(`${n}=`));
+  if (GIT_READS.has(sub)) return !opts.some((o) => optIs(o, GIT_READ_WRITERS) || (o.startsWith("-O") && o.length > 2));
+  switch (sub) {
+    case "config": return opts.some((o) => ["--get", "--get-all", "--get-regexp", "--list", "-l"].includes(o)) || ["get", "list"].includes(words[0] ?? "");
+    case "remote": return words.length === 0 || words[0] === "get-url";
+    case "branch":
+      if (opts.includes("--list") || opts.includes("-l")) return true;
+      return words.length === 0 && opts.every((o) => ["-a", "-r", "-v", "-vv", "--all", "--remotes", "--verbose", "--show-current"].includes(o));
+    case "submodule": return words.length === 0 || words[0] === "status";
+    case "symbolic-ref": return words.length === 1 && !opts.some((o) => o === "-d" || o === "--delete");
+    case "worktree": return words[0] === "list";
+    default: return false;
+  }
+}
 
 /** Commands every non-option argument of which is a write target. */
 const ALL_ARG_WRITERS = new Set(["rm", "rmdir", "touch", "mkdir", "truncate", "shred", "unlink", "tee"]);
@@ -116,63 +158,18 @@ function realCwd(dir: string): string {
  * (absolute). Pure apart from realpath on directories.
  */
 export function containShell(command: string, cwd: string, opts: { env: Env; rawCwd?: string; grant?: unknown; now?: number }): ShellVerdict {
-  const supers = containmentZones(opts.env).supers;
+  const zones = containmentZones(opts.env);
+  const supers = zones.supers;
   if (supers.length === 0) return { ok: true };
   if (verifyWriteGrant(opts.env.METABOB_API_KEY, opts.rawCwd ?? cwd, opts.grant, opts.now)) return { ok: true };
   const superOf = (p: string): string | null => {
     for (const s of supers) if (within(p, s)) return s;
     return null;
   };
-  // Early refusal for additional mutating git forms not yet in the fixed set.
-  {
-    const segs = segments(command);
-    for (const words of segs) {
-      if (words.length === 0) continue;
-      if (words[0] !== "git") continue;
-      // Parse global git options up to the subcommand. Consume -C DIR and -c NAME=VALUE.
-      let j = 1;
-      let repoArg: string | null = null;
-      while (j < words.length && words[j]!.startsWith("-")) {
-        const w = words[j]!;
-        if (w === "-C" && j + 1 < words.length) { repoArg = words[j + 1]!; j += 2; continue; }
-        if (w === "-c" && j + 1 < words.length) { j += 2; continue; }
-        j++;
-      }
-      const sub = words[j];
-      if (!sub) continue;
-      const rest = words.slice(j + 1);
-      let refuse = false;
-      if (sub === "config") {
-        const readFlags = new Set(["--get", "--get-all", "--list", "-l", "--get-regexp"]);
-        refuse = !rest.some((t) => readFlags.has(t));
-      } else if (sub === "submodule") {
-        let sub2: string | undefined;
-        for (const t of rest) { if (!t.startsWith("-")) { sub2 = t; break; } }
-        refuse = (sub2 === "update");
-      } else if (sub === "branch") {
-        if (rest.includes("--list") || rest.includes("-l")) {
-          refuse = false;
-        } else {
-          refuse = rest.includes("-f") || rest.includes("--force");
-        }
-      } else if (sub === "remote") {
-        let sub2: string | undefined;
-        for (const t of rest) { if (!t.startsWith("-")) { sub2 = t; break; } }
-        // Allow `git remote -v` or `--verbose` listing; refuse set-url mutation.
-        if (rest.includes("-v") || rest.includes("--verbose")) {
-          refuse = false;
-        } else {
-          refuse = (sub2 === "set-url");
-        }
-      }
-      if (refuse) {
-        const base = repoArg ? (isAbsolute(repoArg) ? repoArg : resolve(cwd, repoArg)) : cwd;
-        const targetRepo = realCwd(base);
-        if (superOf(targetRepo)) {
-          return { ok: false, reason: WRITE_CONTAINMENT_ERROR };
-        }
-      }
-    }
+  // A backtick substitution runs its body as a command of its own: it is gated as one, wherever it sits in a word.
+  for (const m of command.matchAll(/`([^`]*)`/g)) {
+    const v = containShell(m[1]!, cwd, opts);
+    if (!v.ok) return v;
   }
   // Opaque inline programs and command substitutions — fail closed inside the live super-repo clone.
   {
@@ -356,7 +353,7 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
       let i = 1;
       while (i < words.length && words[i]!.startsWith("-")) {
         const opt = words[i]!;
-        if (["-I","-E","-a","-d","-P","-n","-s","-L"].includes(opt) && i + 1 < words.length) { i += 2; continue; }
+        if (XARGS_VALUE_OPTIONS.includes(opt) && i + 1 < words.length) { i += 2; continue; }
         i++;
       }
       const sub = words[i];
@@ -391,6 +388,10 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
     ok: false,
     reason: `${WRITE_CONTAINMENT_ERROR}: shell ${what} targets ${target}, inside the live super-repo clone ${root}; the shell may read there but nothing lands in the live clone by a tool write — land a change as a commit through the lane`,
   });
+  const refuseExec = (what: string, repo: string): ShellVerdict => ({
+    ok: false,
+    reason: `${WRITE_CONTAINMENT_ERROR}: shell ${what} in ${repo} would set a program git runs there (a hook, pager, fsmonitor, editor or transport command), which every vessel's next git command in that clone would run; the shell may not change what git runs`,
+  });
   const checkTarget = (what: string, w: string | undefined): ShellVerdict | null => {
     if (!literal(w) || w.startsWith("-")) return null;
     if (dir === null && !isAbsolute(w)) return null;
@@ -417,8 +418,20 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
     }
     // Skip leading env assignments and wrappers that only run the next word.
     let k = 0;
-    while (k < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!) || ["sudo", "env", "nohup", "command", "exec", "time", "nice"].includes(words[k]!))) k++;
-    if (k < words.length && words[k] === "timeout") { k++; while (k < words.length && words[k]!.startsWith("-")) k++; k++; }
+    const assigned: string[] = [];
+    for (;;) {
+      while (k < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!) || ["sudo", "env", "nohup", "command", "exec", "time", "nice"].includes(words[k]!))) {
+        if (words[k]!.includes("=")) assigned.push(words[k]!);
+        k++;
+      }
+      if (k < words.length && words[k] === "timeout") { k++; while (k < words.length && words[k]!.startsWith("-")) k++; k++; continue; }
+      if (k < words.length && words[k] === "xargs") {
+        k++;
+        while (k < words.length && words[k]!.startsWith("-")) k += XARGS_VALUE_OPTIONS.includes(words[k]!) ? 2 : 1;
+        continue;
+      }
+      break;
+    }
     const cmd = words[k];
     if (!cmd) continue;
     const base = cmd.slice(cmd.lastIndexOf("/") + 1);
@@ -430,26 +443,48 @@ export function containShell(command: string, cwd: string, opts: { env: Env; raw
       continue;
     }
     if (base === "git") {
+      const at = (p: string | undefined, from: string | null): string | null =>
+        literal(p) && (from !== null || isAbsolute(p)) ? realCwd(resolve(from ?? "/", p)) : null;
       let repo: string | null = dir;
+      // GIT_DIR / GIT_WORK_TREE choose the repository as --git-dir / --work-tree do; one that is not literal leaves it as it was
+      const selects = (p: string): void => { if (literal(p)) repo = at(p, repo); };
+      for (const w of assigned) if (/^GIT_(DIR|WORK_TREE)=/.test(w)) selects(w.slice(w.indexOf("=") + 1));
       let sub: string | undefined;
-      for (let i = 0; i < args.length; i++) {
+      let override = assigned.map((w) => w.slice(0, w.indexOf("="))).find((n) => n.startsWith("GIT_") || n === "PAGER");
+      let i = 0;
+      for (; i < args.length; i++) {
         const a = args[i]!;
-        if (a === "-C") { const p = args[++i]; repo = literal(p) && (repo !== null || isAbsolute(p)) ? realCwd(resolve(repo ?? "/", p)) : null; continue; }
-        if (a === "-c" || a === "--git-dir" || a === "--work-tree" || a === "--namespace") { i++; continue; }
+        if (a === "-C") { repo = at(args[++i], repo); continue; }
+        if (a === "--git-dir" || a === "--work-tree") { selects(args[++i] ?? ""); continue; }
+        if (a.startsWith("--git-dir=") || a.startsWith("--work-tree=")) { selects(a.slice(a.indexOf("=") + 1)); continue; }
+        if (a === "-c" || a === "--config-env") { override ??= a; i++; continue; }
+        if (a.startsWith("--config-env=") || a.startsWith("--exec-path=")) { override ??= a.slice(0, a.indexOf("=")); continue; }
+        if (a === "--namespace") { i++; continue; }
         if (a.startsWith("-")) continue;
         sub = a; break;
       }
-      if (sub && MUTATING_GIT_SUBCOMMANDS.has(sub) && repo) {
-        const root = superOf(repo);
-        if (root) return refuse(`'git ${sub}'`, repo, root);
+      const rest = sub === undefined ? [] : args.slice(i + 1);
+      const read = sub === undefined || gitRead(sub, rest);
+      override ??= rest.find((o) => GIT_EXEC_OPTIONS.some((n) => o === n || o.startsWith(`${n}=`)))?.split("=")[0];
+      // a config write lands where its file is: --file names it, --global/--system reach every clone at once
+      let configAt: string | null = repo;
+      if (sub === "config" && !read) {
+        if (rest.some((o) => o === "--global" || o === "--system")) return refuseExec("'git config --global'", "the node's git configuration, which every clone reads");
+        const f = rest.findIndex((o) => o === "--file" || o === "-f");
+        const fEq = rest.find((o) => o.startsWith("--file="));
+        if (f >= 0 || fEq) configAt = at(f >= 0 ? rest[f + 1] : fEq!.slice("--file=".length), repo);
       }
+      const zoned = (p: string | null): boolean => p !== null && zoneOf(p, zones) !== null;
+      if (repo !== null && superOf(repo) && !read) return refuse(`'git ${sub}'`, repo, superOf(repo)!);
+      if (zoned(repo) && override !== undefined) return refuseExec(`'git ${override}'`, repo!);
+      if (sub === "config" && !read && zoned(configAt)) return refuseExec("'git config'", configAt!);
       continue;
     }
     // Nested interpreter/inline eval forms are disallowed within a super-repo clone without a matching write grant.
     {
       const root = dir ? superOf(dir) : undefined;
       if (root && !verifyWriteGrant(opts.env.METABOB_API_KEY, root, opts.grant, opts.now)) {
-        const isShellC = (base === "bash" || base === "sh" || base === "zsh") && args.some((a) => a === "-c");
+        const isShellC = (base === "bash" || base === "sh" || base === "zsh") && args.some((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
         const isEval = base === "eval";
         const isNodeEval = (base === "bun" || base === "node") && args.some((a) => a === "-e" || a === "--eval");
         const isPyPerlEval = (base === "python" || base === "python3" || base === "perl") && args.some((a) => a === "-e");

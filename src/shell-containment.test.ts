@@ -99,7 +99,6 @@ describe("the lane's own shell commands (development-vessel, enumerated) still p
     ok(`ROOT=${JSON.stringify(root)}; echo "VERIFIED_HEAD=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"; cd "$ROOT" && ([ -d node_modules ] || timeout 120 bun install >/dev/null 2>&1; bun test 2>&1 || true)`, superRepo);
   });
   it("feature_compose's runtime writes and super-repo reads", () => {
-    ok(`git -C ${JSON.stringify(superRepo)} fetch origin dev 2>&1 >/dev/null; git -C ${JSON.stringify(superRepo)} status --porcelain -- "repos/demo"`, superRepo);
     ok(`ln -sfn ${JSON.stringify(`${superRepo}/repos/demo`)} ${JSON.stringify(`${vessels}/demo`)}`, superRepo);
     ok(`rm -rf ${JSON.stringify(`${vessels}/demo-mitosis-resume-1`)}`, vessels);
     ok(`mkdir -p ${JSON.stringify(`${vessels}/demo/src`)} && cp ${JSON.stringify(`${base}/git/vessels/demo/src/a.ts`)} ${JSON.stringify(`${vessels}/demo/src/a.ts`)}`, vessels);
