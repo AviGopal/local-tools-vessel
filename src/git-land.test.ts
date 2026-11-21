@@ -232,6 +232,12 @@ describe("git_land", () => {
     expect(await refusal({ ran: false, passed: false, why: "the suite did not finish on the tree within the step bound (9 ms)" }))
       .toContain("the whole test suite did not say it passes: the suite did not finish on the tree within the step bound");
     expect(await refusal(undefined)).toContain("says nothing of the whole test suite");
+    // many red: the first 20 named, the rest counted; exactly 20 are all named, with no count
+    const many = (n: number) => ({ ...red, regressed: Array.from({ length: n }, (_, i) => `t.test.ts > t > case ${String(i).padStart(2, "0")}`) });
+    const named = (msg: string) => msg.slice(msg.indexOf("fail on it: ") + 12).split("; ");
+    const of25 = named(await refusal(many(25)));
+    expect(of25).toEqual([...many(20).regressed, "and 5 more"]);
+    expect(named(await refusal(many(20)))).toEqual(many(20).regressed);
     table = [ask, diff(SUITE_OK), v];
     expect("pushed" in (await landClone(cwd, deps))).toBe(true);
   });
