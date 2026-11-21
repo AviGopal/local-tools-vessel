@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
-import { diffClone, gapOf, landClone, passedIn } from "./git-land";
+import { diffClone, gapOf, landClone, passedIn, suiteCheck } from "./git-land";
 import type { Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
@@ -70,9 +70,11 @@ const originHead = () => g(ORIGIN, "rev-parse", "dev");
 const ask = { id: "ask1", shape: "world_changed", role: "person" } as Row;
 // What git_diff says of a tree that typechecks: a grader's verdict counts only from a diff that says so.
 const TC_OK = { ran: true, passed: true, exit_code: 0, out: "", truncated: false };
+// What git_diff says of a tree on which no test of the whole suite that passed on the base fails.
+const SUITE_OK = { ran: true, passed: true, exit_code: 0, out: "", truncated: false, regressed: [] };
 /** A person's r 1 on the walk's whole diff of a tree: the rows a person's approval is given on. */
 const personOn = (tree: string, id: string, extra: Record<string, unknown> = {}): Row[] => [
-  { id: `pd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: false, typecheck: TC_OK } as Row,
+  { id: `pd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: false, typecheck: TC_OK, suite: SUITE_OK } as Row,
   { id, shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, input_refs: [`pd-${id}`], ...extra } as Row,
 ];
 
@@ -167,7 +169,7 @@ describe("git_land", () => {
 
   scanned("[MUST-FAIL] a grader's r 1 lands only from exactly the request and the walk's gitDiff of this tree", async () => {
     const { cwd, tree } = await change("b.txt", "b\n");
-    const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
+    const diff = { id: "d1", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row;
     const other = { id: "x1", shape: "fileContent", role: "described" } as Row;
     table = [ask, diff, other, { id: "v3", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d1", "x1"] }];
     expect("error" in (await landClone(cwd, deps))).toBe(true);
@@ -208,7 +210,7 @@ describe("git_land", () => {
   scanned("[MUST-FAIL] on a gap, a grader's r 1 lands only when the gap's own check passed on the tree, for that gap", async () => {
     const { cwd, tree } = await change("q.txt", "q\n");
     const gap = { id: "gr1", shape: "gap", role: "detector", gap_id: "G1" } as Row;
-    const diff = (check: unknown) => ({ id: "dg", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["gr1"], typecheck: TC_OK, check } as Row);
+    const diff = (check: unknown) => ({ id: "dg", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["gr1"], typecheck: TC_OK, suite: SUITE_OK, check } as Row);
     const v = { id: "vg", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["gr1", "dg"] } as Row;
     for (const check of [undefined, { gap_id: "G1", passed: false }, { gap_id: "G2", passed: true }]) {
       table = [gap, diff(check), v];
@@ -218,9 +220,25 @@ describe("git_land", () => {
     expect("pushed" in (await landClone(cwd, deps))).toBe(true);
   });
 
+  scanned("[MUST-FAIL] a grader's r 1 lands only from a diff whose whole suite turned no test red that passed on the base; the refusal names them", async () => {
+    const { cwd, tree } = await change("s.txt", "s\n");
+    const diff = (suite: unknown) => ({ id: "ds", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite } as Row);
+    const v = { id: "vs", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "ds"] } as Row;
+    const refusal = async (suite: unknown) => { table = [ask, diff(suite), v]; return String((await landClone(cwd, deps) as { error: string }).error); };
+    // the engine case: the request's own test went green and another file's test, green on the base, went red
+    const red = { ran: true, passed: false, exit_code: 1, out: "", truncated: false, regressed: ["lifecycle.test.ts > close > the failed task is recorded"] };
+    expect(await refusal(red)).toContain("tests that passed on the base fail on it: lifecycle.test.ts > close > the failed task is recorded");
+    // a suite that did not finish, or a diff that says nothing of it, lands nothing either, and says why
+    expect(await refusal({ ran: false, passed: false, why: "the suite did not finish on the tree within the step bound (9 ms)" }))
+      .toContain("the whole test suite did not say it passes: the suite did not finish on the tree within the step bound");
+    expect(await refusal(undefined)).toContain("says nothing of the whole test suite");
+    table = [ask, diff(SUITE_OK), v];
+    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+  });
+
   scanned("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
     const { cwd, tree } = await change("c.txt", "c\n");
-    const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
+    const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row;
     const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, input_refs: ["ask1", "d2"] } as Row;
     const yes = { id: "v7", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d2"] } as Row;
     table = [ask, diff, no, yes];
@@ -234,11 +252,11 @@ describe("git_land", () => {
 
   // A person's verdict on the walk's whole diff of a tree, and that diff. The USER's rule: a Wrong blocks that exact tree.
   const pv = (tree: string, id: string, r: number, seq: number, diff: Record<string, unknown> = {}): Row[] => [
-    { id: `pd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: false, typecheck: TC_OK, ...diff } as Row,
+    { id: `pd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, truncated: false, typecheck: TC_OK, suite: SUITE_OK, ...diff } as Row,
     { id, shape: "land_verdict", repo: "demo", tree, role: "person", r, seq, writer: "kid-person", input_refs: [`pd-${id}`] } as Row,
   ];
   const graderYes = (tree: string): Row[] => [
-    { id: "gd", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row,
+    { id: "gd", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row,
     { id: "gv", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, seq: 1, input_refs: ["ask1", "gd"] } as Row,
   ];
 
@@ -309,7 +327,7 @@ describe("git_land", () => {
 
   scanned("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
     const { cwd, tree } = await change("scripts/substrate/gate/x.sh", "x\n");
-    const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row;
+    const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row;
     table = [ask, diff, { id: "v9", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d3"] }];
     const r = await landClone(cwd, deps);
     expect(String((r as { error: string }).error)).toContain("only a person's verdict");
@@ -394,7 +412,7 @@ describe("git_land", () => {
       await diffClone(cwd, made.get(cwd)!, ["file"]);
       const lines = log.mock.calls.flat().map(String).filter((l) => l.startsWith("[git_diff] "));
       expect(lines.length).toBe(1);
-      expect(lines[0]).toMatch(/^\[git_diff\] status=\d+ms into_trusted=\d+ms diff=\d+ms write_out=\d+ms typecheck=\d+ms total=\d+ms$/);
+      expect(lines[0]).toMatch(/^\[git_diff\] status=\d+ms into_trusted=\d+ms diff=\d+ms write_out=\d+ms typecheck=\d+ms base_out=\d+ms suite=\d+ms total=\d+ms$/);
       expect(lines[0]).not.toContain(cwd); // no path
     } finally { log.mockRestore(); }
   });
@@ -753,7 +771,7 @@ describe("git_land", () => {
     try {
       await check({ "calc.ts": fixed });
       const line = log.mock.calls.flat().map(String).find((l) => l.startsWith("[git_diff] "));
-      expect(line).toMatch(/ typecheck=\d+ms base_out=\d+ms gap_check=\d+ms total=\d+ms$/);
+      expect(line).toMatch(/ typecheck=\d+ms base_out=\d+ms gap_check=\d+ms suite=\d+ms total=\d+ms$/);
     } finally { log.mockRestore(); }
     expect(await check({ "calc.ts": "export const add = (a: number, b: number): number => a * b;\n" })).toMatchObject({ ran: true, passed: false });
     // the check is the base's: a change to the test, or to what tests lean on, does not pass whatever it does
@@ -797,6 +815,55 @@ describe("git_land", () => {
     expect(await check({ "calc.ts": forge })).toMatchObject({ ran: true, passed: false, regressed: ["add > zero"] });
   });
 
+  it("[MUST-FAIL] git_diff runs the whole suite on the base and the tree: a test green on the base and red on the tree is named, one red on both is not", async () => {
+    // the base from the cases above: add subtracts, so "add > adds" fails there and "add > zero" passes. A second file
+    // pins what any fix must keep, as a lifecycle test pins what the source does on purpose.
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "life.test.ts"), 'import { expect, test, describe } from "bun:test";\nimport { add } from "./calc";\n' +
+      'describe("life", () => { test("adding zero keeps the number", () => { expect(add(5, 0)).toBe(5); }); });\n');
+    commitAll(seed, "a second test file"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const gap = { gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] };
+    const diffOf = async (files: Record<string, string | null>, g2: unknown = null) => {
+      const { cwd } = await changeOf(files);
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"], g2 as never);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      return r;
+    };
+    // the gap's own test goes green, and the other file's, green on the base, goes red: the gap's check, which runs its
+    // file alone, passes; the whole suite does not, and names the test with its file
+    const breaks = "export const add = (a: number, b: number): number => (b === 0 ? 0 : a + b);\n";
+    const broke = await diffOf({ "calc.ts": breaks }, gap);
+    expect(broke.check).toMatchObject({ ran: true, passed: true });
+    expect(broke.suite).toMatchObject({ ran: true, passed: false });
+    expect((broke.suite as { regressed: string[] }).regressed).toEqual([expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)]);
+    // the fix that keeps it: passes, though "add > adds" was red on the base
+    expect((await diffOf({ "calc.ts": "export const add = (a: number, b: number): number => a + b;\n" }, gap)).suite).toMatchObject({ ran: true, passed: true, regressed: [] });
+    // a change for no gap that leaves "add > adds" red as the base has it: that test is the base's, not the change's
+    expect((await diffOf({ "notes.txt": "n\n" })).suite).toMatchObject({ ran: true, passed: true, regressed: [] });
+    // a test the change removes no longer passes on the tree
+    expect((await diffOf({ "life.test.ts": null })).suite).toMatchObject({ ran: true, passed: false,
+      regressed: [expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)] });
+  });
+
+  it("[MUST-FAIL] a whole suite that does not finish within the bound does not pass, and says on which side", async () => {
+    const dirOf = (name: string, body: string) => {
+      const d = mkdtempSync(join(tmpdir(), `suite-${name}-`));
+      chmodSync(d, 0o755);
+      writeFileSync(join(d, "x.test.ts"), `import { test } from "bun:test";\n${body}\n`, { mode: 0o644 });
+      return d;
+    };
+    const ok = dirOf("ok", 'test("ok", () => {});');
+    const hangs = dirOf("hang", 'test("waits", async () => { await new Promise(() => {}); }, 600000);');
+    expect(await suiteCheck(hangs, ok, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the tree within the step bound (4000 ms)" });
+    expect(await suiteCheck(ok, hangs, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the base within the step bound (4000 ms)" });
+    // a run that exits before the runner reports leaves no report: it does not pass, and says on which side
+    const exits = dirOf("exit", 'process.exit(0);\ntest("never", () => {});');
+    expect(await suiteCheck(exits, ok, 60000)).toEqual({ ran: false, passed: false, why: "the suite's run on the tree wrote no report" });
+    expect(await suiteCheck(ok, exits, 60000)).toEqual({ ran: false, passed: false, why: "the suite's run on the base wrote no report" });
+    expect(await suiteCheck(ok, ok, 60000)).toMatchObject({ ran: true, passed: true, regressed: [] });
+  }, 120000);
+
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {
     // the base from the cases above: add subtracts, so "add > adds" fails there. This change still fails it, then prints
     // much on the runner's own stream while "add > zero" runs, so a plain cut of the run's end would keep only that.
@@ -818,6 +885,8 @@ describe("git_land", () => {
       '<testcase name="bad" classname="add"><failure type="AssertionError" /></testcase>' +
       '<testcase name="later" classname="add"><skipped /></testcase></testsuite></testsuite></testsuites>';
     expect([...passedIn(xml)].sort()).toEqual(["add & sub > adds", "top"]);
+    // several files run at once: each name starts at its file, so tests of the same name in two files stay apart
+    expect([...passedIn(xml, true)].sort()).toEqual(["calc.test.ts > add & sub > adds", "calc.test.ts > top"]);
     expect(passedIn("").size).toBe(0);
   });
 
@@ -846,6 +915,7 @@ describe("git_land", () => {
     expect(r.diff).not.toContain("later.txt"); // origin's later commit is not shown undone
     expect(r.typecheck).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
     expect(r.check).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
+    expect(r.suite).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
     const fresh = await changeOf({ "own2.txt": "mine\n" });
     const ok = await diffClone(fresh.cwd, made.get(fresh.cwd)!, ["file"]);
     expect("tree" in ok && ok.fast_forward).toBe(true);
@@ -865,7 +935,7 @@ describe("git_land", () => {
 
 describe("git_land: the USER's protected list", () => {
   const graderOn = (tree: string, id: string): Row[] => [ask,
-    { id: `gd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK } as Row,
+    { id: `gd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row,
     { id, shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", `gd-${id}`] } as Row];
 
   scanned("[MUST-FAIL] a path the list names lands only on a person's verdict, which names the entry; a person's r 1 lands it", async () => {

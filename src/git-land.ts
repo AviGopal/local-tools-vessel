@@ -264,6 +264,7 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
   // A grader's r 1 counts only when it was made from exactly two rows: the request, and the walk's record of this tree's
   // diff made for that request (its input_refs hold the request). Anything more and what it judged is not only the
   // change; anything less and it did not see the change; a diff made for another request is not this request's change.
+  let suiteWhy: string | undefined;
   for (const v of mine.filter((x) => x.role === "described" && Number(x.r) === 1)) {
     const refs = [...new Set([v.input_refs].flat().map(String))];
     if (refs.length !== 2) continue;
@@ -277,13 +278,27 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
     const request = asked.length === 1 ? asked[0] : undefined;
     if (!request || !isRequest(request)) continue;
     if (![diff.input_refs].flat().map(String).includes(request.id)) continue;
+    // Nor when a test of the repository's whole suite that passed on the base fails on this tree: a change that makes
+    // its own request's test pass can turn another red, and a grader reading the diff need not see it.
+    const suite = diff.suite as { passed?: unknown; regressed?: unknown; why?: unknown } | undefined;
+    if (suite?.passed !== true) { suiteWhy = suiteRefusal(suite); continue; }
     // A gap's change lands on a grader's verdict only when the gap's own check passed on this tree, for this gap.
     const check = diff.check as { passed?: unknown; gap_id?: unknown } | undefined;
     if (isGap(request) && (check?.passed !== true || String(check.gap_id) !== String(request.gap_id))) continue;
     return { id: v.id, by: String(v.writer ?? "") };
   }
-  return { error: "no verdict approves this tree: a person's r 1 on the walk's whole diff of it, or a grader's r 1 from exactly the request and this tree's gitDiff, which says the tree typechecks (and, for a gap, that its check passes)" };
+  if (suiteWhy !== undefined) return { error: `a grader's r 1 does not land this tree: ${suiteWhy}` };
+  return { error: "no verdict approves this tree: a person's r 1 on the walk's whole diff of it, or a grader's r 1 from exactly the request and this tree's gitDiff, which says the tree typechecks, that no test of the whole suite that passed on the base fails on it (and, for a gap, that its check passes)" };
 }
+
+// Why a diff's suite does not let a grader's r 1 land it, naming the tests it turned red (the drafter's next attempt is
+// shown this refusal), or what kept the suite from saying.
+const suiteRefusal = (suite: { passed?: unknown; regressed?: unknown; why?: unknown } | undefined): string => {
+  const red = Array.isArray(suite?.regressed) ? suite.regressed.map(String) : [];
+  if (red.length > 0) return `tests that passed on the base fail on it: ${red.slice(0, 20).join("; ")}${red.length > 20 ? `; and ${red.length - 20} more` : ""}`;
+  if (typeof suite?.why === "string") return `the whole test suite did not say it passes: ${suite.why}`;
+  return suite === undefined ? "its gitDiff says nothing of the whole test suite" : "the whole test suite did not pass on it";
+};
 
 // What a grader reads to judge a change: the diff that would land, with the tree it lands as. A diff bigger than this
 // is cut and says so, so a grader never judges a part it was not shown as if it were the whole.
@@ -355,9 +370,17 @@ export type GapCheck =
   | { gap_id: string; test_file: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
   | { gap_id?: string; test_file?: string; ran: false; passed: false; why: string };
 
+/** What the repository's whole test suite says of the tree: every test the runner finds, run on the base and then on the
+ * tree as the gap's check runs its one file; regressed names each test that passed on the base and does not on the tree
+ * (a test red on both is the base's, not the change's). passed is what git_land reads; a run that did not finish, or
+ * wrote no report, does not pass. */
+export type SuiteCheck =
+  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
+  | { ran: false; passed: false; why: string };
+
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
-      fast_forward: boolean; typecheck: Typecheck; check?: GapCheck; uncommitted?: string[] }
+      fast_forward: boolean; typecheck: Typecheck; suite: SuiteCheck; check?: GapCheck; uncommitted?: string[] }
   | { error: string; stderr?: string; uncommitted?: string[] };
 
 // What a change could write to make a check it fails read as passing: the runner's own result words, an exit before the
@@ -367,7 +390,7 @@ export type DiffResult =
 const FORGES = /\((pass|fail)\)|\bprocess\s*\.\s*(exit|reallyExit|abort|kill)\b|\bBun\s*\.\s*exit\b|\/proc\/self|reporter-outfile|junit/;
 
 /** The tests a junit report says passed, by their "describe > test" names: a test case with no failure, error or skip. */
-export function passedIn(xml: string): Set<string> {
+export function passedIn(xml: string, withFile = false): Set<string> {
   const text = (v: string) => v.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
   const out = new Set<string>();
   const suites: string[] = [];
@@ -381,8 +404,8 @@ export function passedIn(xml: string): Set<string> {
       else if (!self) suites.push(name);
     } else if (tag === "testcase") {
       if (close) { if (open !== null && !bad) out.add(open); open = null; continue; }
-      // the outermost suite is the file: the name starts at the first describe
-      const full = [...suites.slice(1), name].join(" > ");
+      // the outermost suite is the file: the name starts at the first describe, or at the file when several are run
+      const full = [...suites.slice(withFile ? 0 : 1), name].join(" > ");
       if (self) out.add(full);
       else { open = full; bad = false; }
     } else if (!close) bad = true;
@@ -616,15 +639,39 @@ async function writeOut(t: Trusted, made: Made, work: string, ref = "refs/land/h
   return dir;
 }
 
-/** The gap's test file run alone in a written-out tree as the shell user, judged from the runner's report into a
- * directory made for this run: the tests the report says passed, or null when the run wrote no report. */
-async function runCheck(dir: string, testFile: string): Promise<{ passed: Set<string> | null; exit_code: number; signalled: boolean; out: string }> {
+/** The gap's test file run alone in a written-out tree as the shell user (or, with none, every test the runner finds
+ * there, named with their files), judged from the runner's report into a directory made for this run: the tests the
+ * report says passed, or null when the run wrote no report. */
+async function runCheck(dir: string, testFile: string | null, report_ = "report", stepMs = STEP_MS): Promise<{ passed: Set<string> | null; exit_code: number; signalled: boolean; killed: boolean; out: string }> {
   // Judged from the runner's own report, not from its output, which the tested code shares: a run that exits before the
   // runner reports leaves no report, and does not pass.
-  const report = join(agentWritableDir(`${dir}-report`), "junit.xml");
-  const r = await asShellUser([realpathSync(process.execPath), "test", `./${testFile}`, "--timeout", "20000",
-    "--reporter=junit", `--reporter-outfile=${report}`], dir);
-  return { ...r, passed: existsSync(report) ? passedIn(readFileSync(report, "utf8")) : null };
+  const report = join(agentWritableDir(`${dir}-${report_}`), "junit.xml");
+  const r = await asShellUser([realpathSync(process.execPath), "test", ...(testFile === null ? [] : [`./${testFile}`]), "--timeout", "20000",
+    "--reporter=junit", `--reporter-outfile=${report}`], dir, stepMs);
+  return { ...r, passed: existsSync(report) ? passedIn(readFileSync(report, "utf8"), testFile === null) : null };
+}
+
+/**
+ * The repository's whole test suite on exactly this tree, against the base, in the same call: every test the runner finds
+ * (its own discovery, under the base's config, which a change cannot edit and pass), run on the base first and then on
+ * the tree, each within the step bound. A test that passed on the base and does not on the tree is regressed, and any
+ * regressed test means it does not pass; a test red on the base is not the change's. A run killed at the bound, or one
+ * that wrote no report, does not pass, and says which.
+ */
+export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteCheck> {
+  if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
+  if (typeof base !== "string") return { ran: false, passed: false, why: base.why };
+  const b = await runCheck(base, null, "suite-report", stepMs);
+  if (b.killed) return { ran: false, passed: false, why: `the suite did not finish on the base within the step bound (${stepMs} ms)` };
+  if (b.passed === null) return { ran: false, passed: false, why: "the suite's run on the base wrote no report" };
+  const before = b.passed;
+  const r = await runCheck(dir, null, "suite-report", stepMs);
+  if (r.killed) return { ran: false, passed: false, why: `the suite did not finish on the tree within the step bound (${stepMs} ms)` };
+  const tail = { exit_code: r.exit_code, out: keptCheckOut(r.out, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
+  if (r.passed === null) return { ran: false, passed: false, why: "the suite's run on the tree wrote no report" };
+  const passed = r.passed;
+  const regressed = [...before].filter((n) => !passed.has(n)).sort();
+  return { ran: true, passed: regressed.length === 0, ...tail, regressed };
 }
 
 /**
@@ -719,10 +766,11 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const typecheck: Typecheck = ff
       ? await timed(steps, "typecheck", () => typecheckTree(t, made, dir, () => writeOut(t, made, work, t.origin, "base-typecheck")))
       : { ran: false, passed: false, why: behind };
-    const baseDir = gap === null || "error" in gap ? { why: "no gap" } : ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
+    const baseDir = ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
+    const suite = await timed(steps, "suite", () => suiteCheck(dir, baseDir));
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
-      fast_forward: ff, typecheck, ...check, ...said };
+      fast_forward: ff, typecheck, suite, ...check, ...said };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
     console.log(`[git_diff] ${steps.map(([s, ms]) => `${s}=${ms}ms`).join(" ")} total=${Math.round(performance.now() - t0)}ms`);
