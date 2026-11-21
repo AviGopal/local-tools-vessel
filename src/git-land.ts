@@ -463,13 +463,15 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
 async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string }, baseOut: () => Promise<string | { why: string }>): Promise<Typecheck> {
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return { ran: false, passed: false, why: "the change's paths could not be read" };
+  const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
+  if (chosen.length > 0) return { ran: false, passed: false, why: `the change edits what chooses how it is checked: ${chosen.join(", ")}` };
   const ts = changed.split("\n").filter((p) => TS_SOURCE.test(p));
   // which project each changed file belongs to: a file of a project that could not be checked is that project's, never
   // "covered by no project"
   const ownerOf = new Map<string, string>();
   const projects = await projectsOf(t, ts, ownerOf);
   if (projects.size === 0) {
-    if (ts.length === 0) return { ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" };
+    if (ts.length === 0) return { ran: false, passed: true, why: "the change touches no TypeScript file and the base has no root tsconfig.json: nothing to typecheck" };
     // a file the change deletes has nothing to compile: only a file the tree still holds needs a project
     const held = typeof dir === "string" ? ts.filter((f) => existsSync(join(dir, f))) : ts;
     return held.length === 0
@@ -479,8 +481,6 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const installed = join(containmentZones(process.env).runtime, made.repo, "node_modules");
   const tsc = join(installed, "typescript", "bin", "tsc");
   if (!existsSync(tsc)) return { ran: false, passed: false, why: `no TypeScript is installed for ${made.repo} on this node` };
-  const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
-  if (chosen.length > 0) return { ran: false, passed: false, why: `the change edits what chooses how it is checked: ${chosen.join(", ")}` };
   const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);
   const added = await t.out(["diff", "--no-renames", "--name-only", "--diff-filter=A", t.origin, "refs/land/head"]);
   if (patch === null || added === null) return { ran: false, passed: false, why: "the change's lines could not be read" };
@@ -658,6 +658,24 @@ async function runCheck(dir: string, testFile: string | null, report_ = "report"
  * regressed test means it does not pass; a test red on the base is not the change's. A run killed at the bound, or one
  * that wrote no report, does not pass, and says which.
  */
+/**
+ * Why the whole suite cannot judge this change, or null: it edits what chooses how the suite runs (CHECK_CONFIG: a
+ * bunfig preload, a package's test settings), or its added lines write what the suite's report is read from (FORGES, as
+ * the gap's check refuses them). The report is written by the runner in the tested code's own process, so no file
+ * permission keeps that code from writing it; the pattern raises the cost of a forged report, and the grader and the
+ * typecheck stand in front of it.
+ */
+async function suiteRefuses(t: Trusted): Promise<string | null> {
+  const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
+  if (changed === null) return "the change's paths could not be read";
+  const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
+  if (chosen.length > 0) return `the change edits what chooses how the suite runs: ${chosen.join(", ")}`;
+  const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);
+  if (patch === null) return "the change's lines could not be read";
+  const forged = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++") && FORGES.test(l));
+  return forged.length > 0 ? `the change writes what the suite's report is read from: ${forged[0].slice(1, 200)}` : null;
+}
+
 export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteCheck> {
   if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
   if (typeof base !== "string") return { ran: false, passed: false, why: base.why };
@@ -768,7 +786,8 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
       : { ran: false, passed: false, why: behind };
     const baseDir = ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
-    const suite = await timed(steps, "suite", () => suiteCheck(dir, baseDir));
+    const refused = typeof dir === "string" ? await suiteRefuses(t) : null;
+    const suite = await timed(steps, "suite", () => suiteCheck(refused === null ? dir : { why: refused }, baseDir));
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
       fast_forward: ff, typecheck, suite, ...check, ...said };
   } finally {

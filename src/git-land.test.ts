@@ -402,7 +402,14 @@ describe("git_land", () => {
     expect(r.diff).toContain("+j");
     expect(r.truncated).toBe(false);
     expect(r.repo).toBe("demo");
-    expect(r.typecheck).toEqual({ ran: false, passed: true, why: "the base has no tsconfig.json: nothing to typecheck" });
+    expect(r.typecheck).toEqual({ ran: false, passed: true, why: "the change touches no TypeScript file and the base has no root tsconfig.json: nothing to typecheck" });
+  });
+
+  it("[MUST-FAIL] a change of no TypeScript file to what chooses how it is checked does not pass the typecheck, on a base with no tsconfig.json", async () => {
+    const { cwd } = await change("bunfig.toml", "[test]\n");
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.typecheck).toEqual({ ran: false, passed: false, why: "the change edits what chooses how it is checked: bunfig.toml" });
   });
 
   it("[MUST-FAIL] a git_diff says how long each of its steps took, once, by step name and milliseconds only", async () => {
@@ -844,6 +851,37 @@ describe("git_land", () => {
     // a test the change removes no longer passes on the tree
     expect((await diffOf({ "life.test.ts": null })).suite).toMatchObject({ ran: true, passed: false,
       regressed: [expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)] });
+  });
+
+  it("[MUST-FAIL] a change of no gap cannot write the suite's report or choose how the suite runs: a test, a preload, or bunfig alone", async () => {
+    // the base from the cases above, with a preload the base's bunfig names
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "bunfig.toml"), '[test]\npreload = ["./setup.ts"]\n');
+    writeFileSync(join(seed, "setup.ts"), "export {};\n");
+    commitAll(seed, "a preload"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const suiteOf = async (files: Record<string, string | null>) => {
+      const { cwd } = await changeOf(files);
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      return r.suite;
+    };
+    const fake = '<testsuites><testsuite name="life.test.ts"><testsuite name="life"><testcase name="adding zero keeps the number" /></testsuite></testsuite></testsuites>';
+    const breaks = "export const add = (a: number, b: number): number => (b === 0 ? 0 : a + b);\n";
+    // a test the change adds writes the report the suite is read from, as if every test passed, and ends the run
+    const writer = `import { writeFileSync } from "node:fs";\nimport { test } from "bun:test";\nwriteFileSync("../check-suite-report/junit.xml", ${JSON.stringify(fake)});\nprocess.exit(0);\ntest("x", () => {});\n`;
+    expect(await suiteOf({ "calc.ts": breaks, "zz.test.ts": writer })).toMatchObject({ ran: false, passed: false, why: expect.stringContaining("writes what the suite's report is read from") });
+    // the preload the base's bunfig names does it
+    expect(await suiteOf({ "calc.ts": breaks, "setup.ts": writer.replace('import { test } from "bun:test";\n', "").replace('test("x", () => {});\n', "") }))
+      .toMatchObject({ ran: false, passed: false, why: expect.stringContaining("writes what the suite's report is read from") });
+    // bunfig alone: a change to it chooses how the suite runs (here, which tests it finds), and the typecheck refuses it too
+    const { cwd } = await changeOf({ "calc.ts": breaks, "bunfig.toml": '[test]\nroot = "./none"\n' });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.suite).toMatchObject({ ran: false, passed: false, why: "the change edits what chooses how the suite runs: bunfig.toml" });
+    expect(r.typecheck).toMatchObject({ passed: false, why: "the change edits what chooses how it is checked: bunfig.toml" });
+    // and a change that is none of these still has its suite run
+    expect(await suiteOf({ "calc.ts": breaks })).toMatchObject({ ran: true, passed: false });
   });
 
   it("[MUST-FAIL] a whole suite that does not finish within the bound does not pass, and says on which side", async () => {
