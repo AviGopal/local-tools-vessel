@@ -85,6 +85,18 @@ describe("declared shape inputs", () => {
     expect(process.env.DISCOVERY_ENDPOINT).toBe("http://127.0.0.1:9")
   })
 
+  it("[MUST-FAIL] a writer's declared path names the clone git_worktree made, never the workspace; a reader's says to read a changed file there", () => {
+    const pathOf = (t: string) => String((SHAPE_INPUTS[t] as unknown as { properties: { path: { description?: string } } }).properties.path.description)
+    for (const t of ["fs_write", "fs_edit", "code_replace_lines", "code_insert_after_line"]) {
+      expect(`${t}: ${pathOf(t)}`).toContain("in the clone git_worktree made")
+      expect(`${t}: ${pathOf(t)}`).not.toContain("or relative to the workspace")
+    }
+    for (const t of ["fs_read", "code_read_lines", "code_search", "code_find_import"]) {
+      expect(`${t}: ${pathOf(t)}`).toContain("relative to the workspace")
+      expect(`${t}: ${pathOf(t)}`).toContain("read a file you are changing, name it by its path in the clone")
+    }
+  })
+
   it("[MUST-FAIL] fs_edit's contract says old_string is copied from an fs_read of the file, never words about the change", () => {
     const edit = SHAPE_INPUTS.fs_edit as unknown as { properties: Record<string, { description?: string }> }
     expect(SHAPE_DESCRIPTIONS.fs_edit).toContain("fs_read")

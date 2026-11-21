@@ -13,15 +13,21 @@
 // and runs it without the shell containment check, so either field would run any command (agf_m40aao3ttwpx).
 type Schema = Record<string, unknown>
 
-const PATH = { type: "string", minLength: 1, description: "A file: absolute, repos/<vessel>/…, or relative to the workspace." }
+const PATH = { type: "string", minLength: 1, description: "A file: absolute, repos/<vessel>/…, or relative to the workspace. To " +
+  "read a file you are changing, name it by its path in the clone git_worktree made for the change." }
+// A change is written only in the clone git_worktree made: the workspace is the live checkout and repos/<vessel>/… the
+// running vessels, which no tool writes, so a writer's path is declared as the one spelling a change can be written at.
+export const WRITE_IN_CLONE = "write in the clone git_worktree made for this change: an absolute path under the cwd its " +
+  "answer gave, never a path relative to the workspace or a repos/<vessel>/… path"
+const WRITE_PATH = { type: "string", minLength: 1, description: `The file to change. ${WRITE_IN_CLONE[0].toUpperCase()}${WRITE_IN_CLONE.slice(1)}.` }
 const LINE = { type: "integer", minimum: 1 }
 const object = (required: string[], properties: Record<string, unknown>): Schema => ({ type: "object", required, properties })
 
 export const SHAPE_INPUTS: Record<string, Schema> = {
   fs_read: object(["path"], { path: PATH }),
-  fs_write: object(["path", "content"], { path: PATH, content: { type: "string" } }),
+  fs_write: object(["path", "content"], { path: WRITE_PATH, content: { type: "string" } }),
   fs_edit: object(["path", "old_string", "new_string"], {
-    path: PATH,
+    path: WRITE_PATH,
     old_string: {
       type: "string", minLength: 1,
       description: "Text copied character for character from the file as fs_read returned it (read the file first): the " +
@@ -31,10 +37,10 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
   }),
   code_read_lines: object(["path", "start_line", "end_line"], { path: PATH, start_line: LINE, end_line: LINE }),
   code_replace_lines: object(["path", "start_line", "end_line", "text"], {
-    path: PATH, start_line: LINE, end_line: LINE, text: { type: "string", description: "Replaces lines start_line..end_line." },
+    path: WRITE_PATH, start_line: LINE, end_line: LINE, text: { type: "string", description: "Replaces lines start_line..end_line." },
   }),
   code_insert_after_line: object(["path", "after_line", "text"], {
-    path: PATH, after_line: { type: "integer", minimum: 0, description: "0 inserts at the top." }, text: { type: "string" },
+    path: WRITE_PATH, after_line: { type: "integer", minimum: 0, description: "0 inserts at the top." }, text: { type: "string" },
   }),
   code_search: object(["path", "pattern"], {
     path: PATH, pattern: { type: "string", minLength: 1, description: "A regular expression." }, flags: { type: "string" },

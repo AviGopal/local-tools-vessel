@@ -87,6 +87,20 @@ describe("a refused path is the request's fault: answered 422, so the move that 
     expect(readFileSync(join(superRepo, "docs", "x.md"), "utf8")).toBe("doc one\n");
   });
 
+  it("[MUST-FAIL] a writer's refusal names where a change is written, for a relative, a repos/, an absolute live and an outside-the-roots path", async () => {
+    for (const [type, ptr] of [
+      ["code_replace_lines", { path: "docs/x.md", start_line: 1, end_line: 1, text: "doc two" }],
+      ["fs_edit", { path: "repos/demo/src/a.ts", old_string: "= 1", new_string: "= 9" }],
+      ["fs_write", { path: join(superRepo, "docs", "x.md"), content: "x" }],
+      ["fs_write", { path: "/etc/substrate-test-no-such-file", content: "x" }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const [code, text] = await status(type, ptr);
+      expect(`${type}: ${code}`).toBe(`${type}: 422`);
+      expect(text).toContain("write in the clone git_worktree made for this change");
+    }
+    expect(readFileSync(join(superRepo, "docs", "x.md"), "utf8")).toBe("doc one\n");
+  });
+
   it("[MUST-FAIL] a read outside the tool roots is 422, naming the path, absolute or relative", async () => {
     for (const path of ["/etc/hostname", "../../../etc/hostname"]) {
       const [code, text] = await status("fs_read", { path });

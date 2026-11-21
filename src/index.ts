@@ -17,7 +17,7 @@ import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
-import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS } from "./shape-inputs.js";
+import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, WRITE_IN_CLONE } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
@@ -111,6 +111,7 @@ const toolPath = (raw: string | undefined): string | undefined | null => toolPat
 // fs_write, fs_edit, code_insert_after_line, code_replace_lines, code_add_import —
 // resolves its target here: the live super-repo clone is never written by a tool,
 // and vessel runtime/clone/compose trees only with the lane's write grant.
+// Every refusal names where a write can land (WRITE_IN_CLONE), the remedy the caller acts on.
 // Refusals keep the structured {error} channel (HTTP 200), not a throw.
 function pointerField(ctx: { body: unknown }, key: string): unknown {
   const b = ctx.body as Record<string, any> | undefined;
@@ -118,13 +119,13 @@ function pointerField(ctx: { body: unknown }, key: string): unknown {
 }
 export function writePath(ctx: { body: unknown }, rawPath: string | undefined): { path: string | undefined } | { refused: string } {
   let path: string | undefined | null;
-  try { path = toolPath(rawPath); } catch (e) { return { refused: `${(e as Error).message}: ${rawPath}` }; }
-  if (path === null) return { refused: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}` };
+  try { path = toolPath(rawPath); } catch (e) { return { refused: `${(e as Error).message}: ${rawPath}; ${WRITE_IN_CLONE}` }; }
+  if (path === null) return { refused: `${OUTSIDE_ROOTS_ERROR}: ${rawPath}; ${WRITE_IN_CLONE}` };
   if (!path) return { path: undefined };
   const v = containWrite(path, { env: process.env, raw: rawPath, grant: pointerField(ctx, WRITE_GRANT_FIELD) });
   if (!v.ok) {
     console.error(`[local-tools] ${v.reason} (requested ${JSON.stringify(rawPath)})`);
-    return { refused: v.reason };
+    return { refused: `${v.reason}; ${WRITE_IN_CLONE}` };
   }
   return { path };
 }
