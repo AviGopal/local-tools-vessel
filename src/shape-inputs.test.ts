@@ -93,6 +93,24 @@ describe("declared shape inputs", () => {
     expect(String(edit.properties.old_string.description)).toContain("never words about the change")
   })
 
+  // On a clone git_diff diffs commits only (diffClone): an edit is not in its answer until it is committed. A description
+  // that led with "unstaged changes" told a producer that had just edited to diff it, and the diff was refused until a
+  // commit, request after request; so the clone's meaning comes first and says to commit before diffing.
+  it("[MUST-FAIL] git_diff's first sentence is what it answers on a clone: the committed change only, commit an edit first", () => {
+    const d = SHAPE_DESCRIPTIONS.git_diff
+    const first = d.slice(0, d.indexOf(". ") + 1)
+    expect(first).toContain("For a clone git_worktree made")
+    expect(first).toContain("only its committed change")
+    expect(first).toContain("commit it first")
+    expect(first).not.toContain("unstaged")
+  })
+
+  it("[MUST-FAIL] git_diff still says what it shows outside a clone, and that uncommitted paths are not in a clone's change", () => {
+    const d = SHAPE_DESCRIPTIONS.git_diff
+    expect(d).toContain("For a repository that is not such a clone, shows its unstaged changes")
+    expect(d).toContain("uncommitted, the paths the clone holds changed but not committed")
+  })
+
   it("[MUST-FAIL] each declared answer is for a declared shape, and the diff a landing is judged on comes from git_diff", () => {
     for (const shape of Object.keys(SHAPE_ANSWERS)) expect(Object.keys(SHAPE_INPUTS)).toContain(shape)
     expect(SHAPE_ANSWERS.git_diff).toBe("gitDiff")

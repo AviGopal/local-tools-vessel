@@ -77,11 +77,12 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code. " +
     "It is how to search a repository (grep -rn) or read git history (git log, git show) in a clone.",
   git_status: "Lists a repository's changed files (git status --porcelain).",
-  git_diff: "Shows a repository's unstaged changes (git diff). For a clone git_worktree made, shows its committed change " +
-    "against origin's branch, with repo, base, head and tree: the tree a land_verdict names; and typecheck, whether that " +
-    "exact tree typechecks (ran, passed, and what the compiler said; checked false with ran false and no passed when no " +
-    "project could be compiled on this node, which says nothing of the change); and uncommitted, the paths the clone holds changed " +
-    "but not committed, which are not in that change (git_commit commits them).",
+  git_diff: "For a clone git_worktree made, shows only its committed change against origin's branch: an edit is not in " +
+    "it until git_commit commits it, so to see an edit, commit it first. Answers repo, base, head and tree: the tree a " +
+    "land_verdict names; and typecheck, whether that exact tree typechecks (ran, passed, and what the compiler said; " +
+    "checked false with ran false and no passed when no project could be compiled on this node, which says nothing of the " +
+    "change); and uncommitted, the paths the clone holds changed but not committed, which are not in that change " +
+    "(git_commit commits them). For a repository that is not such a clone, shows its unstaged changes (git diff).",
   git_commit: "Commits every change in a clone git_worktree made, checked by the super-repo's hooks as of its making; " +
     "answers the sha, tree and changed paths, needs_person (changed paths that judge changes, which only a person may " +
     "approve) and scan (whether the secrets scan ran).",
