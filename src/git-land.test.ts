@@ -6,8 +6,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
-import { diffClone, gapOf, landClone, passedIn, suiteCheck } from "./git-land";
-import type { Typecheck } from "./git-land";
+import { diffClone, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
+import type { Trusted, Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
 
@@ -888,6 +888,29 @@ describe("git_land", () => {
     expect(r.typecheck).toMatchObject({ passed: false, why: "the change edits what chooses how it is checked: bunfig.toml" });
     // and a change that is none of these still has its suite run
     expect(await suiteOf({ "calc.ts": breaks })).toMatchObject({ ran: true, passed: false });
+  });
+
+  it("[GUARD] the suite's guard reads only the lines a change adds, and a change it cannot read is refused", async () => {
+    // a change that only removes a line the pattern matches adds nothing that could write the report
+    const seed = join(T, "seed");
+    writeFileSync(join(seed, "ender.ts"), "export const end = (): never => process.exit(1);\nexport const kept = 1;\n");
+    commitAll(seed, "an ender"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const { cwd } = await changeOf({ "ender.ts": "export const kept = 1;\n" });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.suite).toMatchObject({ ran: true });
+    // nor does a file whose name alone the pattern matches: its diff header is not a line the change adds
+    const { cwd: named } = await changeOf({ "junit-notes.txt": "plain\n" });
+    const n = await diffClone(named, made.get(named)!, ["file"]);
+    if (!("tree" in n)) throw new Error(JSON.stringify(n));
+    expect(n.suite).toMatchObject({ ran: true });
+    // a read that fails refuses: the paths, then the lines
+    const reads = (fail: "name-only" | "-U0") => ({ repo: "demo", origin: "o", head: "h", tree: "t",
+      out: async (args: string[]) => (args.includes(`--${fail}`) || args.includes(fail) ? null : ""),
+      step: async () => ({ error: "unused" }) }) as unknown as Trusted;
+    expect(await suiteRefuses(reads("name-only"))).toBe("the change's paths could not be read");
+    expect(await suiteRefuses(reads("-U0"))).toBe("the change's lines could not be read");
+    expect(await suiteRefuses({ ...reads("-U0"), out: async () => "" } as unknown as Trusted)).toBeNull();
   });
 
   it("[MUST-FAIL] a whole suite that does not finish within the bound does not pass, and says on which side", async () => {

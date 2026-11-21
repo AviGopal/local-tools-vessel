@@ -652,20 +652,13 @@ async function runCheck(dir: string, testFile: string | null, report_ = "report"
 }
 
 /**
- * The repository's whole test suite on exactly this tree, against the base, in the same call: every test the runner finds
- * (its own discovery, under the base's config, which a change cannot edit and pass), run on the base first and then on
- * the tree, each within the step bound. A test that passed on the base and does not on the tree is regressed, and any
- * regressed test means it does not pass; a test red on the base is not the change's. A run killed at the bound, or one
- * that wrote no report, does not pass, and says which.
- */
-/**
  * Why the whole suite cannot judge this change, or null: it edits what chooses how the suite runs (CHECK_CONFIG: a
  * bunfig preload, a package's test settings), or its added lines write what the suite's report is read from (FORGES, as
  * the gap's check refuses them). The report is written by the runner in the tested code's own process, so no file
  * permission keeps that code from writing it; the pattern raises the cost of a forged report, and the grader and the
  * typecheck stand in front of it.
  */
-async function suiteRefuses(t: Trusted): Promise<string | null> {
+export async function suiteRefuses(t: Trusted): Promise<string | null> {
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return "the change's paths could not be read";
   const chosen = changed.split("\n").filter((p) => CHECK_CONFIG.test(p));
@@ -676,6 +669,13 @@ async function suiteRefuses(t: Trusted): Promise<string | null> {
   return forged.length > 0 ? `the change writes what the suite's report is read from: ${forged[0].slice(1, 200)}` : null;
 }
 
+/**
+ * The repository's whole test suite on exactly this tree, against the base, in the same call: every test the runner finds
+ * (its own discovery, under the base's config, which a change cannot edit and pass), run on the base first and then on
+ * the tree, each within the step bound. A test that passed on the base and does not on the tree is regressed, and any
+ * regressed test means it does not pass; a test red on the base is not the change's. A run killed at the bound, or one
+ * that wrote no report, does not pass, and says which.
+ */
 export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteCheck> {
   if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
   if (typeof base !== "string") return { ran: false, passed: false, why: base.why };
