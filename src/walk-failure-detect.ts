@@ -14,7 +14,7 @@
 // writes nothing new. A class whose failures records stamped as blaming the callee (an outage, a timeout, a crash in
 // what was called) is filed walkable false: shown, not offered to the walk, no one's debit (records reads that field). Failures on a gap's own
 // repair are not counted toward it. Nothing here names a tool, a shape of failure or a threshold.
-import { STALL, classesOf, type Klass, type Row } from "./walk-failure-classes";
+import { STALL, UNUSED, classesOf, useOf, type Klass, type Row } from "./walk-failure-classes";
 import { cutInWindow } from "./infra-window";
 import { resolveRecords } from "./walk-rows";
 
@@ -69,8 +69,11 @@ const writeGap = async (row: Record<string, unknown>): Promise<boolean> => {
 // Whether the class's tool was called since `after` and that call did not fail this way: a move of the same tool (a
 // started hop of it, or a selection of it with no hop) with no failure of its own call or selection.
 // A stall class has no tool to call: quiet alone (no root said stalled for quiet_rows rows) is its evidence.
+// An unused class is evidenced by its move used since: a later selection of it records stamped use r 1 (a selection
+// not yet judged, or judged unused again, is no evidence).
 const exercised = (pool: Row[], k: Klass, after: number): boolean => {
   if (k.tool === STALL) return true;
+  if (k.kind === UNUSED) return pool.some((r) => r.seq > after && r.shape === "selection" && String(r.a) === k.tool && useOf(r) === 1);
   const failed = new Set(pool.filter((r) => r.shape === "failure" && r.role === "walk").flatMap((f) => [String(f.call_id), String(f.selection_ref)]));
   return pool.some((r) => r.seq > after && r.role === "walk" && (
     (r.shape === "hop" && r.phase === "started" && String(r.pointer_type) === k.tool && !failed.has(String(r.call_id))) ||
@@ -113,7 +116,7 @@ export const detect = async (): Promise<Report> => {
     rootsOf.set(id.slice(GAP_PREFIX.length), (rootsOf.get(id.slice(GAP_PREFIX.length)) ?? new Set()).add(g.id));
   }
   const windowFrom = Math.max(0, at - rule.window_rows);
-  const recent = classesOf([...pool, ...asked].filter((r) => r.shape !== "failure" || r.seq > windowFrom), rootsOf);
+  const recent = classesOf([...pool, ...asked].filter((r) => r.shape !== "failure" || r.seq > windowFrom), rootsOf, windowFrom);
   const all = new Map(classesOf([...pool, ...asked], rootsOf).map((k) => [k.key, k]));
   const out: Filed[] = [];
   let written = 0;
@@ -147,7 +150,7 @@ export const detect = async (): Promise<Report> => {
     const last = Number(k?.last_seq ?? g.last_seq ?? 0);
     const filed: Filed = { gap_id, class: key, tool: String(g.tool), count: Number(g.count ?? 0), roots: Number(g.root_count ?? 0), walkable: g.walkable !== false, action: "unchanged" };
     if (at - last >= rule.quiet_rows) {
-      const tool = { ...(k ?? {}), tool: String(g.tool) } as Klass;
+      const tool = { kind: g.kind, ...(k ?? {}), tool: String(g.tool) } as Klass;
       if (exercised(asRead, tool, last)) {
         filed.action = "closed";
         await put({ ...Object.fromEntries(Object.entries(g).filter(([f]) => !["id", "seq", "t", "writer", "role", "by_key"].includes(f))),

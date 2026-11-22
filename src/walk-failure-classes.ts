@@ -7,6 +7,11 @@
 export type Row = { id: string; seq: number; shape: string; role?: string; [k: string]: unknown }
 /** The walk's word that a root offered no move for its owner's stall_rule selections (walk loop.ts stalls). */
 export const STALL = "stall"
+/** The kind of a selection records said made what nobody took: it stamps use {r, key} on a selection it reads when its
+ *  fold judged that selection by its use (fold.ts useGrades), r 0 when no other move took its output within the owner's
+ *  promise_window, r 1 when one did. This reads that stamp only, never a copy of records' rule. */
+export const UNUSED = "unused"
+export const useOf = (s: Row): unknown => (s.use as { r?: unknown } | undefined)?.r
 export type ClassKey = string
 export type Klass = { key: ClassKey; tool: string; kind?: string; refused?: string; blames?: string; waits_for?: string;
   status_band: string; signature: string; example: string; failures: string[]; roots: string[]; first_seq: number; last_seq: number; infra: boolean }
@@ -37,8 +42,9 @@ const flatArgs = (args: unknown, prefix = ""): Array<[string, string]> => {
 
 /** The walk's failures grouped into classes. `ownRoots` maps a class to the roots its own gap's repair works on (every
  *  row of that gap is a root in turn): failures on them are not counted toward that class, so a repair's own failures
- *  never raise or reopen its own gap. */
-export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<string>> = new Map()): Klass[] => {
+ *  never raise or reopen its own gap. A selection stamped unused counts only after `unusedAfter`, the window its
+ *  failures are read in. */
+export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<string>> = new Map(), unusedAfter = -1): Klass[] => {
   const started = new Map(pool.filter((r) => r.shape === "hop" && r.role === "walk" && r.phase === "started").map((h) => [String(h.call_id), h]))
   const sels = new Map(pool.filter((r) => r.shape === "selection").map((s) => [s.id, s]))
   const byId = new Map(pool.map((r) => [r.id, r]))
@@ -97,6 +103,21 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     if (root !== "" && !k.roots.includes(root)) k.roots.push(root)
     k.last_seq = f.seq
     k.example = example
+    out.set(key, k)
+  }
+  // A selection whose output nobody took (records' stamp, use r 0) is a class of its own: tool its move, kind unused,
+  // keyed by the move alone, its root the selection's. Never work for the walk: the walk is what offered nothing to take
+  // it, so the gap is the fact, for whoever reads gaps.
+  for (const s of pool.filter((r) => r.shape === "selection" && r.seq > unusedAfter && useOf(r) === 0).sort((a, b) => a.seq - b.seq)) {
+    const tool = String(s.a ?? "unknown")
+    const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([UNUSED, tool])).digest("hex").slice(0, 24)
+    const root = typeof s.root === "string" && s.root !== "" ? s.root : `move:${tool}`
+    if (ownRoots.get(key)?.has(root) === true) continue
+    const k = out.get(key) ?? { key, tool, kind: UNUSED, status_band: "none", signature: "", example: "",
+      failures: [], roots: [], first_seq: s.seq, last_seq: s.seq, infra: true }
+    k.failures.push(s.id)
+    if (!k.roots.includes(root)) k.roots.push(root)
+    k.last_seq = s.seq
     out.set(key, k)
   }
   return [...out.values()].sort((a, b) => b.failures.length - a.failures.length)

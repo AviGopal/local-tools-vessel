@@ -246,3 +246,62 @@ describe("walk_failure_detect and the owner's infra windows", () => {
     expect((await report()).classes.map((c) => c.action)).toEqual(["below"]);
   });
 });
+
+describe("walk_failure_detect and output nobody took", () => {
+  // A selection of a move as records answers it: use {r, key} is records' stamp (its fold's use grade of that
+  // selection), r 0 when no other move took its output within the owner's window, r 1 when one did, absent when unjudged.
+  const sel = (root: string, a: string, r?: number) => {
+    const s: Row = { id: `s${++head}`, seq: head, shape: "selection", role: "walk", root, a };
+    if (r !== undefined) s.use = { r, key: `use|${root}|${a}` };
+    rows.push(s);
+    return s;
+  };
+  const EDIT = "call/fs_edit";
+  it("[MUST-FAIL] an edit whose answer nobody took, on two roots, is ONE gap: kind unused, its move, its roots, shown and not worked", async () => {
+    rule({ min_count: 2, min_roots: 2 });
+    const a = sel("r1", EDIT, 0), b = sel("r2", EDIT, 0);
+    const r = await report();
+    expect(r.classes.map((c) => [c.tool, c.count, c.roots, c.walkable, c.action])).toEqual([[EDIT, 2, 2, false, "opened"]]);
+    expect(gapRows()).toHaveLength(1);
+    expect(gapRows()[0]).toMatchObject({ kind: "unused", tool: EDIT, walkable: false, roots: ["r1", "r2"], evidence: [a.id, b.id] });
+  });
+  it("edits the commit took within the window (use r 1), or not yet judged, are no class (a guard)", async () => {
+    rule({ min_count: 2, min_roots: 2 });
+    sel("r1", EDIT, 1); sel("r2", EDIT, 1); sel("r3", EDIT); sel("r4", EDIT);
+    expect((await report()).classes).toEqual([]);
+  });
+  it("[MUST-FAIL] another move's unused output is its own class: two moves once each are two classes, neither due", async () => {
+    rule({ min_count: 2, min_roots: 2 });
+    sel("r1", EDIT, 0); sel("r2", "call/fs_write", 0);
+    expect((await report()).classes.map((c) => [c.tool, c.action]).sort()).toEqual([[EDIT, "below"], ["call/fs_write", "below"]]);
+  });
+  it("[MUST-FAIL] one root's unused edits are one root: below a rule asking two", async () => {
+    rule({ min_count: 2, min_roots: 2 });
+    sel("r1", EDIT, 0); sel("r1", EDIT, 0);
+    expect((await report()).classes.map((c) => [c.count, c.roots, c.action])).toEqual([[2, 1, "below"]]);
+  });
+  it("unused edits before the rule's window are not counted (a guard)", async () => {
+    rule({ min_count: 2, min_roots: 2, window_rows: 10, quiet_rows: 50 });
+    sel("r1", EDIT, 0); sel("r2", EDIT, 0);
+    filler(20);
+    expect((await report()).classes).toEqual([]);
+  });
+  it("[MUST-FAIL] unused edits on the gap's own rows are its repair's, not counted toward it", async () => {
+    rule({ min_count: 2, min_roots: 2 });
+    sel("r1", EDIT, 0); sel("r2", EDIT, 0);
+    await report();
+    const own = gapRows()[0].id;
+    sel(own, EDIT, 0); sel(own, EDIT, 0);
+    expect((await report()).classes.map((c) => [c.count, c.action])).toEqual([[2, "unchanged"]]);
+  });
+  it("[MUST-FAIL] a filed unused class closes once quiet and its move was used since; quiet with its move not yet judged, or another move used, stays open", async () => {
+    rule({ min_count: 2, min_roots: 2, window_rows: 10, quiet_rows: 10 });
+    sel("r1", EDIT, 0); sel("r2", EDIT, 0);
+    await report();
+    filler(12); sel("r3", EDIT); sel("r5", "call/fs_write", 1);
+    expect((await report()).classes.map((c) => c.action)).toEqual(["quiet_unexercised"]);
+    sel("r4", EDIT, 1);
+    expect((await report()).classes.map((c) => c.action)).toEqual(["closed"]);
+    expect(gapRows().at(-1)).toMatchObject({ status: "closed", kind: "unused" });
+  });
+});
