@@ -430,7 +430,7 @@ const fsWrite: ResolverHandler = async (ctx) => {
       }
     }
   } catch { /* existence probe is advisory — never block a legitimate write on a stat failure */ }
-  return Bun.write(path, content).then(() => ({ shape: "fileWriteResult", path, ok: true }))
+  return Bun.write(path, content).then(async () => ({ shape: "fileWriteResult", path, ok: true, after: await afterOf(path) }))
     .catch(refusedOrError);
 };
 
@@ -446,8 +446,10 @@ function inRepo(path: string): string {
   return path;
 }
 
-// AN OK EDIT NAMES THE FILE AS IT LEFT IT: `after`, the sha256 of the file's bytes on disk after the call. Every ok
-// edit of one file otherwise answers the same {path, ok}, so a reader that compares results (the walk's news rule,
+// AN OK EDIT NAMES THE FILE AS IT LEFT IT: `after`, the sha256 of the file's bytes on disk after the call, on the
+// answer of every tool that writes a file (fs_write, fs_edit, code_insert_after_line, code_replace_lines,
+// code_add_import). Every ok edit of one file otherwise answers alike ({path, ok}, or a line range and counts), so a
+// reader that compares results (the walk's news rule,
 // keyed by the owner's news_key row) cannot tell a different edit, a revert included, from a repeat: the edit is never
 // diffed or judged, and the root sits. With it, an edit that leaves different bytes is a different result, and one that
 // leaves the same bytes as before is the same.
@@ -819,7 +821,7 @@ const codeInsertAfterLine: ResolverHandler = async (ctx) => {
     const insertIdx = afterLine; // 0 means insert at top
     lines.splice(insertIdx, 0, text);
     await Bun.write(path, lines.join("\n"));
-    return { shape: "codeInsertResult", path, after_line: afterLine, lines_added: 1, new_total_lines: lines.length };
+    return { shape: "codeInsertResult", path, after_line: afterLine, lines_added: 1, new_total_lines: lines.length, after: await afterOf(path) };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
@@ -845,7 +847,7 @@ const codeReplaceLines: ResolverHandler = async (ctx) => {
     if (endLine > lines.length) return { error: `end_line ${endLine} exceeds file length ${lines.length}` };
     const removed = lines.splice(startLine - 1, endLine - startLine + 1, text);
     await Bun.write(path, lines.join("\n"));
-    return { shape: "codeReplaceResult", path, start_line: startLine, end_line: endLine, lines_removed: removed.length, new_total_lines: lines.length };
+    return { shape: "codeReplaceResult", path, start_line: startLine, end_line: endLine, lines_removed: removed.length, new_total_lines: lines.length, after: await afterOf(path) };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
@@ -867,14 +869,14 @@ const codeAddImport: ResolverHandler = async (ctx) => {
       if (m) {
         const existing = (m[1] ?? "").trim();
         if (existing.includes(specifier.replace(/[{}\s]/g, ""))) {
-          return { shape: "codeAddImportResult", path, module: moduleName, action: "already_present", line: i + 1 };
+          return { shape: "codeAddImportResult", path, module: moduleName, action: "already_present", line: i + 1, after: await afterOf(path) };
         }
         // Merge into braces if both forms are { ... }
         if (existing.startsWith("{") && existing.endsWith("}") && specifier.startsWith("{") && specifier.endsWith("}")) {
           const merged = "{ " + existing.slice(1, -1).trim().replace(/,?\s*$/, "") + ", " + specifier.slice(1, -1).trim() + " }";
           lines[i] = lines[i]!.replace(existing, merged);
           await Bun.write(path, lines.join("\n"));
-          return { shape: "codeAddImportResult", path, module: moduleName, action: "merged_specifier", line: i + 1 };
+          return { shape: "codeAddImportResult", path, module: moduleName, action: "merged_specifier", line: i + 1, after: await afterOf(path) };
         }
       }
     }
@@ -890,7 +892,7 @@ const codeAddImport: ResolverHandler = async (ctx) => {
       lines.splice(lastImport + 1, 0, stmt);
     }
     await Bun.write(path, lines.join("\n"));
-    return { shape: "codeAddImportResult", path, module: moduleName, action: "added", line: lastImport + 2 };
+    return { shape: "codeAddImportResult", path, module: moduleName, action: "added", line: lastImport + 2, after: await afterOf(path) };
   } catch (e) { return { error: (e as Error).message }; }
 };
 

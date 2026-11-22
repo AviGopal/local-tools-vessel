@@ -1,6 +1,7 @@
 // An ok edit names the file as it left it: `after`, the sha256 of the bytes on disk after the call, on each of the three
 // ok answers (applied, a normalized match, already in the file). A different edit of the same file, a revert included,
-// answers a different `after`; one that leaves the same bytes answers the same. Errors carry none.
+// answers a different `after`; one that leaves the same bytes answers the same. Errors carry none. Every other tool that
+// writes a file answers so too: a line replace, an insert, an import and a whole-file write.
 import { afterAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -132,5 +133,75 @@ describe("an edit that changed a file in a walk clone names the clone", () => {
     expect([editedClone({ shape: "codeAddImportResult", path, action: "already_present" }, env), editedClone({ shape: "fileEditResult", path, applied: false }, env),
       editedClone({ shape: "fileEditResult", path, error: "x" }, env), editedClone({ shape: "fileContent", path }, env), editedClone({ shape: "fileEditResult", path: join(trees, "x.ts") }, env)])
       .toEqual([null, null, null, null, null]);
+  });
+});
+
+describe("every tool that writes a file names the file as it left it", () => {
+  const call = async (tool: string, pointer: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    Object.assign(process.env, { WALK_TREES_DIR: trees, MITOSIS_PUSH_CLONE_DIR: join(T, "vessels") });
+    const { resolvers } = await import("./index");
+    return (await resolvers.get(tool)!({ body: { impulse: { pointer } } } as never)) as Record<string, unknown>;
+  };
+
+  it("[MUST-FAIL] two replaces of one line range with different text answer different afters; the rest of each answer is the same", async () => {
+    const file = join(dir, "replace.ts");
+    writeFileSync(file, "a = 1;\nb = 2;\nc = 3;\n");
+    const one = await call("code_replace_lines", { path: file, start_line: 2, end_line: 2, text: "b = 20;" });
+    expect(one.after).toBe(onDisk(file));
+    const two = await call("code_replace_lines", { path: file, start_line: 2, end_line: 2, text: "b = 30;" });
+    expect(two.after).toBe(onDisk(file));
+    const { after: a1, ...rest1 } = one;
+    const { after: a2, ...rest2 } = two;
+    expect(rest1).toEqual(rest2);
+    expect(a1).not.toBe(a2);
+  });
+
+  it("[MUST-FAIL] a replace that leaves the bytes an earlier one did answers the same after", async () => {
+    const file = join(dir, "replace-same.ts");
+    writeFileSync(file, "x = 1;\n");
+    const one = await call("code_replace_lines", { path: file, start_line: 1, end_line: 1, text: "x = 2;" });
+    const two = await call("code_replace_lines", { path: file, start_line: 1, end_line: 1, text: "x = 2;" });
+    expect(typeof one.after).toBe("string");
+    expect(two).toEqual(one);
+  });
+
+  it("[MUST-FAIL] two inserts after one line with different text answer different afters", async () => {
+    const f1 = join(dir, "insert-1.ts"), f2 = join(dir, "insert-2.ts");
+    writeFileSync(f1, "a = 1;\n");
+    writeFileSync(f2, "a = 1;\n");
+    const one = await call("code_insert_after_line", { path: f1, after_line: 1, text: "b = 2;" });
+    const two = await call("code_insert_after_line", { path: f2, after_line: 1, text: "b = 3;" });
+    expect([one.after, two.after]).toEqual([onDisk(f1), onDisk(f2)]);
+    expect(one.after).not.toBe(two.after);
+  });
+
+  it("[MUST-FAIL] an import added, merged, or already there answers after: the bytes as it left them", async () => {
+    const file = join(dir, "imports.ts");
+    writeFileSync(file, "import { a } from \"m\";\nexport const x = a;\n");
+    const merged = await call("code_add_import", { path: file, module: "m", specifier: "{ b }" });
+    expect(merged).toMatchObject({ action: "merged_specifier", after: onDisk(file) });
+    const added = await call("code_add_import", { path: file, module: "n", specifier: "{ c }" });
+    expect(added).toMatchObject({ action: "added", after: onDisk(file) });
+    const there = await call("code_add_import", { path: file, module: "n", specifier: "{ c }" });
+    expect(there).toMatchObject({ action: "already_present", after: added.after });
+  });
+
+  it("[MUST-FAIL] two whole-file writes of different content answer different afters; the same content, the same", async () => {
+    const file = join(dir, "write.ts");
+    const one = await call("fs_write", { path: file, content: "export const v = 1;\n" });
+    expect(one.after).toBe(onDisk(file));
+    const two = await call("fs_write", { path: file, content: "export const v = 2;\n" });
+    expect(two.after).toBe(onDisk(file));
+    expect(two.after).not.toBe(one.after);
+    const three = await call("fs_write", { path: file, content: "export const v = 2;\n" });
+    expect(three.after).toBe(two.after);
+  });
+
+  it("a write that is refused or fails carries no after (a guard)", async () => {
+    const file = join(dir, "short.ts");
+    writeFileSync(file, "z".repeat(2000));
+    const cut = await call("fs_write", { path: file, content: "z" });
+    const past = await call("code_replace_lines", { path: file, start_line: 5, end_line: 9, text: "q" });
+    expect(["after" in cut, "after" in past]).toEqual([false, false]);
   });
 });
