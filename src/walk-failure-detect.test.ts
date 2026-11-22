@@ -304,4 +304,17 @@ describe("walk_failure_detect and output nobody took", () => {
     expect((await report()).classes.map((c) => c.action)).toEqual(["closed"]);
     expect(gapRows().at(-1)).toMatchObject({ status: "closed", kind: "unused" });
   });
+  it("a use of the move before the class's last unused selection does not close it (a guard)", async () => {
+    rule({ min_count: 2, min_roots: 2, window_rows: 10, quiet_rows: 5 });
+    sel("r0", EDIT, 1); sel("r1", EDIT, 0); sel("r2", EDIT, 0);
+    await report();
+    filler(6);
+    expect((await report()).classes.map((c) => c.action)).toEqual(["quiet_unexercised"]);
+  });
+  it("an unused selection with no root is counted under its move (a guard)", async () => {
+    rule({ min_count: 2, min_roots: 1 });
+    for (let i = 0; i < 2; i++) rows.push({ id: `s${++head}`, seq: head, shape: "selection", role: "walk", a: EDIT, use: { r: 0, key: "use" } });
+    await report();
+    expect(gapRows()[0]).toMatchObject({ kind: "unused", roots: [`move:${EDIT}`] });
+  });
 });
