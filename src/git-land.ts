@@ -324,6 +324,30 @@ export const keptCheckOut = (out: string, max: number): string => {
   return rest > 0 ? block + gap + out.slice(-rest) : block;
 };
 
+// A whole-suite run whose tests regressed, kept within max: each regressed test's own assertion, read from the tree's
+// report under the very name regressed gives (the run's output prints no file with a failing test, so two files' tests
+// of one name read alike there), in order, as many as fit, none taking more than half; then the run's output kept as
+// above in the room left, so its summary still shows. Quoting only the first failing test showed one assertion of many,
+// the same on every attempt, and the one who fixes it fixed that one alone.
+export const regressedOut = (regressed: string[], failed: Map<string, string>, out: string, max: number): string => {
+  // none of them in the report (it did not parse, or names them otherwise): the run's output, kept as it always was
+  if (!regressed.some((n) => failed.has(n))) return keptCheckOut(out, max);
+  const parts: string[] = [];
+  let used = 0;
+  for (const name of regressed) {
+    const said = failed.get(name);
+    const entry = `(fail) ${name}\n${said === undefined ? "(no failure under this name in the tree's report: skipped there, or not run)" : said.trim().slice(0, Math.floor(max / 2))}`;
+    if (used + entry.length + 2 > max) break;
+    parts.push(entry);
+    used += entry.length + 2;
+  }
+  const more = regressed.length - parts.length;
+  const head = parts.join("\n\n") + (more > 0 ? `\n\n…and ${more} more regressed, named in regressed` : "");
+  const gap = "\n…\n";
+  const rest = max - head.length - gap.length;
+  return (rest > 0 ? head + gap + keptCheckOut(out, rest) : head).slice(0, max);
+};
+
 /** Whether the tree typechecks: ran and passed, ran and did not (or ran out of time), or did not run, and why. passed is
  * what git_land reads: true only when the compiler passed, or when the base has no TypeScript config to check by.
  * checked false: no project could be compiled on this node at all, so nothing was compiled and nothing is said of the
@@ -389,13 +413,17 @@ export type DiffResult =
 // runner's process); the grader and the typecheck stand in front of it.
 const FORGES = /\((pass|fail)\)|\bprocess\s*\.\s*(exit|reallyExit|abort|kill)\b|\bBun\s*\.\s*exit\b|\/proc\/self|reporter-outfile|junit/;
 
-/** The tests a junit report says passed, by their "describe > test" names: a test case with no failure, error or skip. */
-export function passedIn(xml: string, withFile = false): Set<string> {
-  const text = (v: string) => v.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
-  const out = new Set<string>();
+/** What a junit report says of each test, by its "describe > test" names: the tests that passed (a test case with no
+ * failure, error or skip), and each failed one's message, its assertion as the runner wrote it. */
+export function reportOf(xml: string, withFile = false): { passed: Set<string>; failed: Map<string, string> } {
+  const text = (v: string) => v.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(Number(n))).replace(/&amp;/g, "&");
+  const passed = new Set<string>();
+  const failed = new Map<string, string>();
   const suites: string[] = [];
   let open: string | null = null;
   let bad = false;
+  let why: string | null = null;
   for (const m of xml.matchAll(/<(\/?)(testsuite|testcase|failure|error|skipped)\b([^>]*?)(\/?)>/g)) {
     const [, close, tag, attrs, self] = m;
     const name = text(/\bname="([^"]*)"/.exec(attrs)?.[1] ?? "");
@@ -403,15 +431,26 @@ export function passedIn(xml: string, withFile = false): Set<string> {
       if (close) suites.pop();
       else if (!self) suites.push(name);
     } else if (tag === "testcase") {
-      if (close) { if (open !== null && !bad) out.add(open); open = null; continue; }
+      if (close) {
+        if (open !== null && !bad) passed.add(open);
+        else if (open !== null && why !== null) failed.set(open, why);
+        open = null;
+        continue;
+      }
       // the outermost suite is the file: the name starts at the first describe, or at the file when several are run
       const full = [...suites.slice(withFile ? 0 : 1), name].join(" > ");
-      if (self) out.add(full);
-      else { open = full; bad = false; }
-    } else if (!close) bad = true;
+      if (self) passed.add(full);
+      else { open = full; bad = false; why = null; }
+    } else if (!close) {
+      bad = true;
+      if (tag !== "skipped" && why === null) why = text(/\bmessage="([^"]*)"/.exec(attrs)?.[1] ?? "");
+    }
   }
-  return out;
+  return { passed, failed };
 }
+
+/** The tests a junit report says passed, by their "describe > test" names: a test case with no failure, error or skip. */
+export const passedIn = (xml: string, withFile = false): Set<string> => reportOf(xml, withFile).passed;
 
 // What a test leans on besides the source it tests: a change to any of these could make the check pass without fixing
 // anything, so a tree that changes one does not pass the gap's check.
@@ -642,13 +681,14 @@ async function writeOut(t: Trusted, made: Made, work: string, ref = "refs/land/h
 /** The gap's test file run alone in a written-out tree as the shell user (or, with none, every test the runner finds
  * there, named with their files), judged from the runner's report into a directory made for this run: the tests the
  * report says passed, or null when the run wrote no report. */
-async function runCheck(dir: string, testFile: string | null, report_ = "report", stepMs = STEP_MS): Promise<{ passed: Set<string> | null; exit_code: number; signalled: boolean; killed: boolean; out: string }> {
+async function runCheck(dir: string, testFile: string | null, report_ = "report", stepMs = STEP_MS): Promise<{ passed: Set<string> | null; failed: Map<string, string>; exit_code: number; signalled: boolean; killed: boolean; out: string }> {
   // Judged from the runner's own report, not from its output, which the tested code shares: a run that exits before the
   // runner reports leaves no report, and does not pass.
   const report = join(agentWritableDir(`${dir}-${report_}`), "junit.xml");
   const r = await asShellUser([realpathSync(process.execPath), "test", ...(testFile === null ? [] : [`./${testFile}`]), "--timeout", "20000",
     "--reporter=junit", `--reporter-outfile=${report}`], dir, stepMs);
-  return { ...r, passed: existsSync(report) ? passedIn(readFileSync(report, "utf8"), testFile === null) : null };
+  const read = existsSync(report) ? reportOf(readFileSync(report, "utf8"), testFile === null) : null;
+  return { ...r, passed: read?.passed ?? null, failed: read?.failed ?? new Map() };
 }
 
 /**
@@ -685,11 +725,11 @@ export async function suiteCheck(dir: string | { why: string }, base: string | {
   const before = b.passed;
   const r = await runCheck(dir, null, "suite-report", stepMs);
   if (r.killed) return { ran: false, passed: false, why: `the suite did not finish on the tree within the step bound (${stepMs} ms)` };
-  const tail = { exit_code: r.exit_code, out: keptCheckOut(r.out, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
   if (r.passed === null) return { ran: false, passed: false, why: "the suite's run on the tree wrote no report" };
   const passed = r.passed;
   const regressed = [...before].filter((n) => !passed.has(n)).sort();
-  return { ran: true, passed: regressed.length === 0, ...tail, regressed };
+  return { ran: true, passed: regressed.length === 0, exit_code: r.exit_code, out: regressedOut(regressed, r.failed, r.out, CHECK_OUT_MAX),
+    truncated: r.out.length > CHECK_OUT_MAX, regressed };
 }
 
 /**
@@ -788,8 +828,10 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
     const refused = typeof dir === "string" ? await suiteRefuses(t) : null;
     const suite = await timed(steps, "suite", () => suiteCheck(refused === null ? dir : { why: refused }, baseDir));
-    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX,
-      fast_forward: ff, typecheck, suite, ...check, ...said };
+    // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
+    // why it did not pass, and the diff, the longest field, is what is cut
+    return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, fast_forward: ff, typecheck, suite, ...check,
+      diff: diff.slice(0, DIFF_MAX), truncated: diff.length > DIFF_MAX, ...said };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
     console.log(`[git_diff] ${steps.map(([s, ms]) => `${s}=${ms}ms`).join(" ")} total=${Math.round(performance.now() - t0)}ms`);

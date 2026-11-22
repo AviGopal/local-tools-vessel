@@ -850,6 +850,13 @@ describe("git_land", () => {
     expect(broke.check).toMatchObject({ ran: true, passed: true });
     expect(broke.suite).toMatchObject({ ran: true, passed: false });
     expect((broke.suite as { regressed: string[] }).regressed).toEqual([expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)]);
+    // [MUST-FAIL] its out leads with that test's own assertion, from the tree's report, and the row says what judged the
+    // tree before the diff, so a reader keeping the row's start keeps why it did not pass
+    expect((broke.suite as { out: string }).out).toMatch(/^\(fail\) \S*life\.test\.ts > life > adding zero keeps the number\n[^]*Expected: 5\nReceived: 0/);
+    const keys = Object.keys(broke);
+    expect(keys.indexOf("suite")).toBeLessThan(keys.indexOf("diff"));
+    expect(keys.indexOf("typecheck")).toBeLessThan(keys.indexOf("diff"));
+    expect(keys.indexOf("check")).toBeLessThan(keys.indexOf("diff"));
     // the fix that keeps it: passes, though "add > adds" was red on the base
     expect((await diffOf({ "calc.ts": "export const add = (a: number, b: number): number => a + b;\n" }, gap)).suite).toMatchObject({ ran: true, passed: true, regressed: [] });
     // a change for no gap that leaves "add > adds" red as the base has it: that test is the base's, not the change's
@@ -1161,6 +1168,62 @@ describe("what a gap's check keeps of its test run", () => {
     expect(keptCheckOut(green, 4096)).toBe(green.slice(-4096))
   })
 })
+
+describe("what the whole suite keeps of a run whose tests regressed", () => {
+  // bun's report of two files with a test of the same "describe > test" name failing in each: its output prints both
+  // failures alike ("(fail) same > name"), its report names each with its file and keeps each one's assertion.
+  const failure = (want: string, got: string) => `<failure type="AssertionError" message="expect(received).toBe(expected)&#10;&#10;Expected: ${want}&#10;Received: ${got}&#10;">AssertionError</failure>`;
+  const xml = ['<?xml version="1.0" encoding="UTF-8"?>', '<testsuites name="bun test" tests="4" failures="3">',
+    '<testsuite name="src/a.test.ts" file="src/a.test.ts">', '<testsuite name="same" file="src/a.test.ts">',
+    `<testcase name="name" classname="same" file="src/a.test.ts">${failure("&quot;A_WANT&quot;", "&quot;A_GOT&quot;")}</testcase>`,
+    '<testcase name="ok" classname="same" file="src/a.test.ts" />', "</testsuite>", "</testsuite>",
+    '<testsuite name="src/b.test.ts" file="src/b.test.ts">', '<testsuite name="same" file="src/b.test.ts">',
+    `<testcase name="name" classname="same" file="src/b.test.ts">${failure("&quot;B_WANT&quot;", "&quot;B_GOT&quot;")}</testcase>`, "</testsuite>",
+    `<testcase name="top level" classname="" file="src/b.test.ts">${failure("3", "2")}</testcase>`,
+    '<testcase name="skipped one" classname="" file="src/b.test.ts"><skipped /></testcase>', "</testsuite>", "</testsuites>"].join("\n");
+  const out = ["src/a.test.ts:", "error: expect(received).toBe(expected)", "", 'Expected: "A_WANT"', 'Received: "A_GOT"', "(fail) same > name [0.16ms]",
+    ...Array.from({ length: 200 }, (_, i) => `(pass) other > case ${i} [0.01ms]`), "src/b.test.ts:", 'Expected: "B_WANT"', 'Received: "B_GOT"',
+    "(fail) same > name [0.04ms]", "(fail) top level [0.03ms]", "", " 201 pass", " 3 fail", "Ran 204 tests across 2 files. [3.00ms]"].join("\n");
+  it("[MUST-FAIL] the report keeps each failed test's assertion under its file's name, and its passes as before", async () => {
+    const { reportOf, passedIn } = await import("./git-land");
+    const r = reportOf(xml, true);
+    expect(r.failed.get("src/a.test.ts > same > name")).toBe('expect(received).toBe(expected)\n\nExpected: "A_WANT"\nReceived: "A_GOT"\n');
+    expect(r.failed.get("src/b.test.ts > same > name")).toContain('Expected: "B_WANT"');
+    expect(r.failed.get("src/b.test.ts > top level")).toContain("Expected: 3\nReceived: 2");
+    expect([...r.failed.keys()].sort()).toEqual(["src/a.test.ts > same > name", "src/b.test.ts > same > name", "src/b.test.ts > top level"]);
+    expect([...r.passed]).toEqual(["src/a.test.ts > same > ok"]);
+    expect(passedIn(xml, true)).toEqual(r.passed);
+  });
+  it("[MUST-FAIL] each regressed test is told by its own assertion, a second file's same-named test by its own, then the run's summary", async () => {
+    const { reportOf, regressedOut } = await import("./git-land");
+    const kept = regressedOut(["src/a.test.ts > same > name", "src/b.test.ts > same > name"], reportOf(xml, true).failed, out, 4096);
+    expect(out.length).toBeGreaterThan(4096);
+    expect(kept.length).toBeLessThanOrEqual(4096);
+    expect(kept).toContain('(fail) src/a.test.ts > same > name\nexpect(received).toBe(expected)\n\nExpected: "A_WANT"\nReceived: "A_GOT"');
+    expect(kept).toContain('(fail) src/b.test.ts > same > name\nexpect(received).toBe(expected)\n\nExpected: "B_WANT"\nReceived: "B_GOT"');
+    expect(kept.indexOf("A_WANT")).toBeLessThan(kept.indexOf("B_WANT"));
+    expect(kept).toContain(" 3 fail");
+  });
+  it("[MUST-FAIL] past the bound: whole entries while they fit, none over half, the rest counted, and never longer than max", async () => {
+    const { regressedOut } = await import("./git-land");
+    const names = Array.from({ length: 30 }, (_, i) => `src/x.test.ts > d > t${i}`);
+    const failed = new Map(names.map((n, i) => [n, `Expected: ${i}\nReceived: ${"r".repeat(i === 0 ? 5000 : 200)}`]));
+    const kept = regressedOut(names, failed, out, 4096);
+    expect(kept.length).toBeLessThanOrEqual(4096);
+    expect(kept.startsWith(`(fail) ${names[0]}\nExpected: 0\nReceived: rrr`)).toBe(true);
+    expect(kept.indexOf(`(fail) ${names[1]}\n`)).toBeLessThan(2048 + 64); // the first took no more than half
+    expect(kept).toMatch(/…and \d+ more regressed, named in regressed/);
+  });
+  it("[GUARD] with no regressed test, or none in the report (it did not parse, or it is missing), the run's output is kept as it always was", async () => {
+    const { regressedOut, keptCheckOut, reportOf } = await import("./git-land");
+    expect(regressedOut([], reportOf(xml, true).failed, out, 4096)).toBe(keptCheckOut(out, 4096));
+    expect(regressedOut(["src/a.test.ts > same > name"], reportOf("not a report", true).failed, out, 4096)).toBe(keptCheckOut(out, 4096));
+    expect(regressedOut(["src/a.test.ts > same > name"], new Map(), out, 4096)).toBe(keptCheckOut(out, 4096));
+    // one of two in the report: the other is said to have no failure there, never left out
+    const one = regressedOut(["src/a.test.ts > same > name", "src/c.test.ts > gone"], reportOf(xml, true).failed, out, 4096);
+    expect(one).toContain("(fail) src/c.test.ts > gone\n(no failure under this name in the tree's report: skipped there, or not run)");
+  });
+});
 
 // A super-repo origin of its own for a describe: a bare repository seeded with `files`, the owner's repository row naming
 // its working branch while the describe runs, and super clones of it with one committed change and a person's r 1 on it.
