@@ -264,7 +264,8 @@ describe("a clone moved before its refresh failed is said moved, so the walk rec
     const to = moveOrigin("b.txt", "b-sm2\n");
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made),
       { ...io, refreshed: async (...a: Parameters<typeof refreshed>) => { await refreshed(...a); return { ok: false, changed: false, conflicts: [], why: "the move did not end on the new base" } } });
-    expect(r).toMatchObject({ clone: { base: to, refreshed_from: c.made.base }, error: expect.stringContaining("did not end on the new base") });
+    const tree = g(c.cwd, "rev-parse", "HEAD^{tree}");
+    expect(r).toMatchObject({ clone: { base: to, refreshed_from: c.made.base, head: to, tree, committed_tree: tree }, error: expect.stringContaining("did not end on the new base") });
   });
   it("[MUST-FAIL] a moved clone whose place cannot be read is still said moved, without the fields that could not be read", async () => {
     const c = await clone();
@@ -272,6 +273,13 @@ describe("a clone moved before its refresh failed is said moved, so the walk rec
     const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made), { ...io, clonePlace: async () => { throw lost } }) as { clone: Record<string, unknown> };
     expect(r.clone).toMatchObject({ base: to, refreshed_from: c.made.base, committed_tree: g(c.cwd, "rev-parse", "HEAD^{tree}") });
     expect(["head" in r.clone, "tree" in r.clone, "error" in r]).toEqual([false, false, false]);
+  });
+  it("[GUARD] a moved clone whose committed tree cannot be read is still said moved, without committed_tree", async () => {
+    const c = await clone();
+    const to = moveOrigin("b.txt", "b-sm8\n");
+    const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made), { ...io, committedTree: async () => { throw lost } }) as { clone: Record<string, unknown> };
+    expect(r.clone).toMatchObject({ base: to, refreshed_from: c.made.base, head: to, tree: g(c.cwd, "rev-parse", "HEAD^{tree}") });
+    expect(["committed_tree" in r.clone, "error" in r]).toEqual([false, false]);
   });
   it("a throw before the move: no clone is said, and the tool runs as before", async () => {
     const c = await clone();
