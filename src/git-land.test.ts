@@ -716,6 +716,27 @@ describe("git_land", () => {
     expect("tree" in r && r.uncommitted).toEqual(["m.ts"]);
   });
 
+  it("[MUST-FAIL] a diff of a clone holding an uncommitted path says uncommitted_any true", async () => {
+    const { cwd } = await changeOf({ "m.ts": "export const n: number = 1;\n" });
+    writeFileSync(join(cwd, "m.ts"), "export const n: number = 2;\n");
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    expect("tree" in r && [r.uncommitted, r.uncommitted_any]).toEqual([["m.ts"], true]);
+  });
+
+  it("[MUST-FAIL] a diff of a clone holding nothing uncommitted says uncommitted_any false", async () => {
+    const { cwd } = await changeOf({ "m.ts": "export const n: number = 1;\n" });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+    expect("tree" in r && [r.uncommitted, r.uncommitted_any]).toEqual([[], false]);
+  });
+
+  it("[GUARD] a clone whose status cannot be read says neither uncommitted nor uncommitted_any", async () => {
+    const { cwd } = await changeOf({ "m.ts": "export const n: number = 1;\n" });
+    const gone = join(OUT, "not-a-clone");
+    mkdirSync(gone, { recursive: true });
+    const r = await diffClone(gone, made.get(cwd)!, ["file"]);
+    expect(["uncommitted" in r, "uncommitted_any" in r]).toEqual([false, false]);
+  });
+
   it("[MUST-FAIL] a clone with no commit since it was made answers that, with what it holds uncommitted, not a bundle error", async () => {
     g(COPY, "pull", "-q", "origin", "dev");
     const w = await makeWorktree("demo");

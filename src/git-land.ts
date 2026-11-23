@@ -404,8 +404,8 @@ export type SuiteCheck =
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
-      fast_forward: boolean; typecheck: Typecheck; suite: SuiteCheck; check?: GapCheck; uncommitted?: string[] }
-  | { error: string; stderr?: string; uncommitted?: string[] };
+      fast_forward: boolean; typecheck: Typecheck; suite: SuiteCheck; check?: GapCheck; uncommitted?: string[]; uncommitted_any?: boolean }
+  | { error: string; stderr?: string; uncommitted?: string[]; uncommitted_any?: boolean };
 
 // What a change could write to make a check it fails read as passing: the runner's own result words, an exit before the
 // runner reports, where its report goes. A change adding any of these does not pass the gap's check, whatever else it
@@ -799,7 +799,9 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
   const t0 = performance.now();
   try {
     const pending = await timed(steps, "status", () => uncommitted(cwd));
-    const said = pending === null ? {} : { uncommitted: pending };
+    // uncommitted_any says the same as a flat boolean, so a requires row (which can only test a field's equality) can
+    // offer git_commit only when there is something to commit; absent with uncommitted, when the clone could not be read.
+    const said = pending === null ? {} : { uncommitted: pending, uncommitted_any: pending.length > 0 };
     // A clone with no commit since it was made has no change to diff; said so, with what it holds uncommitted, rather
     // than the bundle's "could not be bundled".
     const ahead = await git(["-C", cwd, "rev-list", "--count", `${made.base}..HEAD`], tmpdir());

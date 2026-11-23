@@ -123,6 +123,10 @@ describe("declared shape inputs", () => {
     expect(d).toContain("uncommitted, the paths the clone holds changed but not committed")
   })
 
+  it("[MUST-FAIL] git_diff says uncommitted_any: whether the clone holds any uncommitted path", () => {
+    expect(SHAPE_DESCRIPTIONS.git_diff).toContain("uncommitted_any, true when it holds any such path and false when none")
+  })
+
   it("[MUST-FAIL] each declared answer is for a declared shape, and the diff a landing is judged on comes from git_diff", () => {
     for (const shape of Object.keys(SHAPE_ANSWERS)) expect(Object.keys(SHAPE_INPUTS)).toContain(shape)
     expect(SHAPE_ANSWERS.git_diff).toBe("gitDiff")

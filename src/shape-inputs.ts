@@ -88,7 +88,8 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
     "land_verdict names; and typecheck, whether that exact tree typechecks (ran, passed, and what the compiler said; " +
     "checked false with ran false and no passed when no project could be compiled on this node, which says nothing of the " +
     "change); and uncommitted, the paths the clone holds changed but not committed, which are not in that change " +
-    "(git_commit commits them). For a repository that is not such a clone, shows its unstaged changes (git diff).",
+    "(git_commit commits them), and uncommitted_any, true when it holds any such path and false when none (both absent " +
+    "when the clone could not be read). For a repository that is not such a clone, shows its unstaged changes (git diff).",
   git_commit: "Commits every change in a clone git_worktree made, checked by the super-repo's hooks as of its making; " +
     "answers the sha, tree and changed paths, needs_person (changed paths that judge changes, which only a person may " +
     "approve) and scan (whether the secrets scan ran).",
