@@ -919,6 +919,10 @@ describe("git_land", () => {
     const breaks = "export const add = (a: number, b: number): number => (b === 0 ? 0 : a + b);\n";
     expect((await checkOf({ "calc.ts": breaks })).check).toMatchObject({ ran: true, passed: false,
       regressed: [expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)] });
+    // [MUST-FAIL] a name written whole, its file included (as a person may file it), is that test: green on the base,
+    // so there is nothing for the check to tell
+    expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["life.test.ts > life > adding zero keeps the number"] })).check)
+      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
     // a gap whose named tests already pass on the base: nothing for the check to tell
     expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["add > zero"] })).check)
       .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
