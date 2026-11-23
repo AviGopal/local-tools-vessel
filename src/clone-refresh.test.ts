@@ -394,4 +394,12 @@ describe("a clone holding commits and edits together: git_commit runs in it as i
     expect(await behind(D(c.cwd), process.env, refusalOf({ error: "the new base could not be fetched", conflicts: [], changed: true })))
       .toContain("for a fresh clone and make the edits again there")
   })
+
+  it("[GUARD] only commits and edits held together are said held: a refresh refused for a failed fetch is not", async () => {
+    const c = await clone()
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3\n4\n5f\n"); asOwner(c.cwd)
+    const r = await refreshed(c.cwd, c.made.base, c.made.base, c.made.branch, join(T, "no-such-copy"))
+    expect(r).toMatchObject({ ok: false, why: "the new base could not be fetched into the clone", changed: true })
+    expect("held" in r).toBe(false)
+  })
 })
