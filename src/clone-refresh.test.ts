@@ -5,8 +5,8 @@ import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bu
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { freshFirst, madeCurrent, refreshInPlace } from "./clone-refresh";
-import { makeWorktree, refreshed } from "./git-worktree";
+import { freshFirst, madeCurrent, movedOnto, refreshInPlace } from "./clone-refresh";
+import { clonePlace, committedTree, makeWorktree, refreshed } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
 
 setDefaultTimeout(120_000);
@@ -240,5 +240,70 @@ describe("a clone moved onto a newer base that no row records is a fact, read fr
     expect(await madeCurrent(c.cwd, at({ ...c.made, base: to }))).toMatchObject({ base: to });
     const d = await clone();
     expect(await madeCurrent(d.cwd, at(d.made))).toMatchObject({ base: d.made.base });
+  });
+});
+
+describe("a clone moved before its refresh failed is said moved, so the walk records it", () => {
+  const io = { refreshed, clonePlace, committedTree, movedOnto };
+  const lost = new Error("spawn failed");
+  const tool = () => { let ran = 0; return { ran: () => ran, run: async () => { ran++; return { shape: "gitDiff" } } } };
+  it("[MUST-FAIL] a throw after the move: the answer says the clone's new base, first, beside the error, and the tool does not run", async () => {
+    const c = await clone();
+    const to = moveOrigin("b.txt", "b-sm1\n");
+    const t = tool();
+    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, t.run, process.env, (cl, env) => refreshInPlace(cl, env, at(c.made),
+      { ...io, refreshed: async (...a: Parameters<typeof refreshed>) => { await refreshed(...a); throw lost } })) as Record<string, unknown>;
+    expect(g(c.cwd, "rev-parse", "HEAD")).toBe(to);
+    expect(Object.keys(out)[0]).toBe("clone");
+    expect(out).toMatchObject({ clone: { shape: "gitWorktree", cwd: c.cwd, base: to, refreshed_from: c.made.base, head: to, tree: g(c.cwd, "rev-parse", "HEAD^{tree}") },
+      error: expect.stringContaining("spawn failed"), conflicts: [] });
+    expect(t.ran()).toBe(0);
+  });
+  it("[MUST-FAIL] a refusal after the move: the answer says the new base beside the refusal", async () => {
+    const c = await clone();
+    const to = moveOrigin("b.txt", "b-sm2\n");
+    const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made),
+      { ...io, refreshed: async (...a: Parameters<typeof refreshed>) => { await refreshed(...a); return { ok: false, changed: false, conflicts: [], why: "the move did not end on the new base" } } });
+    expect(r).toMatchObject({ clone: { base: to, refreshed_from: c.made.base }, error: expect.stringContaining("did not end on the new base") });
+  });
+  it("[MUST-FAIL] a moved clone whose place cannot be read is still said moved, without the fields that could not be read", async () => {
+    const c = await clone();
+    const to = moveOrigin("b.txt", "b-sm3\n");
+    const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made), { ...io, clonePlace: async () => { throw lost } }) as { clone: Record<string, unknown> };
+    expect(r.clone).toMatchObject({ base: to, refreshed_from: c.made.base, committed_tree: g(c.cwd, "rev-parse", "HEAD^{tree}") });
+    expect(["head" in r.clone, "tree" in r.clone, "error" in r]).toEqual([false, false, false]);
+  });
+  it("a throw before the move: no clone is said, and the tool runs as before", async () => {
+    const c = await clone();
+    moveOrigin("b.txt", "b-sm4\n");
+    const before = state(c.cwd);
+    const t = tool();
+    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, t.run, process.env, (cl, env) => refreshInPlace(cl, env, at(c.made),
+      { ...io, refreshed: async () => { throw lost } }));
+    expect([out, t.ran()]).toEqual([{ shape: "gitDiff" }, 1]);
+    expect(state(c.cwd)).toEqual(before);
+  });
+  it("a refusal that left the clone as it was: no clone is said", async () => {
+    const c = await clone();
+    moveOrigin("b.txt", "b-sm5\n");
+    const r = await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made),
+      { ...io, refreshed: async () => ({ ok: false, changed: false, conflicts: [], why: "could not be read" }) }) as Record<string, unknown>;
+    expect(["clone" in r, r.error]).toEqual([false, expect.stringContaining("could not be read")]);
+  });
+  it("a throw mid-replay (HEAD detached on the new base): not said as moved", async () => {
+    const c = await clone();
+    const to = moveOrigin("b.txt", "b-sm6\n");
+    const t = tool();
+    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, t.run, process.env, (cl, env) => refreshInPlace(cl, env, at(c.made),
+      { ...io, refreshed: async () => { g(c.cwd, "fetch", "-q", COPY, "dev"); g(c.cwd, "checkout", "-q", "--detach", to); throw lost } }));
+    expect(out).toEqual({ shape: "gitDiff" });
+  });
+  it("a clone whose move cannot be read: not said as moved", async () => {
+    const c = await clone();
+    moveOrigin("b.txt", "b-sm7\n");
+    const t = tool();
+    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, t.run, process.env, (cl, env) => refreshInPlace(cl, env, at(c.made),
+      { ...io, refreshed: async (...a: Parameters<typeof refreshed>) => { await refreshed(...a); throw lost }, movedOnto: async () => { throw lost } }));
+    expect(out).toEqual({ shape: "gitDiff" });
   });
 });

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { withClones } from "./clones-lock.js";
-import { clonePlace, committedTree, refreshed } from "./git-worktree.js";
+import { clonePlace, committedTree, refreshed, type Refresh } from "./git-worktree.js";
 import { madeClone } from "./walk-rows.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
@@ -19,8 +19,9 @@ export type Refreshed = { shape: "gitWorktree"; cwd: string; repo: string; branc
 
 /** The clone brought to its copy's HEAD (clone: where it is now), why it could not be (error, with the paths), or null when it is not
  *  behind or is not a clone a walk row records (then nothing is touched). */
-export async function refreshInPlace(clone: { dir: string; repo: string }, env: Env, made = madeClone):
-  Promise<{ clone: Refreshed } | { error: string; conflicts: string[] } | null> {
+export async function refreshInPlace(clone: { dir: string; repo: string }, env: Env, made = madeClone,
+  io = { refreshed, clonePlace, committedTree, movedOnto }):
+  Promise<{ clone: Refreshed } | { clone?: Refreshed; error: string; conflicts: string[] } | null> {
   const zones = containmentZones(env);
   const superDir = zones.supers[0];
   const source = clone.repo === "super" ? superDir : join(zones.clones, clone.repo);
@@ -35,12 +36,34 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
   if ((await git(["-C", clone.dir, "merge-base", "--is-ancestor", to, "HEAD"], tmpdir())).exit_code === 0) return null;
   const m = await made(clone.dir);
   if ("error" in m || m.origin_url !== origin) return null;
+  const facts = { shape: "gitWorktree" as const, cwd: clone.dir, repo: clone.repo, branch, base: to, super_base: superBase, origin_url: origin,
+    refreshed_from: m.base };
+  // Where the clone is now, each read on its own: one that fails (a spawn failing) is not said, and never unsays the move.
+  const where = async () => ({ ...(await io.clonePlace(clone.dir).catch(() => ({}))), ...(await io.committedTree(clone.dir).catch(() => ({}))) });
+  // A move that ended in a throw or a refusal can have happened all the same (git failing after the checkout or the replay):
+  // then the answer says it moved beside the error, so the walk records the base the clone is on. Unread: not said.
+  const onTo = () => io.movedOnto(clone.dir, to).catch(() => false);
   return withClones(async () => {
-    const r = await refreshed(clone.dir, m.base, to, branch, source);
-    if (!r.ok) return { error: `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`, conflicts: r.conflicts };
-    return { clone: { shape: "gitWorktree", cwd: clone.dir, repo: clone.repo, branch, base: to, super_base: superBase, origin_url: origin,
-      refreshed_from: m.base, ...(r.carried ? { carried: r.carried } : {}), ...(await clonePlace(clone.dir)), ...(await committedTree(clone.dir)) } };
+    let r: Refresh;
+    try {
+      r = await io.refreshed(clone.dir, m.base, to, branch, source);
+    } catch (e) {
+      if (!(await onTo())) throw e;
+      return { clone: { ...facts, ...(await where()) }, error: `${clone.dir} was brought onto ${to.slice(0, 12)} but the refresh did not finish: ${String(e).slice(0, 200)}`, conflicts: [] };
+    }
+    if (!r.ok) {
+      const error = `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`;
+      return (await onTo()) ? { clone: { ...facts, ...(await where()) }, error, conflicts: r.conflicts } : { error, conflicts: r.conflicts };
+    }
+    return { clone: { ...facts, ...(r.carried ? { carried: r.carried } : {}), ...(await where()) } };
   });
+}
+
+/** Whether the clone has moved onto `to`: on its own branch (not mid-replay, where HEAD is detached) at or past it. Before a
+ *  refresh it is not (a clone at or past its copy's HEAD is not refreshed), so a clone on it afterwards was moved. */
+export async function movedOnto(cwd: string, to: string): Promise<boolean> {
+  return (await git(["-C", cwd, "symbolic-ref", "-q", "HEAD"], tmpdir())).exit_code === 0
+    && (await git(["-C", cwd, "merge-base", "--is-ancestor", to, "HEAD"], tmpdir())).exit_code === 0;
 }
 
 /** Run a tool after bringing the clone it works in onto the copy: a clone that could not be is said, and the tool does not
@@ -48,7 +71,8 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
 export async function freshFirst(clone: { dir: string; repo: string } | null, run: () => Promise<unknown>, env: Env,
   refresh: typeof refreshInPlace = refreshInPlace): Promise<unknown> {
   const r = clone === null ? null : await refresh(clone, env).catch(() => null);
-  if (r !== null && "error" in r) return { error: r.error, conflicts: r.conflicts };
+  // A clone that moved before the refresh failed: the move is said first (the walk records it), and the tool does not run.
+  if (r !== null && "error" in r) return { ...(r.clone ? { clone: r.clone } : {}), error: r.error, conflicts: r.conflicts };
   // The tool runs knowing the move this call just made (thisCall, below): its rows cannot say it yet (the walk records it
   // from this answer), so without it the tool would read the clone's old base and refuse its own refresh.
   const out = r === null ? await run() : await thisCall.run(r.clone, run);
