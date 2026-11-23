@@ -890,7 +890,9 @@ describe("git_land", () => {
   it("[MUST-FAIL] a gap the whole suite found is checked by the whole suite: its named tests green, and nothing that passed on the base red", async () => {
     // the base from the cases above: add subtracts, so "add > adds" fails there; "add > zero" and life's test pass. The
     // gap names no file, as the gate's regression gap does: its named tests are anywhere in the suite, by their leaf
-    const gap = { gap_id: "R1", only_tests: ["add > adds"] };
+    // its vessel as pull-sync writes it: the name of the vessel's copy under the clones root, which makeWorktree("demo")
+    // above cloned from, so made.repo is the same string
+    const gap = { gap_id: "R1", vessel: "demo", only_tests: ["add > adds"] };
     const checkOf = async (files: Record<string, string | null>, g2: unknown = gap) => {
       const { cwd } = await changeOf(files);
       const r = await diffClone(cwd, made.get(cwd)!, ["file"], g2 as never);
@@ -905,6 +907,12 @@ describe("git_land", () => {
     expect(ok.suite).toMatchObject({ ran: true, passed: true });
     // named still red: it does not pass
     expect((await checkOf({ "notes.txt": "n\n" })).check).toMatchObject({ ran: true, passed: false });
+    // [MUST-FAIL] a suite of another vessel says nothing of this clone's: not run, and the why names both
+    expect((await checkOf({ "calc.ts": fixed }, { ...gap, vessel: "other-vessel" })).check)
+      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's suite is other-vessel's, and this clone is of demo" });
+    // some named test red on the base is enough to check: of "add > adds" (red there) and "add > zero" (green there), the
+    // fix passes
+    expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["add > adds", "add > zero"] })).check).toMatchObject({ ran: true, passed: true });
     // every named test, not some: of two, one the tree still does not pass, it does not pass
     expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["add > adds", "add > absent"] })).check).toMatchObject({ ran: true, passed: false });
     // named green by breaking a test that passed on the base: it does not pass, and names that test
@@ -1067,7 +1075,15 @@ describe("git_land", () => {
     expect(await gapOf(rowsOf([{ id: "s1", shape: "selection" } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no root") });
     // [MUST-FAIL] a test_suite of its vessel naming no file: the check is the whole suite, its named tests anywhere in it
     const suiteRow = { ...gapRow, gap_id: "R1", meta: { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/demo", only_tests: ["add > adds"] } } } } as Row;
-    expect(await gapOf(rowsOf([sel("gr"), suiteRow]), "s1")).toEqual({ gap_id: "R1", only_tests: ["add > adds"] });
+    expect(await gapOf(rowsOf([sel("gr"), suiteRow]), "s1")).toEqual({ gap_id: "R1", vessel: "demo", only_tests: ["add > adds"] });
+    // the vessel as pull-sync writes it (its name, no prefix) is the same vessel
+    const bare = { ...suiteRow, meta: { evidence_resolve: { shape: "test_suite", input: { vessel: "demo", only_tests: ["add > adds"] } } } } as Row;
+    expect(await gapOf(rowsOf([sel("gr"), bare]), "s1")).toEqual({ gap_id: "R1", vessel: "demo", only_tests: ["add > adds"] });
+    // [MUST-FAIL] the evidence exactly as pull-sync's regression_evidence writes it for a vessel: its vessel is the name
+    // of the vessel's copy under the clones root, the repo git_worktree clones that vessel as (makeWorktree's made.repo)
+    const emitted = JSON.parse('{"shape":"test_suite","input":{"vessel":"local-tools-vessel","only_tests":["add > adds"]}}');
+    expect(await gapOf(rowsOf([sel("gr"), { ...suiteRow, meta: { evidence_resolve: emitted } } as Row]), "s1"))
+      .toEqual({ gap_id: "R1", vessel: "local-tools-vessel", only_tests: ["add > adds"] });
     // a test_suite naming its file is that file's check, as before
     const fileRow = { ...gapRow, meta: { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/demo", test_file: "calc.test.ts", only_tests: ["add > adds"] } } } } as Row;
     expect(await gapOf(rowsOf([sel("gr"), fileRow]), "s1")).toEqual({ gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] });

@@ -386,7 +386,7 @@ function silenced(patch: string, added: string[]): string[] {
 
 /** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). With no test_file
  * the check is the repository's whole suite (a gap the suite found, its named tests anywhere in it). */
-export type GapRef = { gap_id: string; test_file?: string; only_tests: string[]; lever?: string };
+export type GapRef = { gap_id: string; test_file?: string; vessel?: string; only_tests: string[]; lever?: string };
 
 /** Whether that gap's check passes on the tree: the named tests pass when the test file runs alone, as the detector's
  * closer runs it, and no test of the file that passed on the base fails on the tree (regressed names them). passed is
@@ -470,7 +470,7 @@ export function isGapCheckFile(path: string, gap: Pick<GapRef, "test_file">): bo
  * The gap the call was made for, when its selection's root is a detector's gap: read from records by the selection the
  * walk names on every call (its root is the request the clone is for). No selection: not the walk's call, no gap. The gap
  * row says what checks it (meta.evidence_resolve): a test file, or a test_suite of its vessel naming no file, whose check
- * is then the whole suite. A row that cannot be read, or a gap row naming neither, is an error: the check then does not
+ * is then the whole suite of that vessel (named as a repository is: any "repos/" prefix removed). A row that cannot be read, or a gap row naming neither, is an error: the check then does not
  * pass.
  */
 export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined): Promise<GapRef | null | { error: string }> {
@@ -491,7 +491,7 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
   // named when an edit of the check itself is refused, so the refusal says where to edit instead.
   const sources = ((g.meta ?? {}) as { sources?: unknown }).sources;
   const lever = Array.isArray(sources) && sources.length > 0 ? sources.map(String).join(", ") : undefined;
-  return { gap_id: String(g.gap_id), ...(suite ? {} : { test_file: String(input.test_file) }), only_tests: [input.only_tests ?? []].flat().map(String),
+  return { gap_id: String(g.gap_id), ...(suite ? { vessel: String(input.vessel).replace(/^repos\//, "") } : { test_file: String(input.test_file) }), only_tests: [input.only_tests ?? []].flat().map(String),
     ...(lever ? { lever } : {}) };
 }
 
@@ -766,7 +766,7 @@ const greenIn = (run: { passed: Set<string> | null; failed: Map<string, string> 
  * (TEST_SUPPORT) or to what chooses how code is checked (CHECK_CONFIG) does not pass, so a change cannot pass by editing
  * the check. It runs as the shell user, in the tree written out with the installed node_modules.
  */
-async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef | { error: string }, base: string | { why: string },
+async function gapCheck(t: Trusted, repo: string, dir: string | { why: string }, gap: GapRef | { error: string }, base: string | { why: string },
   runs?: SuiteRuns): Promise<GapCheck> {
   if ("error" in gap) return { ran: false, passed: false, why: gap.error };
   const id = { gap_id: gap.gap_id, ...(gap.test_file === undefined ? {} : { test_file: gap.test_file }) };
@@ -782,6 +782,8 @@ async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef |
   const forged = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++") && FORGES.test(l));
   if (forged.length > 0) return { ...id, ran: false, passed: false, why: `the change writes what the check reads: ${forged[0].slice(1, 200)}` };
   if (gap.test_file === undefined) {
+    // a suite is its vessel's: another repository's suite says nothing of the gap, whatever names the two share
+    if (gap.vessel !== repo) return { ...id, ran: false, passed: false, why: `the gap's suite is ${gap.vessel}'s, and this clone is of ${repo}` };
     // the gap's check is the whole suite: its named tests red on the base and green on the tree, and no test that
     // passed on the base red on the tree (a fix that turns the named tests green by breaking others does not pass)
     if (runs === undefined) return { ...id, ran: false, passed: false, why: "the whole suite was not run" };
@@ -871,7 +873,7 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     let runs: SuiteRuns | undefined;
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", async () => {
       if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir);
-      return gapCheck(t, dir, gap, baseDir, runs);
+      return gapCheck(t, made.repo, dir, gap, baseDir, runs);
     }) };
     const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir)));
     // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
