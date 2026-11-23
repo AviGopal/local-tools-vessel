@@ -108,6 +108,23 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
     "request), keeps the rest, and reports changed clones of closed requests; answers what it removed and reported.",
 }
 
+// How a call works in a walk clone behind this node's copy (index.ts, clone-refresh.ts freshFirst). A call not named here
+// works in the clone, so the clone is brought onto the copy first and the call does not run in one that cannot be.
+//   - unwrapped: it works in no one clone, so nothing is refreshed or said of one. git_worktree makes clones,
+//     walk_trees_reclaim removes them, walk_failure_detect reads and writes rows.
+//   - runs_on_held_edits: it also runs in a clone whose refresh is refused for holding commits and uncommitted edits
+//     together. git_commit commits what the clone holds against the base it was made at, which needs no current base, and
+//     what it makes (commits only) is what a later refresh replays; refusing it there left the walk no way on but a fresh
+//     clone and the change made again.
+export const SHAPE_IN_CLONE: Record<string, "unwrapped" | "runs_on_held_edits"> = {
+  git_worktree: "unwrapped",
+  walk_trees_reclaim: "unwrapped",
+  walk_failure_detect: "unwrapped",
+  git_commit: "runs_on_held_edits",
+}
+export const wrapsClone = (name: string): boolean => SHAPE_IN_CLONE[name] !== "unwrapped"
+export const runsOnHeldEdits = (name: string): boolean => SHAPE_IN_CLONE[name] === "runs_on_held_edits"
+
 // What a call of each shape answers with: the shape of its answer row. Discovery serves it (shape_answers) beside the
 // descriptions and inputs, so a reader that needs a row of some shape can find the call that makes it (the walk's skip
 // names it) instead of reading it out of prose. shape-inputs.test.ts holds each to what its handler answers.

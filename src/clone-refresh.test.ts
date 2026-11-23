@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { freshFirst, madeCurrent, movedOnto, refreshInPlace } from "./clone-refresh";
 import { clonePlace, committedTree, makeWorktree, refreshed } from "./git-worktree";
 import { madeClone, type Made } from "./walk-rows";
+import { behind, refusalOf } from "./clone-freshness";
+import { runsOnHeldEdits } from "./shape-inputs";
 
 setDefaultTimeout(120_000);
 const T = mkdtempSync(join(tmpdir(), "clone-refresh-test-"));
@@ -315,3 +317,81 @@ describe("a clone moved before its refresh failed is said moved, so the walk rec
     expect(out).toEqual({ shape: "gitDiff" });
   });
 });
+
+describe("a clone holding commits and edits together: git_commit runs in it as it is, and the note names the way on", () => {
+  const D = (cwd: string) => ({ dir: cwd, repo: "demo" })
+  const noteAfter = (cwd: string, out: unknown) => behind(D(cwd), process.env, refusalOf(out))
+  /** A clone with a commit of its own and an uncommitted edit on top, behind a copy that moved a path it does not change. */
+  const held = async (tag: string) => {
+    const c = await clone()
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3h\n4\n5\n"); commitAll(c.cwd, "own change")
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3h\n4\n5h\n"); asOwner(c.cwd)
+    return { c, to: moveOrigin("b.txt", `b-${tag}\n`) }
+  }
+  const refreshOf = (made: Made) => (cl: { dir: string; repo: string }, env: NodeJS.ProcessEnv) => refreshInPlace(cl, env, at(made))
+
+  it("[MUST-FAIL] git_commit runs there, and the next call carries the commits onto the copy", async () => {
+    const { c, to } = await held("h1")
+    let ran = 0
+    const out = await freshFirst(D(c.cwd), async () => { ran++; commitAll(c.cwd, "the edits"); asOwner(c.cwd); return { shape: "gitCommitResult" } },
+      process.env, refreshOf(c.made), runsOnHeldEdits("git_commit"))
+    expect(ran).toBe(1)
+    expect(out).toMatchObject({ refresh_refused: "commits_and_edits", shape: "gitCommitResult" })
+    expect(await noteAfter(c.cwd, out)).toContain(`its edits are committed, so the next tool called in ${c.cwd} carries the commits onto the copy`)
+    expect(await refreshInPlace(D(c.cwd), process.env, at(c.made))).toMatchObject({ clone: { base: to, carried: "commits" } })
+  })
+
+  it("[MUST-FAIL] any other call does not run there, and is told to commit the edits there first", async () => {
+    const { c } = await held("h2")
+    let ran = 0
+    const out = await freshFirst(D(c.cwd), async () => { ran++; return { shape: "fileContent" } }, process.env, refreshOf(c.made), runsOnHeldEdits("fs_read"))
+    expect(ran).toBe(0)
+    expect(out).toMatchObject({ held: "commits_and_edits", changed: true })
+    const why = await noteAfter(c.cwd, out)
+    expect(why).toContain(`git_commit in ${c.cwd} commits the edits, then the next tool called there carries the commits onto the copy`)
+    expect(why).not.toContain("fresh clone")
+  })
+
+  it("[MUST-FAIL] a git_commit refused there leaves the edits held, and the note still says commit them there", async () => {
+    const { c } = await held("h3")
+    const out = await freshFirst(D(c.cwd), async () => ({ error: "refused by the pre-commit hook" }), process.env, refreshOf(c.made), runsOnHeldEdits("git_commit"))
+    expect(out).toMatchObject({ refresh_refused: "commits_and_edits", error: "refused by the pre-commit hook" })
+    expect(await noteAfter(c.cwd, out)).toContain(`git_commit in ${c.cwd} commits the edits`)
+  })
+
+  it("[GUARD] a clean clone behind the copy is brought onto it before git_commit runs", async () => {
+    const c = await clone()
+    const to = moveOrigin("b.txt", "b-h4\n")
+    let headAtRun = ""
+    const out = await freshFirst(D(c.cwd), async () => { headAtRun = g(c.cwd, "rev-parse", "HEAD"); return { shape: "gitCommitResult" } },
+      process.env, refreshOf(c.made), true) as Record<string, unknown>
+    expect(headAtRun).toBe(to)
+    expect(Object.keys(out)[0]).toBe("clone")
+    expect("refresh_refused" in out).toBe(false)
+  })
+
+  it("[MUST-FAIL] a change the copy's move conflicts with: no call runs, git_commit included, and the note names the paths, the clone and a fresh clone", async () => {
+    const c = await clone()
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\nmine-h5\n4\n5\n"); commitAll(c.cwd, "own change"); asOwner(c.cwd)
+    moveOrigin("a.txt", "1\n2\ntheirs-h5\n4\n5\n")
+    let ran = 0
+    const out = await freshFirst(D(c.cwd), async () => { ran++; return {} }, process.env, refreshOf(c.made), runsOnHeldEdits("git_commit"))
+    expect(ran).toBe(0)
+    expect(out).toMatchObject({ conflicts: ["a.txt"] })
+    const why = await noteAfter(c.cwd, out)
+    expect(why).toContain(`also changed a.txt, which the change in ${c.cwd} changes`)
+    expect(why).toContain("ask for git_worktree of demo for a fresh clone and make the change to those paths again there")
+  })
+
+  it("[MUST-FAIL] a clone that held no change (clean, unreadable, or no refresh said) has nothing to make again; one that held a change does", async () => {
+    const c = await clone()
+    moveOrigin("b.txt", "b-h6\n")
+    for (const r of [refusalOf({ error: "the clone could not be read", conflicts: [], changed: false }), null]) {
+      const why = await behind(D(c.cwd), process.env, r)
+      expect(why).toContain("ask for git_worktree of demo for a fresh clone")
+      expect(why).not.toContain("make the edits again")
+    }
+    expect(await behind(D(c.cwd), process.env, refusalOf({ error: "the new base could not be fetched", conflicts: [], changed: true })))
+      .toContain("for a fresh clone and make the edits again there")
+  })
+})

@@ -152,10 +152,12 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
 //     refuses, changing nothing, when it did (carried: "uncommitted");
 //   - commits past `from` only: replayed onto `to` (git decides what conflicts); on a conflict the replay is undone, the
 //     clone left as it was, and the conflicting paths are named (carried: "commits");
-//   - both: not carried (commit or drop the edits first; nothing is guessed).
+//   - both: not carried (commit or drop the edits first; nothing is guessed), and said as held: "commits_and_edits",
+//     refused before anything is fetched or moved, so a commit made in the clone as it is ends exactly this state.
 // Not ok: changed says whether the clone held a change (so a fresh clone does not hide it), conflicts which paths `to`
 // also changed, why in words. Nothing here edits a file or resolves a conflict.
-export type Refresh = { ok: true; carried?: "uncommitted" | "commits" } | { ok: false; changed: boolean; conflicts: string[]; why: string };
+export type Refresh = { ok: true; carried?: "uncommitted" | "commits" }
+  | { ok: false; changed: boolean; conflicts: string[]; why: string; held?: "commits_and_edits" };
 // Where a clone is now: its HEAD and HEAD's tree, as fields, so a reader (the walk's newest tree) never parses a sha out
 // of words. Read after a move; nothing is said when either cannot be read.
 export async function clonePlace(cwd: string): Promise<{ head: string; tree: string } | Record<string, never>> {
@@ -176,7 +178,7 @@ export async function committedTree(cwd: string): Promise<{ committed_tree: stri
 export async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
   const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
   const out = async (args: string[], timeoutMs?: number) => { const r = await run(args, timeoutMs); return r.exit_code === 0 ? r.stdout.trim() : null; };
-  const no = (why: string, changed = false, conflicts: string[] = []): Refresh => ({ ok: false, changed, conflicts, why });
+  const no = (why: string, changed = false, conflicts: string[] = []): Extract<Refresh, { ok: false }> => ({ ok: false, changed, conflicts, why });
   // A replay a restart cut off leaves the clone mid-rebase, off its own branch: undone first, which puts the clone back
   // on its branch exactly as it was, so it is carried (or named) like any other.
   if (existsSync(join(cwd, ".git", "rebase-merge")) || existsSync(join(cwd, ".git", "rebase-apply"))) await run(["rebase", "--abort"]);
@@ -189,7 +191,7 @@ export async function refreshed(cwd: string, from: string, to: string, branch: s
   const dirty = await out(["status", "--porcelain", "--untracked-files=all"]);
   const ahead = await out(["rev-list", "HEAD", "--not", from]);
   if (dirty === null || ahead === null) return no("the clone could not be read");
-  if (dirty !== "" && ahead !== "") return no("the clone holds both commits and uncommitted edits; commit or drop the edits first", true);
+  if (dirty !== "" && ahead !== "") return { ...no("the clone holds both commits and uncommitted edits; commit or drop the edits first", true), held: "commits_and_edits" };
   if ((await out(["fetch", "--quiet", "--upload-pack=git -c 'safe.directory=*' upload-pack", source, branch], 300_000)) === null) {
     return no("the new base could not be fetched into the clone", dirty !== "" || ahead !== "");
   }

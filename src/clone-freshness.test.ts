@@ -57,4 +57,17 @@ describe("clone freshness", () => {
     expect(JSON.stringify(big).length).toBeGreaterThan(16 * 1024);
     expect(JSON.stringify(big).slice(0, 1000)).toContain("for a fresh clone");
   });
+
+  it("[MUST-FAIL] only a call declared to run on held edits runs past a refusal for commits and edits held together", async () => {
+    Object.assign(process.env, env);
+    const { wrapped } = await import("./index");
+    const refused = async () => ({ error: "commit or drop the edits first", conflicts: [], changed: true, held: "commits_and_edits" as const });
+    const ctx = { body: { impulse: { pointer: { cwd: clone, message: "m" } } } } as never;
+    let ran = 0;
+    const h = async () => { ran++; return { shape: "gitCommitResult" } };
+    const commit = (await wrapped("git_commit", h as never, refused)(ctx)) as Record<string, unknown>;
+    expect([ran, commit.refresh_refused]).toEqual([1, "commits_and_edits"]);
+    const edit = (await wrapped("fs_edit", h as never, refused)(ctx)) as Record<string, unknown>;
+    expect([ran, edit.held]).toEqual([1, "commits_and_edits"]);
+  });
 });

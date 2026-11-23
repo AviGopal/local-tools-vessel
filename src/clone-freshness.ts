@@ -36,8 +36,23 @@ export function editedClone(answer: unknown, env: Env): string | null {
   return typeof a.path === "string" ? cloneOf({ path: a.path }, env)?.dir ?? null : null;
 }
 
-/** Why a change made in this clone cannot land, when this node's copy of its repository has moved past it; else null. */
-export async function behind(clone: { dir: string; repo: string }, env: Env): Promise<string | null> {
+/** What the refresh before a call said of the clone, read from the call's answer (clone-refresh.ts freshFirst): the paths
+ *  that conflict, whether it held a change, and, for commits and uncommitted edits held together, whether the edits are
+ *  still held or a commit run past that refusal ended it. Null when the answer is no refusal. */
+export type Refusal = { conflicts: string[]; changed?: boolean; held: "edits" | "committed" | null };
+export function refusalOf(answer: unknown): Refusal | null {
+  if (typeof answer !== "object" || answer === null) return null;
+  const a = answer as Record<string, unknown>;
+  if (a.refresh_refused === "commits_and_edits") return { conflicts: [], changed: true, held: "error" in a ? "edits" : "committed" };
+  if (!("error" in a) || !Array.isArray(a.conflicts)) return null;
+  return { conflicts: a.conflicts.map(String), ...(typeof a.changed === "boolean" ? { changed: a.changed } : {}),
+    held: a.held === "commits_and_edits" ? "edits" : null };
+}
+
+/** Why a change made in this clone cannot land as it is, when this node's copy of its repository has moved past it, and
+ *  the way on from what the refresh said (refusal): a commit where the clone holds commits and edits together, the next
+ *  call where only commits are held, a fresh clone where the change conflicts or nothing is held. Else null. */
+export async function behind(clone: { dir: string; repo: string }, env: Env, refusal: Refusal | null = null): Promise<string | null> {
   const zones = containmentZones(env);
   const copy = clone.repo === "super" ? zones.supers[0] : join(zones.clones, clone.repo);
   if (!copy) return null;
@@ -49,6 +64,17 @@ export async function behind(clone: { dir: string; repo: string }, env: Env): Pr
   // reading it as behind is one fresh clone asked for needlessly.
   const has = await git(["-C", clone.dir, "merge-base", "--is-ancestor", at, "HEAD"], tmpdir());
   if (has.exit_code === 0) return null;
-  return `${clone.dir} was made before this node's copy of ${clone.repo} moved on (to ${at.slice(0, 10)}): a change made in ` +
-    `it cannot land; ask for git_worktree of ${clone.repo} for a fresh clone and make the edits again there`;
+  const moved = `${clone.dir} was made before this node's copy of ${clone.repo} moved on (to ${at.slice(0, 10)})`;
+  const fresh = `ask for git_worktree of ${clone.repo} for a fresh clone`;
+  if (refusal?.held === "edits") {
+    return `${moved}: it holds commits and uncommitted edits, which are not carried together; git_commit in ${clone.dir} ` +
+      `commits the edits, then the next tool called there carries the commits onto the copy`;
+  }
+  if (refusal?.held === "committed") return `${moved}: its edits are committed, so the next tool called in ${clone.dir} carries the commits onto the copy`;
+  if (refusal !== null && refusal.conflicts.length > 0) {
+    return `${moved}, and the copy's newer change also changed ${refusal.conflicts.join(", ")}, which the change in ${clone.dir} ` +
+      `changes, so it cannot be carried: ${fresh} and make the change to those paths again there`;
+  }
+  // Edits to make again only where the refresh said the clone held a change: one that held none (clean, or unreadable) has none.
+  return `${moved}: a change made in it cannot land; ${fresh}${refusal?.changed === true ? " and make the edits again there" : ""}`;
 }

@@ -17,11 +17,15 @@ import { containmentZones, type Env } from "./write-containment.js";
 export type Refreshed = { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string;
   refreshed_from: string; carried?: "uncommitted" | "commits"; head?: string; tree?: string; committed_tree?: string };
 
+/** A refresh that did not finish: where the clone is when it moved, why, the conflicting paths, whether it held a change
+ *  (changed, when the refusal said), and held when what it holds is commits and uncommitted edits together. */
+export type Refused = { clone?: Refreshed; error: string; conflicts: string[]; changed?: boolean; held?: "commits_and_edits" };
+
 /** The clone brought to its copy's HEAD (clone: where it is now), why it could not be (error, with the paths), or null when it is not
  *  behind or is not a clone a walk row records (then nothing is touched). */
 export async function refreshInPlace(clone: { dir: string; repo: string }, env: Env, made = madeClone,
   io = { refreshed, clonePlace, committedTree, movedOnto }):
-  Promise<{ clone: Refreshed } | { clone?: Refreshed; error: string; conflicts: string[] } | null> {
+  Promise<{ clone: Refreshed } | Refused | null> {
   const zones = containmentZones(env);
   const superDir = zones.supers[0];
   const source = clone.repo === "super" ? superDir : join(zones.clones, clone.repo);
@@ -53,7 +57,8 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
     }
     if (!r.ok) {
       const error = `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`;
-      return (await onTo()) ? { clone: { ...facts, ...(await where()) }, error, conflicts: r.conflicts } : { error, conflicts: r.conflicts };
+      const said = { error, conflicts: r.conflicts, changed: r.changed, ...(r.held ? { held: r.held } : {}) };
+      return (await onTo()) ? { clone: { ...facts, ...(await where()) }, ...said } : said;
     }
     return { clone: { ...facts, ...(r.carried ? { carried: r.carried } : {}), ...(await where()) } };
   });
@@ -67,12 +72,22 @@ export async function movedOnto(cwd: string, to: string): Promise<boolean> {
 }
 
 /** Run a tool after bringing the clone it works in onto the copy: a clone that could not be is said, and the tool does not
- *  run; one that was is said first in the answer (the walk keeps the start of a long answer), then the tool's own. */
+ *  run; one that was is said first in the answer (the walk keeps the start of a long answer), then the tool's own. A tool
+ *  declared to run on held edits (SHAPE_IN_CLONE) runs in a clone refused only for holding commits and uncommitted edits
+ *  together, as it is: that refusal moved nothing, and a commit ends the state, so the next call there carries the
+ *  commits. Its answer says the refusal it ran past (refresh_refused). */
 export async function freshFirst(clone: { dir: string; repo: string } | null, run: () => Promise<unknown>, env: Env,
-  refresh: typeof refreshInPlace = refreshInPlace): Promise<unknown> {
+  refresh: typeof refreshInPlace = refreshInPlace, runsOnHeldEdits = false): Promise<unknown> {
   const r = clone === null ? null : await refresh(clone, env).catch(() => null);
+  if (r !== null && "error" in r && runsOnHeldEdits && r.held === "commits_and_edits" && !r.clone) {
+    const out = await run();
+    return typeof out === "object" && out !== null ? { refresh_refused: r.held, ...out } : out;
+  }
   // A clone that moved before the refresh failed: the move is said first (the walk records it), and the tool does not run.
-  if (r !== null && "error" in r) return { ...(r.clone ? { clone: r.clone } : {}), error: r.error, conflicts: r.conflicts };
+  if (r !== null && "error" in r) {
+    return { ...(r.clone ? { clone: r.clone } : {}), error: r.error, conflicts: r.conflicts,
+      ...(r.changed !== undefined ? { changed: r.changed } : {}), ...(r.held ? { held: r.held } : {}) };
+  }
   // The tool runs knowing the move this call just made (thisCall, below): its rows cannot say it yet (the walk records it
   // from this answer), so without it the tool would read the clone's old base and refuse its own refresh.
   const out = r === null ? await run() : await thisCall.run(r.clone, run);
