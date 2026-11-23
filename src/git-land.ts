@@ -384,14 +384,15 @@ function silenced(patch: string, added: string[]): string[] {
   return [...out].sort();
 }
 
-/** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). */
-export type GapRef = { gap_id: string; test_file: string; only_tests: string[]; lever?: string };
+/** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). With no test_file
+ * the check is the repository's whole suite (a gap the suite found, its named tests anywhere in it). */
+export type GapRef = { gap_id: string; test_file?: string; only_tests: string[]; lever?: string };
 
 /** Whether that gap's check passes on the tree: the named tests pass when the test file runs alone, as the detector's
  * closer runs it, and no test of the file that passed on the base fails on the tree (regressed names them). passed is
  * what git_land reads; anything that keeps the check from running does not pass. */
 export type GapCheck =
-  | { gap_id: string; test_file: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
+  | { gap_id: string; test_file?: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
   | { gap_id?: string; test_file?: string; ran: false; passed: false; why: string };
 
 /** What the repository's whole test suite says of the tree: every test the runner finds, run on the base and then on the
@@ -462,13 +463,15 @@ const TEST_SUPPORT = /(^|\/)(tests?|__tests__|fixtures?|__fixtures__|__mocks__)\
  * a change that touches one, and fs_edit refuses the edit itself on a clone made for that gap.
  */
 export function isGapCheckFile(path: string, gap: Pick<GapRef, "test_file">): boolean {
-  return path === gap.test_file || TEST_SUPPORT.test(path) || CHECK_CONFIG.test(path);
+  return (gap.test_file !== undefined && path === gap.test_file) || TEST_SUPPORT.test(path) || CHECK_CONFIG.test(path);
 }
 
 /**
  * The gap the call was made for, when its selection's root is a detector's gap: read from records by the selection the
- * walk names on every call (its root is the request the clone is for). No selection: not the walk's call, no gap. A row
- * that cannot be read, or a gap row naming no test file, is an error: the check then does not pass.
+ * walk names on every call (its root is the request the clone is for). No selection: not the walk's call, no gap. The gap
+ * row says what checks it (meta.evidence_resolve): a test file, or a test_suite of its vessel naming no file, whose check
+ * is then the whole suite. A row that cannot be read, or a gap row naming neither, is an error: the check then does not
+ * pass.
  */
 export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined): Promise<GapRef | null | { error: string }> {
   if (!selectionRef) return null;
@@ -480,13 +483,16 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
   if (!Array.isArray(r)) return r;
   const g = r[0];
   if (!g || g.shape !== "gap" || g.role !== "detector") return null;
-  const input = ((g.meta as { evidence_resolve?: { input?: Record<string, unknown> } } | undefined)?.evidence_resolve?.input ?? {});
-  if (typeof input.test_file !== "string" || input.test_file === "") return { error: `gap ${String(g.gap_id)} names no test file` };
+  const evidence = (g.meta as { evidence_resolve?: { shape?: unknown; input?: Record<string, unknown> } } | undefined)?.evidence_resolve;
+  const input = evidence?.input ?? {};
+  const suite = evidence?.shape === "test_suite" && typeof input.vessel === "string" && input.vessel !== "" && input.test_file === undefined;
+  if (!suite && (typeof input.test_file !== "string" || input.test_file === "")) return { error: `gap ${String(g.gap_id)} names no test file` };
   // Where the fix belongs, as the gap row says it (meta.sources: what the check imports, which the detector writes):
   // named when an edit of the check itself is refused, so the refusal says where to edit instead.
   const sources = ((g.meta ?? {}) as { sources?: unknown }).sources;
   const lever = Array.isArray(sources) && sources.length > 0 ? sources.map(String).join(", ") : undefined;
-  return { gap_id: String(g.gap_id), test_file: input.test_file, only_tests: [input.only_tests ?? []].flat().map(String), ...(lever ? { lever } : {}) };
+  return { gap_id: String(g.gap_id), ...(suite ? {} : { test_file: String(input.test_file) }), only_tests: [input.only_tests ?? []].flat().map(String),
+    ...(lever ? { lever } : {}) };
 }
 
 /**
@@ -717,20 +723,38 @@ export async function suiteRefuses(t: Trusted): Promise<string | null> {
  * that wrote no report, does not pass, and says which.
  */
 export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteCheck> {
-  if (typeof dir !== "string") return { ran: false, passed: false, why: dir.why };
-  if (typeof base !== "string") return { ran: false, passed: false, why: base.why };
+  return suiteOf(await suiteRuns(dir, base, stepMs));
+}
+
+// The whole suite's two runs, base then tree, as suiteCheck reads them; a suite-form gap's check reads the same runs.
+type CheckRun = Awaited<ReturnType<typeof runCheck>>;
+type SuiteRuns = { before: Set<string>; base: CheckRun; tree: CheckRun & { passed: Set<string> } } | { why: string };
+async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteRuns> {
+  if (typeof dir !== "string") return { why: dir.why };
+  if (typeof base !== "string") return { why: base.why };
   const b = await runCheck(base, null, "suite-report", stepMs);
-  if (b.killed) return { ran: false, passed: false, why: `the suite did not finish on the base within the step bound (${stepMs} ms)` };
-  if (b.passed === null) return { ran: false, passed: false, why: "the suite's run on the base wrote no report" };
+  if (b.killed) return { why: `the suite did not finish on the base within the step bound (${stepMs} ms)` };
+  if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
   const before = b.passed;
   const r = await runCheck(dir, null, "suite-report", stepMs);
-  if (r.killed) return { ran: false, passed: false, why: `the suite did not finish on the tree within the step bound (${stepMs} ms)` };
-  if (r.passed === null) return { ran: false, passed: false, why: "the suite's run on the tree wrote no report" };
-  const passed = r.passed;
-  const regressed = [...before].filter((n) => !passed.has(n)).sort();
-  return { ran: true, passed: regressed.length === 0, exit_code: r.exit_code, out: regressedOut(regressed, r.failed, r.out, CHECK_OUT_MAX),
-    truncated: r.out.length > CHECK_OUT_MAX, regressed };
+  if (r.killed) return { why: `the suite did not finish on the tree within the step bound (${stepMs} ms)` };
+  if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
+  return { before, base: b, tree: { ...r, passed: r.passed } };
 }
+const suiteOf = (s: SuiteRuns): SuiteCheck => {
+  if ("why" in s) return { ran: false, passed: false, why: s.why };
+  const regressed = [...s.before].filter((n) => !s.tree.passed.has(n)).sort();
+  return { ran: true, passed: regressed.length === 0, exit_code: s.tree.exit_code, out: regressedOut(regressed, s.tree.failed, s.tree.out, CHECK_OUT_MAX),
+    truncated: s.tree.out.length > CHECK_OUT_MAX, regressed };
+};
+
+// A gap's named test, in a whole suite's report: there every name starts at its file, and the detector writes it
+// without one, so a name is matched whole or as the whole end of a name ("file > describe > test" ends with
+// " > describe > test"). Such a name can match tests in more than one file: it is green on a run only when some test it
+// matches passed and none it matches failed.
+const matches = (x: string, n: string): boolean => x === n || x.endsWith(` > ${n}`);
+const greenIn = (run: { passed: Set<string> | null; failed: Map<string, string> }, n: string): boolean =>
+  [...(run.passed ?? [])].some((x) => matches(x, n)) && ![...run.failed.keys()].some((x) => matches(x, n));
 
 /**
  * Whether the gap's own check passes on exactly this tree, in the same call: its test file run alone, as the detector's
@@ -742,20 +766,34 @@ export async function suiteCheck(dir: string | { why: string }, base: string | {
  * (TEST_SUPPORT) or to what chooses how code is checked (CHECK_CONFIG) does not pass, so a change cannot pass by editing
  * the check. It runs as the shell user, in the tree written out with the installed node_modules.
  */
-async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef | { error: string }, base: string | { why: string }): Promise<GapCheck> {
+async function gapCheck(t: Trusted, dir: string | { why: string }, gap: GapRef | { error: string }, base: string | { why: string },
+  runs?: SuiteRuns): Promise<GapCheck> {
   if ("error" in gap) return { ran: false, passed: false, why: gap.error };
-  const id = { gap_id: gap.gap_id, test_file: gap.test_file };
+  const id = { gap_id: gap.gap_id, ...(gap.test_file === undefined ? {} : { test_file: gap.test_file }) };
   if (typeof dir !== "string") return { ...id, ran: false, passed: false, why: dir.why };
   if (typeof base !== "string") return { ...id, ran: false, passed: false, why: base.why };
   const changed = await t.out(["diff", "--no-renames", "--name-only", t.origin, "refs/land/head"]);
   if (changed === null) return { ...id, ran: false, passed: false, why: "the change's paths could not be read" };
   const edits = changed.split("\n").filter((p) => p !== "" && isGapCheckFile(p, gap));
   if (edits.length > 0) return { ...id, ran: false, passed: false, why: `the change edits the check: ${edits.join(", ")}` };
-  if (!existsSync(join(dir, gap.test_file))) return { ...id, ran: false, passed: false, why: `${gap.test_file} is not in the tree` };
+  if (gap.test_file !== undefined && !existsSync(join(dir, gap.test_file))) return { ...id, ran: false, passed: false, why: `${gap.test_file} is not in the tree` };
   const patch = await t.out(["diff", "--no-renames", "--no-ext-diff", "-U0", t.origin, "refs/land/head"]);
   if (patch === null) return { ...id, ran: false, passed: false, why: "the change's lines could not be read" };
   const forged = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++") && FORGES.test(l));
   if (forged.length > 0) return { ...id, ran: false, passed: false, why: `the change writes what the check reads: ${forged[0].slice(1, 200)}` };
+  if (gap.test_file === undefined) {
+    // the gap's check is the whole suite: its named tests red on the base and green on the tree, and no test that
+    // passed on the base red on the tree (a fix that turns the named tests green by breaking others does not pass)
+    if (runs === undefined) return { ...id, ran: false, passed: false, why: "the whole suite was not run" };
+    if ("why" in runs) return { ...id, ran: false, passed: false, why: runs.why };
+    const was = gap.only_tests.length === 0 ? runs.base.exit_code !== 0 : gap.only_tests.some((n) => !greenIn(runs.base, n));
+    if (!was) return { ...id, ran: false, passed: false, why: "the gap's tests already pass on the base" };
+    const s = suiteOf(runs);
+    if (!s.ran) return { ...id, ran: false, passed: false, why: s.why };
+    const now = gap.only_tests.length === 0 ? runs.tree.exit_code === 0 : gap.only_tests.every((n) => greenIn(runs.tree, n));
+    return { ...id, ran: true, passed: now && s.regressed.length === 0 && !runs.tree.signalled, exit_code: s.exit_code, out: s.out,
+      truncated: s.truncated, regressed: s.regressed };
+  }
   const b = await runCheck(base, gap.test_file);
   if (b.passed === null) return { ...id, ran: false, passed: false, why: "the test run on the base wrote no report" };
   const before = b.passed;
@@ -827,9 +865,15 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
       ? await timed(steps, "typecheck", () => typecheckTree(t, made, dir, () => writeOut(t, made, work, t.origin, "base-typecheck")))
       : { ran: false, passed: false, why: behind };
     const baseDir = ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
-    const check = gap === null ? {} : { check: await timed(steps, "gap_check", () => gapCheck(t, dir, gap, baseDir)) };
     const refused = typeof dir === "string" ? await suiteRefuses(t) : null;
-    const suite = await timed(steps, "suite", () => suiteCheck(refused === null ? dir : { why: refused }, baseDir));
+    const suiteDir = refused === null ? dir : { why: refused };
+    // a gap whose check is the whole suite runs it once, in its check, and the suite's own verdict reads the same runs
+    let runs: SuiteRuns | undefined;
+    const check = gap === null ? {} : { check: await timed(steps, "gap_check", async () => {
+      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir);
+      return gapCheck(t, dir, gap, baseDir, runs);
+    }) };
+    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir)));
     // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
     // why it did not pass, and the diff, the longest field, is what is cut
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, fast_forward: ff, typecheck, suite, ...check,

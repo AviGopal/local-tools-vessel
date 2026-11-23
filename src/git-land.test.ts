@@ -887,6 +887,76 @@ describe("git_land", () => {
       regressed: [expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)] });
   });
 
+  it("[MUST-FAIL] a gap the whole suite found is checked by the whole suite: its named tests green, and nothing that passed on the base red", async () => {
+    // the base from the cases above: add subtracts, so "add > adds" fails there; "add > zero" and life's test pass. The
+    // gap names no file, as the gate's regression gap does: its named tests are anywhere in the suite, by their leaf
+    const gap = { gap_id: "R1", only_tests: ["add > adds"] };
+    const checkOf = async (files: Record<string, string | null>, g2: unknown = gap) => {
+      const { cwd } = await changeOf(files);
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"], g2 as never);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      return r;
+    };
+    const fixed = "export const add = (a: number, b: number): number => a + b;\n";
+    // named green, nothing new red: it passes, and the suite says the same of the same runs
+    const ok = await checkOf({ "calc.ts": fixed });
+    expect(ok.check).toEqual(expect.objectContaining({ gap_id: "R1", ran: true, passed: true, regressed: [] }));
+    expect("test_file" in (ok.check as object)).toBe(false);
+    expect(ok.suite).toMatchObject({ ran: true, passed: true });
+    // named still red: it does not pass
+    expect((await checkOf({ "notes.txt": "n\n" })).check).toMatchObject({ ran: true, passed: false });
+    // every named test, not some: of two, one the tree still does not pass, it does not pass
+    expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["add > adds", "add > absent"] })).check).toMatchObject({ ran: true, passed: false });
+    // named green by breaking a test that passed on the base: it does not pass, and names that test
+    const breaks = "export const add = (a: number, b: number): number => (b === 0 ? 0 : a + b);\n";
+    expect((await checkOf({ "calc.ts": breaks })).check).toMatchObject({ ran: true, passed: false,
+      regressed: [expect.stringMatching(/life\.test\.ts > life > adding zero keeps the number$/)] });
+    // a gap whose named tests already pass on the base: nothing for the check to tell
+    expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["add > zero"] })).check)
+      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
+    // no names: the suite's exit, red on the base and green on the tree
+    expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: [] })).check).toMatchObject({ ran: true, passed: true });
+    expect((await checkOf({ "notes.txt": "n\n" }, { ...gap, only_tests: [] })).check).toMatchObject({ ran: true, passed: false });
+    // the check is the base's: a change to a test does not pass, whatever it does
+    expect((await checkOf({ "calc.ts": fixed, "life.test.ts": null })).check)
+      .toMatchObject({ passed: false, why: "the change edits the check: life.test.ts" });
+    // no names and a base whose whole suite is green: nothing for the check to tell. The base is put back after, as the
+    // cases below read it.
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "calc.ts"), fixed);
+    commitAll(seed, "a green base"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    try {
+      expect((await checkOf({ "notes.txt": "n\n" }, { ...gap, only_tests: [] })).check)
+        .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
+    } finally {
+      writeFileSync(join(seed, "calc.ts"), "export const add = (a: number, b: number): number => a - b;\n");
+      commitAll(seed, "the base as it was"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    }
+    // a name two files share: green on a side only when every test it matches there is. Here another file's "add >
+    // adds" stays red, so the fix of calc's does not pass (and a gap so named cannot land while that test is red)
+    writeFileSync(join(seed, "dup.test.ts"), 'import { expect, test, describe } from "bun:test";\n' +
+      'describe("add", () => { test("adds", () => { expect(1).toBe(2); }); });\n');
+    commitAll(seed, "a second adds"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    try {
+      expect((await checkOf({ "calc.ts": fixed })).check).toMatchObject({ ran: true, passed: false, regressed: [] });
+    } finally {
+      rmSync(join(seed, "dup.test.ts"));
+      commitAll(seed, "one adds again"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    }
+    // a name matches whole describes only: "padd > adds", red on both sides, ends with the named "add > adds" as text but
+    // is another test, so the fix of calc's still passes
+    writeFileSync(join(seed, "pad.test.ts"), 'import { expect, test, describe } from "bun:test";\n' +
+      'describe("padd", () => { test("adds", () => { expect(1).toBe(2); }); });\n');
+    commitAll(seed, "a padd > adds"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    try {
+      expect((await checkOf({ "calc.ts": fixed })).check).toMatchObject({ ran: true, passed: true, regressed: [] });
+    } finally {
+      rmSync(join(seed, "pad.test.ts"));
+      commitAll(seed, "no padd"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    }
+  });
+
   it("[MUST-FAIL] a change of no gap cannot write the suite's report or choose how the suite runs: a test, a preload, or bunfig alone", async () => {
     // the base from the cases above, with a preload the base's bunfig names
     const seed = join(T, "seed");
@@ -995,6 +1065,19 @@ describe("git_land", () => {
     expect(await gapOf(rowsOf([]), undefined)).toBeNull();
     expect(await gapOf(rowsOf([sel("gr"), { ...gapRow, meta: {} } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no test file") });
     expect(await gapOf(rowsOf([{ id: "s1", shape: "selection" } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no root") });
+    // [MUST-FAIL] a test_suite of its vessel naming no file: the check is the whole suite, its named tests anywhere in it
+    const suiteRow = { ...gapRow, gap_id: "R1", meta: { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/demo", only_tests: ["add > adds"] } } } } as Row;
+    expect(await gapOf(rowsOf([sel("gr"), suiteRow]), "s1")).toEqual({ gap_id: "R1", only_tests: ["add > adds"] });
+    // a test_suite naming its file is that file's check, as before
+    const fileRow = { ...gapRow, meta: { evidence_resolve: { shape: "test_suite", input: { vessel: "repos/demo", test_file: "calc.test.ts", only_tests: ["add > adds"] } } } } as Row;
+    expect(await gapOf(rowsOf([sel("gr"), fileRow]), "s1")).toEqual({ gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > adds"] });
+    // [GUARD] a row that does not say its check stays an error: the gate's regression row as it is written today (no
+    // evidence_resolve), a suite naming no vessel, and an input with no shape
+    const regression = { ...gapRow, gap_id: "R0", meta: { vessel: "demo", head: "h", refusals: 2, regression: "1 test(s) newly failing" } } as Row;
+    expect(await gapOf(rowsOf([sel("gr"), regression]), "s1")).toMatchObject({ error: "gap R0 names no test file" });
+    for (const evidence_resolve of [{ shape: "test_suite", input: { only_tests: ["a"] } }, { input: { vessel: "repos/demo", only_tests: ["a"] } },
+      { shape: "test_suite", input: { vessel: "", only_tests: ["a"] } }, { shape: "other", input: { vessel: "repos/demo" } }])
+      expect(await gapOf(rowsOf([sel("gr"), { ...gapRow, meta: { evidence_resolve } } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no test file") });
   });
 
   it("[MUST-FAIL] a clone origin has moved past shows its own change, says it cannot fast-forward, and does not pass", async () => {
