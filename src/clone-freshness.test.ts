@@ -70,4 +70,17 @@ describe("clone freshness", () => {
     const edit = (await wrapped("fs_edit", h as never, refused)(ctx)) as Record<string, unknown>;
     expect([ran, edit.held]).toEqual([1, "commits_and_edits"]);
   });
+
+  it("[GUARD] the wrapper's note on a clone behind its copy names the way on from the refusal it was given", async () => {
+    Object.assign(process.env, env);
+    const { wrapped } = await import("./index");
+    const ctx = { body: { impulse: { pointer: { path: join(clone, "a.ts") } } } } as never;
+    const h = async () => ({ shape: "fileContent" });
+    const held = async () => ({ error: "commit or drop the edits first", conflicts: [], changed: true, held: "commits_and_edits" as const });
+    const onHeld = (await wrapped("fs_read", h as never, held)(ctx)) as Record<string, unknown>;
+    expect(String(onHeld.clone_behind)).toContain(`git_commit in ${clone} commits the edits`);
+    const conflict = async () => ({ error: "could not be brought onto it", conflicts: ["a.ts"], changed: true });
+    const onConflict = (await wrapped("fs_read", h as never, conflict)(ctx)) as Record<string, unknown>;
+    expect(String(onConflict.clone_behind)).toContain(`also changed a.ts, which the change in ${clone} changes`);
+  });
 });
