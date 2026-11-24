@@ -606,6 +606,8 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
 
   const root = containmentZones(env).supers[0];
   if (!root) return refuse("no_super_repo_clone", "no live super-repo clone is configured on this node");
+  // Check if root is an empty string, implying no super-repo clone.
+  if (root === "") return refuse("no_super_repo_clone", "no live super-repo clone is configured on this node");
   // PIN THE TREE. What runs is the approved COMMIT's tree, exported from the object store into a private
   // snapshot per run (execute): the script, its siblings and the submodule code it executes. The working
   // tree is never executed, so an edit there, before or during a run, changes nothing that runs.
