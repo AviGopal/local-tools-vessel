@@ -125,13 +125,14 @@ describe("walk failure classes", () => {
     expect(/new RegExp|\.match\(|\.replace\(\/|\.test\(/.test(src)).toBe(false)
   })
 
-  test("[MUST-FAIL] a refusal that waits for a person is a wait, not a failure: no class, so no infra gap", () => {
+  test("[MUST-FAIL] a refusal saying waits_for person is a failure the detector sees, classed as any: no row is hidden as a wait", () => {
     const rows = [...call("w1", "git_land", {}, { status: 403, blames: "callee", waits_for: "person", body: "needs a person's verdict" }),
       ...call("w2", "git_land", {}, { status: 403, blames: "callee", waits_for: "person", body: "needs a person's verdict" }),
       ...call("w3", "fs_read", {}, { status: 0, blames: "callee", body: "TypeError: fetch failed" })]
     const k = classesOf(rows)
-    expect(k.map((c) => c.tool)).toEqual(["fs_read"])
-    // another waits_for value is still a failure the detector sees
+    expect(k.map((c) => c.tool).sort()).toEqual(["fs_read", "git_land"])
+    expect(k.find((c) => c.tool === "git_land")?.failures).toHaveLength(2)
+    // another waits_for value is a failure the detector sees too
     expect(classesOf(call("w4", "git_land", {}, { status: 403, blames: "callee", waits_for: "something-new", body: "x" })).map((c) => c.tool)).toEqual(["git_land"])
   })
 })

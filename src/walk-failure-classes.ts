@@ -19,7 +19,7 @@ export type Klass = { key: ClassKey; tool: string; kind?: string; refused?: stri
 // Whom a failure blames is records' to say: it stamps blames on every walk failure row it stores (fold.ts blames), and
 // this reads that stamp only, never a copy of records' rule. A row written before the stamp is its own class, blames
 // "unstamped" (named debt: it leaves when no unstamped failure is left in a detector's window). A failure that blames
-// the callee (an outage, a timeout, a crash in what was called, the gate waiting for a person) is infra, the USER's
+// the callee (an outage, a timeout, a crash in what was called) is infra, the USER's
 // ruling: filed, not offered to the walk.
 const blamesOf = (f: Row): string => typeof f.blames === "string" ? f.blames : "unstamped"
 const band = (s: unknown): string => typeof s === "number" ? (s >= 500 ? "5xx" : s >= 400 ? "4xx" : s === 200 ? "200" : String(s)) : "none"
@@ -65,12 +65,6 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
       out.set(key, k)
       continue
     }
-    // A refusal that says it waits (waits_for: a gate waiting on a person's verdict, lifted from the tool's answer) is
-    // the gate working, not a failure: no class, so never an infra gap nor work for the walk. records stamps it blames
-    // callee for the fold's sake (no debit); here it is not a failure at all.
-    // Only the value the walk writes (calls.ts lifts waits_for "person" from a call or run's own answer): a value it
-    // might add later is not silently dropped from the detector.
-    if (f.waits_for === "person") continue
     const h = started.get(String(f.call_id))
     const sel = sels.get(String(f.selection_ref))
     const tool = h !== undefined ? String(h.pointer_type) : String(sel?.a ?? "unknown")
