@@ -605,9 +605,30 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
   if (!argv.ok) return refuse("args_invalid", argv.why);
 
   const root = containmentZones(env).supers[0];
+  // If the root is empty, it implies no super-repo clone is configured.
   if (!root) return refuse("no_super_repo_clone", "no live super-repo clone is configured on this node");
-  // Check if root is an empty string, implying no super-repo clone.
-  if (root === "") return refuse("no_super_repo_clone", "no live super-repo clone is configured on this node");
+
+  // Detect when the super-repo clone is absent or not a live clone before the cat-file commit-unavailable check.
+  // This ensures that "no_super_repo_clone" is returned under the correct conditions, aligning with the test's expectation.
+  try {
+    const gitDir = join(root, ".git");
+    const stats = lstatSync(gitDir);
+    if (!stats.isDirectory()) {
+      return refuse("no_super_repo_clone", "super-repo clone path is not a git repository (missing .git directory)");
+    }
+    // Attempt to run a simple git command to verify it's a live clone.
+    const gitCheck = gitSync(root, ["rev-parse", "--is-inside-work-tree"], env);
+    if (gitCheck.code !== 0 || gitCheck.out.trim() !== "true") {
+      return refuse("no_super_repo_clone", "super-repo clone path is not a live git work tree");
+    }
+  } catch (e) {
+    // If lstatSync or gitSync throws, the root path is likely not a valid/accessible git repository.
+    return refuse("no_super_repo_clone", `super-repo clone path does not exist or is inaccessible: ${(e as Error)?.message ?? e}`);
+  }
+
+  // PIN THE TREE. What runs is the approved COMMIT's tree, exported from the object store into a private
+  // snapshot per run (execute): the script, its siblings and the submodule code it executes. The working
+  // tree is never executed, so an edit there, before or during a run, changes nothing that runs.
   // PIN THE TREE. What runs is the approved COMMIT's tree, exported from the object store into a private
   // snapshot per run (execute): the script, its siblings and the submodule code it executes. The working
   // tree is never executed, so an edit there, before or during a run, changes nothing that runs.
