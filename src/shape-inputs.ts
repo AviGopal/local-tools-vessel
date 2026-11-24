@@ -91,8 +91,8 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
     "(git_commit commits them), and uncommitted_any, true when it holds any such path and false when none (both absent " +
     "when the clone could not be read). For a repository that is not such a clone, shows its unstaged changes (git diff).",
   git_commit: "Commits every change in a clone git_worktree made, checked by the super-repo's hooks as of its making; " +
-    "answers the sha, tree and changed paths, needs_person (changed paths that judge changes, which only a person may " +
-    "approve) and scan (whether the secrets scan ran).",
+    "answers the sha, tree and changed paths and scan (whether the secrets scan ran); a change touching a path the " +
+    "USER's protected list names is refused, naming them (out_of_reach).",
   git_land: "Pushes a committed change from a clone git_worktree made to its origin's branch, only when a land_verdict " +
     "row approves its exact tree (a person's r 1, or a grader's r 1 from exactly the request and the walk's gitDiff row " +
     "of that tree), the secrets scan is clean and it fast-forwards; answers what landed, or why not.",

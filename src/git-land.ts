@@ -18,7 +18,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git, judgesOf, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
+import { git, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
@@ -90,8 +90,8 @@ export async function intoTrusted(cwd: string, made: Made, work: string, transpo
 
 export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
-      needs_person: string[]; verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
-  | { error: string; stderr?: string; rules?: string[]; widening?: string[]; tree?: string; head?: string; needs_person?: string[]; waits_for?: "person"; unserved?: string;
+      verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
+  | { error: string; stderr?: string; rules?: string[]; widening?: string[]; tree?: string; head?: string; out_of_reach?: string[]; unserved?: string;
       clone?: { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; head: string; tree: string } };
 
 /**
@@ -135,16 +135,16 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     if (((await out(["rev-list", "--merges", range])) ?? "x") !== "") return { error: "the change holds a merge commit; only a straight line of commits lands" };
     const changed = ((await out(["diff", "--name-only", "--no-renames", origin, "refs/land/head"])) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to land: the change does not differ from origin" };
-    const judges = await judgesOf((path) => out(["show", `${origin}:${path}`]), { repo: made.repo });
     // The USER's protected list as the base states it: for a super-repo change, origin's (the fetched base this change
-    // would move, never the change's own tree); for a vessel's, the super base its clone was made from. A path it names
-    // lands only on a person's verdict, as a judge's own files do.
+    // would move, never the change's own tree); for a vessel's, the super base its clone was made from. A path it names is
+    // out of the walk's reach: refused whatever any verdict says (git_commit's answer is advisory, so it is judged again here).
     const src = listSourceFor(made, origin);
     const list = await protectedListAt(src.in === "trusted"
       ? (path) => out(["show", `${src.ref}:${path}`])
       : (path) => vesselGit(["show", `${src.ref}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), src.where);
     if ("error" in list) return { error: list.error, tree };
-    const needs_person = [...changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p))), ...protectedHits(changed, made.repo, list.excluded)];
+    const out_of_reach = protectedHits(changed, made.repo, list.excluded);
+    if (out_of_reach.length > 0) return { error: `the change touches paths outside the walk's reach (${out_of_reach.join(", ")}): nothing lands it`, out_of_reach, tree };
 
     // The scan, with the super base's config, over exactly the commits that would be pushed.
     const cfg = await vesselGit(["show", `${made.super_base}:scripts/git-hooks/.gitleaks.toml`], superDir);
@@ -163,13 +163,13 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     if (sc !== 0) return { error: `the secrets scan did not run cleanly (exit ${sc})` };
     if (made.repo === "super") {
       const widened = await widening(t, work);
-      if (widened !== undefined) return { ...widened, tree, needs_person };
+      if (widened !== undefined) return { ...widened, tree };
     }
 
-    const verdict = await approved(d, made, tree, needs_person);
+    const verdict = await approved(d, made, tree);
     // refused: where the clone is now, as a row the walk records (its newest tree, read by no words), so the next move is a
     // diff of this tree rather than the land asked again
-    if ("error" in verdict) return { ...verdict, tree, needs_person,
+    if ("error" in verdict) return { ...verdict, tree,
       clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, head, tree } };
 
     // No hooks run beside the credential: an empty directory this vessel owns.
@@ -178,7 +178,7 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     const push = await t.step(["-c", `core.hooksPath=${hooksDir}`, "push", "--quiet", made.origin_url, `refs/land/head:refs/heads/${made.branch}`],
       "the push", { credential: true, transports: d.transports });
     if ("error" in push) return { ...push, tree, head };
-    return { shape: "gitLand", cwd, repo: made.repo, branch: made.branch, head, tree, changed, needs_person, verdict_ref: verdict.id, verdict_by: verdict.by,
+    return { shape: "gitLand", cwd, repo: made.repo, branch: made.branch, head, tree, changed, verdict_ref: verdict.id, verdict_by: verdict.by,
       scan: { ran: true, rules: [] }, pushed: true };
   } finally {
     try { rmSync(work, { recursive: true, force: true }); } catch { /* a temp dir */ }
@@ -223,7 +223,8 @@ async function widening(t: Trusted, work: string): Promise<{ error: string; wide
   return { error: `the gate-widening rule could not judge the change (exit ${r.exit_code}${said.length > 0 ? `: ${said.join("; ")}` : ""}): nothing lands` };
 }
 
-// A request is what a person or the owner asked: an exogenous row that is not a grade and not the owner's configuration.
+// A request is what a person, the owner or an operator asked (the roles records reads asks from): an exogenous row that is
+// not a grade and not the owner's configuration.
 // Or a gap a detector opened: records refuses a gap row under any key but the node's own, so a gap is the node's own
 // observation, trusted as the owner is; a change made for one lands on a grader's verdict only when the gap's own check
 // passes on its tree (approved, below). Named debt: these shape and role names are literals here, not read from the
@@ -231,20 +232,20 @@ async function widening(t: Trusted, work: string): Promise<{ error: string; wide
 const OWNER_CONFIG = new Set(["channel", "shape_schema", "arm", "prior"]);
 const isGap = (r: Row): boolean => r.role === "detector" && r.shape === "gap";
 const isRequest = (r: Row): boolean =>
-  ((r.role === "person" || r.role === "owner") && r.shape !== "outcome" && !OWNER_CONFIG.has(String(r.shape))) || isGap(r);
+  ((r.role === "person" || r.role === "owner" || r.role === "operator") && r.shape !== "outcome" && !OWNER_CONFIG.has(String(r.shape))) || isGap(r);
 
 /** The verdict row that lets this tree land, or why none does. */
 // The verdict's writer (records stamps it: a person row's writer is its key id) goes into the answer, so a count of
 // autonomous landings can tell a person's approval from an operator agent's key: any key that is not the node's counts as
 // a person here.
-async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]): Promise<{ id: string; by: string } | { error: string; waits_for?: "person" }> {
+async function approved(d: Deps, made: Made, tree: string): Promise<{ id: string; by: string } | { error: string }> {
   const verdicts = await d.rows({ shape: "land_verdict", where: { tree } });
   if (!Array.isArray(verdicts)) return verdicts;
   const mine = verdicts.filter((v) => v.repo === made.repo);
   const diffs = await d.rows({ shape: "gitDiff", where: { tree } });
   if (!Array.isArray(diffs)) return diffs;
-  // A person's verdict on this exact tree (the USER's rules, 11-15): a person's Wrong blocks it, and a later Right by a
-  // person lifts it, theirs ("My own Right lifts it") or anyone's ("Yes, any person's Right"); a grader's r 1 never does.
+  // A person's verdict on this exact tree: a person's Wrong blocks it, and only a later Right by a person lifts it (a
+  // grader's r 1 never overrides a person).
   // When the code changes (a new tree, a rebase among them) the new version needs its own verdict, and nothing carries
   // over or blocks. A Wrong counts whatever diff it cites, cut or not (a big change the person rejected is not landed
   // because its diff was too big to show whole). A Right counts only on the walk's whole diff of this tree: a build
@@ -257,15 +258,13 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
   if (latest !== undefined && Number(latest.r) === 0) return { error: "a person judged this tree r 0: it does not land unless a person marks it right again; a changed version needs its own verdict" };
   const person = latest !== undefined && Number(latest.r) === 1 ? latest : undefined;
   if (person) return { id: person.id, by: String(person.writer ?? "") };
-  if (mine.some((v) => v.role === "described" && Number(v.r) === 0)) return { error: "a grader judged this tree r 0, and no person has approved it" };
-  // waits_for says, as a field, that this refusal is the gate waiting on a person, not a fault in what was asked: records
-  // reads it, never the words, so it does not blame the request for it (a grader's r 0 has no such field).
-  if (needsPerson.length > 0) return { error: `the change touches what judges changes (${needsPerson.join(", ")}): only a person's verdict lands it`, waits_for: "person" };
+  // No change waits on a person: a grader's r 0 stands until a later grader's r 1 that meets every rule below.
+  const graderNo = Math.max(-1, ...mine.filter((v) => v.role === "described" && Number(v.r) === 0).map((v) => Number(v.seq ?? 0)))
   // A grader's r 1 counts only when it was made from exactly two rows: the request, and the walk's record of this tree's
   // diff made for that request (its input_refs hold the request). Anything more and what it judged is not only the
   // change; anything less and it did not see the change; a diff made for another request is not this request's change.
   let suiteWhy: string | undefined;
-  for (const v of mine.filter((x) => x.role === "described" && Number(x.r) === 1)) {
+  for (const v of mine.filter((x) => x.role === "described" && Number(x.r) === 1 && Number(x.seq ?? 0) > graderNo)) {
     const refs = [...new Set([v.input_refs].flat().map(String))];
     if (refs.length !== 2) continue;
     const diff = diffs.find((x) => x.role === "walk" && x.repo === made.repo && refs.includes(x.id));
@@ -288,6 +287,7 @@ async function approved(d: Deps, made: Made, tree: string, needsPerson: string[]
     return { id: v.id, by: String(v.writer ?? "") };
   }
   if (suiteWhy !== undefined) return { error: `a grader's r 1 does not land this tree: ${suiteWhy}` };
+  if (graderNo >= 0) return { error: "a grader judged this tree r 0, and no later grader's r 1 lands it" };
   return { error: "no verdict approves this tree: a person's r 1 on the walk's whole diff of it, or a grader's r 1 from exactly the request and this tree's gitDiff, which says the tree typechecks, that no test of the whole suite that passed on the base fails on it (and, for a gap, that its check passes)" };
 }
 

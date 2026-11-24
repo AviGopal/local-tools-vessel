@@ -9,14 +9,13 @@
 //     change, its vessel-pre-commit for a vessel's) is exported from the super base into a directory the command cannot
 //     write, and git is pointed at it. The clone's own files never decide which hook runs.
 // Only a clone the walk's row says git_worktree made, and has not landed, is committed in (walk-rows.ts); its base comes
-// from that row, which the shell user cannot write. A change touching what judges changes (hooks, gate scripts,
-// accepted fixtures, tests the pinned hook runs from the change's own tree, this vessel's containment and landing code,
-// the records writer code, the walk's owner seed) is committed but marked needs_person: a landing then takes only a
-// person's verdict for it. Whether the hook's secrets scan ran is reported as scan, for the landing to require.
+// from that row, which the shell user cannot write. A change touching a path the USER's protected list names is not
+// committed: those paths are out of the walk's reach, and no verdict lands them. Every other change lands on its own
+// evidence; no path waits on a person. Whether the hook's secrets scan ran is reported as scan, for the landing to require.
 //
 // NOT A TRUST BOUNDARY. git here runs as the shell user, in a clone the shell user owns, so the shell user could commit
 // without the pinned hook, or make this answer wrong (replace refs on the base, an fsmonitor, a rewritten index). That
-// gains it nothing it does not already have, but every value answered here (changed, needs_person, tree, scan) is
+// gains it nothing it does not already have, but every value answered here (changed, tree, scan) is
 // advisory: a landing recomputes all of it in a repository of its own before anything is pushed.
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -71,34 +70,6 @@ const HOOK_FOR_SUPER = "scripts/git-hooks/pre-commit";
 const HOOK_FOR_VESSEL = "scripts/git-hooks/vessel-pre-commit";
 // The scan config the super-repo hook reads from beside itself.
 const SCAN_CONFIG = "scripts/git-hooks/.gitleaks.toml";
-
-// Paths whose change needs a person's verdict, by repository. Patterns are matched against repo-relative paths.
-const JUDGES_EVERYWHERE = ["scripts/git-hooks/**", ".git-hooks/**", "scripts/substrate/gate/**", "validation/scripts/gate/**",
-  "scripts/substrate/walk-owner-seed.ts"];
-const JUDGES_BY_REPO: Record<string, string[]> = {
-  // The super-repo pre-commit runs the glue tests from the change's own tree.
-  super: ["validation/scripts/**"],
-  // Every file on the landing path decides whether a change lands; and every file that bounds what the walk's tools may
-  // reach (the file tools' roots, the shell's containment and privilege, the credentialed script runner) decides what any
-  // change can do. A gap whose check those bounds make fail (a test asking for a path they refuse) would otherwise be
-  // "fixed" by loosening them, on a grader's verdict alone.
-  "local-tools-vessel": ["src/git-*.ts", "src/walk-rows.ts", "src/index.ts", "src/shell-containment.ts",
-    "src/write-containment.ts", "src/agent-shell-env.ts", "src/shell-privilege.ts", "src/tool-roots.ts",
-    "src/script-runner.ts", "src/script-runner-reaper.ts"],
-  "records-vessel": ["src/**"],
-};
-// A repo without a gate policy names no accepted fixtures, so every fixture-like path counts.
-const FIXTURES_WITHOUT_POLICY = ["validation/**", "test/fixtures/**", "src/**/fixtures/**"];
-
-/** `show(path)` reads a file at the base, as whoever may read that repository. */
-export async function judgesOf(show: (path: string) => Promise<string | null>, made: Pick<Made, "repo">): Promise<string[]> {
-  const policy = await show("scripts/substrate/gate/gate-policy.json");
-  let fixtures = FIXTURES_WITHOUT_POLICY;
-  if (policy !== null) {
-    try { fixtures = (JSON.parse(policy) as { fixture_paths?: string[] }).fixture_paths ?? []; } catch { /* unreadable: keep the broad set */ }
-  }
-  return [...JUDGES_EVERYWHERE, ...(JUDGES_BY_REPO[made.repo] ?? []), ...fixtures];
-}
 
 /**
  * The USER's protected list as the base states it: the committed autonomy scope's excluded paths, read by `read`
@@ -169,8 +140,8 @@ function systemHooksDir(): string | null {
 }
 
 export type CommitResult =
-  | { shape: "gitCommitResult"; sha: string; tree: string; committed_tree: string; base: string; cwd: string; changed: string[]; needs_person: string[]; scan: "ran" | "skipped" }
-  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number; head?: string };
+  | { shape: "gitCommitResult"; sha: string; tree: string; committed_tree: string; base: string; cwd: string; changed: string[]; scan: "ran" | "skipped" }
+  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number; head?: string; out_of_reach?: string[] };
 
 // What a refused commit printed, as the reason the walk is shown: git's stderr, where git also sends everything a hook
 // prints (its stdout too). A hook may print what it read (a test's output, a scan's finding, a file in the tree), and
@@ -281,11 +252,11 @@ export async function commitInClone(
         : there ? "the remote holds it" : "the remote does not hold it, as this clone last saw it: land it";
       return { error: `nothing new to commit: the clone's tree is already its own commit ${head}; ${landing}`, head };
     }
-    const judges = await judgesOf((path) => out(["show", `${made.base}:${path}`], cwd), made);
     // The USER's protected list, as the super base this clone was made from states it.
     const list = await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`);
     if ("error" in list) return { error: list.error };
-    const needs_person = [...changed.filter((p) => judges.some((g) => new Bun.Glob(g).match(p))), ...protectedHits(changed, made.repo, list.excluded)];
+    const out_of_reach = protectedHits(changed, made.repo, list.excluded);
+    if (out_of_reach.length > 0) return { error: `the change touches paths outside the walk's reach (${out_of_reach.join(", ")}): not committed; no verdict lands them`, out_of_reach };
 
     // git's own words in the C locale, so a refusal it gives its reason for is read as git's on any node (qa)
     const c = await git(["-c", `core.hooksPath=${hooks}`, "commit", "-F", "-"], cwd, { stdin: message, extraEnv: { ...extraEnv, LC_ALL: "C" }, timeoutMs: COMMIT_TIMEOUT_MS });
@@ -304,7 +275,7 @@ export async function commitInClone(
     // (requires {for: git_diff, needs: gitCommitResult, where: {cwd: {x-pointer: cwd}}}: research, ac963889)
     // committed_tree: the same tree under the name every answer that says a clone holds a commit's tree gives it
     // (git-worktree.ts committedTree), so one reader finds it on either.
-    return { shape: "gitCommitResult", sha, tree, committed_tree: tree, base: made.base, cwd, changed, needs_person, scan };
+    return { shape: "gitCommitResult", sha, tree, committed_tree: tree, base: made.base, cwd, changed, scan };
   } finally {
     try { chmodSync(hooks, 0o700); rmSync(hooks, { recursive: true, force: true }); } catch { /* best effort: a temp dir */ }
   }

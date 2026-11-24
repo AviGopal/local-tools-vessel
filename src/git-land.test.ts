@@ -242,18 +242,25 @@ describe("git_land", () => {
     expect("pushed" in (await landClone(cwd, deps))).toBe(true);
   });
 
-  scanned("[MUST-FAIL] any grader's r 0 on the tree blocks it until a person approves; no latest-wins", async () => {
+  scanned("[MUST-FAIL] a grader's r 0 refuses the tree until a later grader's r 1 that meets every rule; it never waits on a person", async () => {
     const { cwd, tree } = await change("c.txt", "c\n");
     const diff = { id: "d2", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row;
-    const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, input_refs: ["ask1", "d2"] } as Row;
-    const yes = { id: "v7", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d2"] } as Row;
-    table = [ask, diff, no, yes];
-    const refused = await landClone(cwd, deps) as { error: string; waits_for?: string };
-    expect(String(refused.error)).toContain("r 0");
-    expect(refused.waits_for).toBeUndefined(); // a grader's r 0 is a verdict on the change, not the gate waiting on a person
-    table = [ask, diff, no, yes, { id: "v8", shape: "land_verdict", repo: "demo", tree, role: "person", r: 1, writer: "kid-person", input_refs: ["d2"] }];
+    const no = { id: "v6", shape: "land_verdict", repo: "demo", tree, role: "described", r: 0, seq: 5, input_refs: ["ask1", "d2"] } as Row;
+    const yes = (seq: number, refs = ["ask1", "d2"]) => ({ id: `v7-${seq}`, shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, seq, input_refs: refs }) as Row;
+    // an older r 1, or one made at the same seq, does not lift the r 0
+    for (const older of [3, 5]) {
+      table = [ask, diff, yes(older), no];
+      const refused = await landClone(cwd, deps) as { error: string; waits_for?: string };
+      expect(String(refused.error)).toContain("a grader judged this tree r 0");
+      expect(refused.waits_for).toBeUndefined(); // a grader's r 0 is a verdict on the change, not the gate waiting on a person
+    }
+    // a later r 1 lifts it only when it meets every rule a grader's r 1 meets: one on a diff whose suite turned a test red does not
+    const red = { ...diff, id: "d2r", suite: { ...SUITE_OK, passed: false, regressed: ["t.test.ts > t > red"] } } as Row;
+    table = [ask, diff, red, no, yes(7, ["ask1", "d2r"])];
+    expect("error" in (await landClone(cwd, deps))).toBe(true);
+    table = [ask, diff, no, yes(7)];
     const r = await landClone(cwd, deps);
-    expect("pushed" in r && r.verdict_by).toBe("kid-person");
+    expect("pushed" in r && r.verdict_ref).toBe("v7-7");
   });
 
   // A person's verdict on the walk's whole diff of a tree, and that diff. The USER's rule: a Wrong blocks that exact tree.
@@ -331,14 +338,29 @@ describe("git_land", () => {
     expect("pushed" in await landClone(a.cwd, deps)).toBe(true);
   });
 
-  scanned("[MUST-FAIL] a change to what judges changes lands only on a person's verdict", async () => {
+  scanned("[MUST-FAIL] a change to the gate's own files lands on a grader's r 1 like any other: no path waits on a person", async () => {
     const { cwd, tree } = await change("scripts/substrate/gate/x.sh", "x\n");
     const diff = { id: "d3", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row;
     table = [ask, diff, { id: "v9", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", "d3"] }];
     const r = await landClone(cwd, deps);
-    expect(String((r as { error: string }).error)).toContain("only a person's verdict");
-    expect((r as unknown as { needs_person: string[] }).needs_person).toEqual(["scripts/substrate/gate/x.sh"]);
-    expect((r as { waits_for?: string }).waits_for).toBe("person"); // said as a field: records reads it, never the words
+    expect("pushed" in r && r.verdict_ref).toBe("v9");
+    expect("needs_person" in r || "waits_for" in r).toBe(false);
+  });
+
+  scanned("[MUST-FAIL] an operator's ask is a request: a grader's r 1 on its diff lands the change on the same evidence", async () => {
+    const { cwd, tree } = await change("op.txt", "op\n");
+    const op = { id: "op1", shape: "world_changed", role: "operator" } as Row;
+    const diff = { id: "d4", shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["op1"], typecheck: TC_OK, suite: SUITE_OK } as Row;
+    // the same evidence: a red suite on its diff lands nothing for an operator's ask either
+    table = [op, { ...diff, suite: { ...SUITE_OK, passed: false, regressed: ["t.test.ts > t > red"] } }, { id: "v10", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["op1", "d4"] }];
+    expect("error" in (await landClone(cwd, deps))).toBe(true);
+    // a grade an operator wrote is not an ask
+    const opGrade = { id: "op2", shape: "outcome", role: "operator" } as Row;
+    table = [opGrade, { ...diff, input_refs: ["op2"] }, { id: "v11", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["op2", "d4"] }];
+    expect("error" in (await landClone(cwd, deps))).toBe(true);
+    table = [op, diff, { id: "v12", shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["op1", "d4"] }];
+    const r = await landClone(cwd, deps);
+    expect("pushed" in r && r.verdict_ref).toBe("v12");
   });
 
   scanned("[MUST-FAIL] a planted secret is refused by its rule, and the answer never carries its text", async () => {
@@ -1118,17 +1140,6 @@ describe("git_land", () => {
     const ok = await diffClone(fresh.cwd, made.get(fresh.cwd)!, ["file"]);
     expect("tree" in ok && ok.fast_forward).toBe(true);
   });
-
-  it("[MUST-FAIL] a change to any file on the landing path needs a person", async () => {
-    const { judgesOf } = await import("./git-commit");
-    const judges = await judgesOf(async () => null, { repo: "local-tools-vessel" });
-    for (const p of ["src/git-land.ts", "src/git-commit.ts", "src/git-worktree.ts", "src/walk-rows.ts",
-      // and what bounds the tools: their roots, and the credentialed script runner
-      "src/tool-roots.ts", "src/script-runner.ts", "src/script-runner-reaper.ts"]) {
-      expect(judges.some((g) => new Bun.Glob(g).match(p))).toBe(true);
-    }
-    expect(judges.some((g) => new Bun.Glob(g).match("src/fs-read.ts"))).toBe(false);
-  });
 });
 
 describe("git_land: the USER's protected list", () => {
@@ -1136,25 +1147,25 @@ describe("git_land: the USER's protected list", () => {
     { id: `gd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row,
     { id, shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", `gd-${id}`] } as Row];
 
-  scanned("[MUST-FAIL] a path the list names lands only on a person's verdict, which names the entry; a person's r 1 lands it", async () => {
-    const { cwd, tree } = await change("protected/x.ts", "export const x = 1\n");
-    table = graderOn(tree, "pg1");
-    const r = await landClone(cwd, deps);
-    expect(String((r as { error: string }).error)).toContain("only a person's verdict");
-    expect((r as unknown as { needs_person: string[] }).needs_person).toEqual(["protected/x.ts (protected: repos/demo/protected/)"]);
-    table = personOn(tree, "pp1");
-    expect("pushed" in (await landClone(cwd, deps))).toBe(true);
-  });
-
-  it("[MUST-FAIL] the commit already says which entry needs a person, so the walk waits rather than retries", async () => {
+  scanned("[MUST-FAIL] a path the list names is out of the walk's reach: never committed, and slipped in by hand it lands on no verdict, a person's r 1 included", async () => {
     g(COPY, "pull", "-q", "origin", "dev");
     const w = await makeWorktree("demo");
     if ("error" in w) throw new Error(w.error);
     made.set(w.cwd, w); asOwner(w.cwd);
     mkdirSync(join(w.cwd, "protected"), { recursive: true });
-    writeFileSync(join(w.cwd, "protected", "y.ts"), "y\n");
-    const c = await commitInClone(w.cwd, "y", undefined, find);
-    expect((c as { needs_person: string[] }).needs_person).toEqual(["protected/y.ts (protected: repos/demo/protected/)"]);
+    writeFileSync(join(w.cwd, "protected", "x.ts"), "export const x = 1\n");
+    const c = await commitInClone(w.cwd, "x", undefined, find) as { error?: string; out_of_reach?: string[] };
+    expect(String(c.error)).toContain("outside the walk's reach");
+    expect(c.out_of_reach).toEqual(["protected/x.ts (protected: repos/demo/protected/)"]);
+    commitAll(w.cwd, "slipped in by hand");
+    const tree = g(w.cwd, "rev-parse", "HEAD^{tree}");
+    for (const rows of [personOn(tree, "pp1"), graderOn(tree, "pg1")]) {
+      table = rows;
+      const r = await landClone(w.cwd, deps) as { error?: string; out_of_reach?: string[]; waits_for?: string };
+      expect(String(r.error)).toContain("outside the walk's reach");
+      expect(r.out_of_reach).toEqual(["protected/x.ts (protected: repos/demo/protected/)"]);
+      expect(r.waits_for).toBeUndefined();
+    }
   });
 
   scanned("a path only like a listed directory's name is not in it, and lands on a grader's r 1", async () => {
@@ -1164,18 +1175,24 @@ describe("git_land: the USER's protected list", () => {
   });
 
   scanned("[MUST-FAIL] a rename out of a listed directory counts the name it leaves", async () => {
-    // protected/x.ts is on origin (landed by a person above); move it out under a grader's verdict alone.
+    // protected/x.ts on origin, put there as the owner would (nothing the walk makes lands it)
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    mkdirSync(join(seed, "protected"), { recursive: true });
+    writeFileSync(join(seed, "protected", "x.ts"), "export const x = 1\n");
+    commitAll(seed, "a protected file"); g(seed, "push", "-q", "origin", "HEAD:dev");
     g(COPY, "pull", "-q", "origin", "dev");
     const w = await makeWorktree("demo");
     if ("error" in w) throw new Error(w.error);
     made.set(w.cwd, w); asOwner(w.cwd);
     g(w.cwd, "mv", "protected/x.ts", "moved-x.ts");
-    const c = await commitInClone(w.cwd, "move out", undefined, find);
-    if (!("tree" in c)) throw new Error(JSON.stringify(c));
-    table = graderOn(c.tree, "pg3");
-    const r = await landClone(w.cwd, deps);
-    expect(String((r as { error: string }).error)).toContain("only a person's verdict");
-    expect((r as unknown as { needs_person: string[] }).needs_person).toContain("protected/x.ts (protected: repos/demo/protected/)");
+    const c = await commitInClone(w.cwd, "move out", undefined, find) as { error?: string; out_of_reach?: string[] };
+    expect(c.out_of_reach).toContain("protected/x.ts (protected: repos/demo/protected/)");
+    commitAll(w.cwd, "move out by hand");
+    table = graderOn(g(w.cwd, "rev-parse", "HEAD^{tree}"), "pg3");
+    const r = await landClone(w.cwd, deps) as { error?: string; out_of_reach?: string[] };
+    expect(String(r.error)).toContain("outside the walk's reach");
+    expect(r.out_of_reach).toContain("protected/x.ts (protected: repos/demo/protected/)");
   });
 
   it("[MUST-FAIL] a super base with no readable list refuses the commit, never reads as no hits", async () => {
@@ -1412,7 +1429,7 @@ describe("git_land onto the super-repo: the gate's authority only narrows", () =
   const POLICY = (mode: string) => JSON.stringify({ mode }) + "\n";
   const files: Record<string, string> = {
     "scripts/substrate/gate/widening.sh": RULE, "scripts/substrate/gate/gate-policy.json": POLICY("strict"),
-    "scripts/substrate/autonomy-scope.json": SCOPE(["scripts/substrate/"]), "gate/fixtures/accepted.json": "{}\n", "README.md": "super\n",
+    "scripts/substrate/autonomy-scope.json": SCOPE(["scripts/substrate/autonomy-scope.json"]), "gate/fixtures/accepted.json": "{}\n", "README.md": "super\n",
   };
   const { moveOrigin, superChange, superHead, tree: originTree } = superOrigin("super-origin", files);
   const calls = () => (existsSync(CALLS) ? Bun.file(CALLS).text() : Promise.resolve("")).then((t) => t.split("\n").filter(Boolean));
@@ -1514,7 +1531,7 @@ describe("git_land onto the super-repo, judged by the real widening rule", () =>
   const ACCEPTED = "validation/scripts/gate/fixtures/accepted.json";
   const { superChange, superHead, tree: originTree } = superOrigin("super-real", {
     "scripts/substrate/gate/widening.sh": readFileSync(join(FIX, "widening.sh"), "utf8"), "scripts/substrate/gate/gate-policy.json": POLICY,
-    "scripts/substrate/autonomy-scope.json": SCOPE(["scripts/substrate/"]), [ACCEPTED]: "{}\n", "README.md": "super\n",
+    "scripts/substrate/autonomy-scope.json": SCOPE(["scripts/substrate/autonomy-scope.json"]), [ACCEPTED]: "{}\n", "README.md": "super\n",
   });
   const EDITED = `authority_widening: M ${ACCEPTED} (accepted fixture edited or removed)`;
 

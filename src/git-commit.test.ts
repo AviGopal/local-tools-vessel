@@ -630,7 +630,7 @@ describe("git_commit", () => {
     if (!("sha" in r)) throw new Error(JSON.stringify(r));
     expect(r.base).toBe(made.get(cwd)!.base);
     expect(r.changed.sort()).toEqual(["a.txt", "scripts/substrate/gate/x.sh"]);
-    expect(r.needs_person).toEqual(["scripts/substrate/gate/x.sh"]);
+    expect("needs_person" in r).toBe(false); // no path waits on a person
     expect(r.tree).toBe(g(cwd, "rev-parse", "HEAD^{tree}"));
   });
 
