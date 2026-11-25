@@ -622,6 +622,30 @@ describe("git_land", () => {
     expect(r.passed).toBe(false);
   });
 
+  it("[MUST-FAIL] each error the change adds is shown where it is now: its file, line and column", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n', "data.json": null });
+    const r = await check({ "base.ts": 'export const z = 1;\nexport const b: number = "already wrong";\nexport const c: number = "new";\n' });
+    expect(r.passed).toBe(false);
+    const lines = String(r.out).split("\n").filter((l) => l.includes("error TS"));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatch(/^base\.ts\(3,\d+\): error TS2322/);
+  });
+
+  it("[MUST-FAIL] a second copy of a base error is shown at the copy's place, not the original's", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n', "data.json": null });
+    const r = await check({ "base.ts": 'export const b: number = "already wrong";\nexport const c: number = "already wrong";\n' });
+    expect(String(r.out).split("\n").filter((l) => l.includes("error TS"))).toEqual([expect.stringMatching(/^base\.ts\(2,\d+\): error TS2322/)]);
+  });
+
+  it("[MUST-FAIL] past its cap the typecheck's output keeps its start: the first error, with its place", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "data.json": null });
+    const many = Array.from({ length: 120 }, (_, i) => `export const v${i}: number = "x${i}";`).join("\n") + "\n";
+    const r = await check({ "m.ts": many });
+    expect([r.passed, r.truncated]).toEqual([false, true]);
+    expect(String(r.out).length).toBeLessThanOrEqual(4 * 1024);
+    expect(String(r.out)).toMatch(/^\[\.\]\nm\.ts\(1,\d+\): error TS2322/);
+  });
+
   it("[MUST-FAIL] an error with no file location the base did not have is the change's", async () => {
     baseWith({ "tsconfig.json": ROOT_TS, "base.ts": "export const b = 1;\n", "data.json": null });
     const r = await check({ "base.ts": null }); // the project's only source deleted: the compiler finds no inputs

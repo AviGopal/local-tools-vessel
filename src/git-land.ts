@@ -591,7 +591,7 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
 }
 
 /** One project of a written-out tree compiled under the base's config: the files it read, its errors that name a file
- * (each without its line and column, so an error the change only moved is the same error), and those that name none. */
+ * (as the compiler wrote them, line and column included, so a reader can find each one), and those that name none. */
 async function compileProject(tsc: string, tree: string, d: string, config: string, own: string): Promise<{ listed: string[]; errors: string[]; unplaced: string[]; exit_code: number; signalled: boolean }> {
   const at = join(tree, d);
   mkdirSync(at, { recursive: true, mode: 0o755 });
@@ -605,19 +605,22 @@ async function compileProject(tsc: string, tree: string, d: string, config: stri
   const listed = lines.filter((l) => l.startsWith("./")).map((l) => l.slice(2));
   // every error the compiler gives counts, an installed package's included: one the base shares cancels in the comparison
   const errs = lines.filter((l) => !l.startsWith("./") && /\berror TS\d+:/.test(l));
-  const errors = errs.filter((l) => /^[^\s(]+\(\d+,\d+\): error TS/.test(l)).map((l) => l.replace(/\(\d+,\d+\)/, ""));
+  const errors = errs.filter((l) => /^[^\s(]+\(\d+,\d+\): error TS/.test(l));
   const unplaced = errs.filter((l) => !/^[^\s(]+\(\d+,\d+\): error TS/.test(l));
   return { listed, errors, unplaced, exit_code: r.exit_code, signalled: r.signalled };
 }
 
-/** The change's errors the base does not have, as many times as the change has them more often. */
+/** The change's errors the base does not have, as many times as the change has them more often. Two errors are compared
+ * without their line and column, so an error the change only moved is the same error; each one added is given as the
+ * change's compile wrote it, where it is now. The key is the comparison's only: a reader is shown where. */
+const errorKey = (e: string): string => e.replace(/\(\d+,\d+\)/, "");
 function addedErrors(base: string[], change: string[]): string[] {
   const left = new Map<string, number>();
-  for (const e of base) left.set(e, (left.get(e) ?? 0) + 1);
+  for (const e of base) left.set(errorKey(e), (left.get(errorKey(e)) ?? 0) + 1);
   const out: string[] = [];
   for (const e of change) {
-    const n = left.get(e) ?? 0;
-    if (n > 0) left.set(e, n - 1);
+    const n = left.get(errorKey(e)) ?? 0;
+    if (n > 0) left.set(errorKey(e), n - 1);
     else out.push(e);
   }
   return out;
