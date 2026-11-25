@@ -1220,6 +1220,10 @@ describe("git_land", () => {
     expect(await suiteCheck(breaksX, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)], base_rerun: true });
     // [GUARD] the same tree again on a kept base where nothing regresses: read as kept, not run again
     expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: true, base_rerun: false, base_failed_kept: [] });
+    // [MUST-FAIL] a base run for this diff is not run again: a tree that breaks x on a key's first diff is refused at once
+    const hKey = ["flaky-repo", "base-sha-3", "install", "runner"];
+    expect(await suiteCheck(breaksX, fBase, 60000, hKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)],
+      base_cached: false, base_rerun: false });
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {
