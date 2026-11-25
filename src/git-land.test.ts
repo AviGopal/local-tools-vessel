@@ -1334,13 +1334,15 @@ describe("git_land", () => {
     expect("tree" in ok && ok.fast_forward).toBe(true);
   });
 
-  it("[MUST-FAIL] a test-file check refused as already green names, as matched, only the base's tests of exactly the gap's names", async () => {
+  it("[MUST-FAIL] a test-file check refused as already green names, as matched, only the base's tests of exactly the gap's names; the suite's, every one by suffix, sorted", async () => {
     // a file run alone reports its tests by their own names, so its refusal reads them by equality: a nested block whose
     // name ends in the gap's is another test, and is not matched (the whole suite's form, whose names carry the file, is
     // read by suffix)
     const seed = join(T, "seed");
     g(seed, "pull", "-q", "origin", "dev");
+    // zz first: the report lists its test before add's, out of sorted order
     writeFileSync(join(seed, "nest.test.ts"), 'import { expect, test, describe } from "bun:test";\n' +
+      'describe("zz", () => { describe("add", () => { test("zero", () => { expect(1).toBe(1); }); }); });\n' +
       'describe("add", () => { test("zero", () => { expect(1).toBe(1); }); });\n' +
       'describe("outer", () => { describe("add", () => { test("zero", () => { expect(1).toBe(1); }); }); });\n');
     commitAll(seed, "a nested block of the same name"); g(seed, "push", "-q", "origin", "HEAD:dev");
@@ -1349,6 +1351,15 @@ describe("git_land", () => {
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     expect(r.check).toMatchObject({ ran: false, why: "the gap's test already passes on the base",
       base: { exit_code: 0, matched: { "add > zero": ["add > zero"] } } });
+    // [MUST-FAIL] the suite's form reads by suffix: every test of that name, in any file or block, listed sorted (as the
+    // report lists them, zz's comes before add's)
+    const { cwd: again } = await changeOf({ "own4.txt": "mine\n" });
+    const s = await diffClone(again, made.get(again)!, ["file"], { gap_id: "N2", vessel: "demo", only_tests: ["add > zero"] } as never);
+    if (!("tree" in s)) throw new Error(JSON.stringify(s));
+    expect(s.check).toMatchObject({ ran: false, why: "the gap's tests already pass on the base" });
+    const listed = (s.check as { base: { matched: Record<string, string[]> } }).base.matched["add > zero"];
+    expect(listed.filter((x) => x.includes("nest.test.ts")).length).toBe(3);
+    expect(listed).toEqual([...listed].sort());
   }, 120000);
 });
 
