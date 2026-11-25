@@ -79,7 +79,9 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   code_replace_lines: "Replaces lines start_line..end_line of a file with text.",
   code_insert_after_line: "Inserts text after a line of a file.",
   code_search: "Finds the lines of a file that match a regular expression.",
-  code_verify_typecheck: "Runs the typecheck script of the package in cwd and reports the exit code and the first type errors.",
+  code_verify_typecheck: "Runs the typecheck script of the package in cwd and reports the exit code and the first type errors; " +
+    "on a clone the walk made, also how many errors its base already had (base_error_count) and how many the clone's edits added " +
+    "(added_error_count).",
   bounded_shell: "Runs a shell command as an unprivileged user with a time limit; returns stdout, stderr and the exit code. " +
     "It is how to search a repository (grep -rn) or read git history (git log, git show) in a clone.",
   git_status: "Lists a repository's changed files (git status --porcelain).",

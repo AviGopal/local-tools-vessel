@@ -530,7 +530,8 @@ describe("git_land", () => {
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     // every field a typecheck may carry, read without narrowing (a check that did not run has no passed)
     return r.typecheck as { ran: boolean; passed?: boolean; checked?: false; why?: string; exit_code?: number;
-      projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string; truncated?: boolean };
+      projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string; truncated?: boolean;
+      base_error_count?: number; added_error_count?: number };
   };
 
   it("[MUST-FAIL] an undefined call in a second project's file does not pass, named in that project; a correct one passes", async () => {
@@ -577,6 +578,17 @@ describe("git_land", () => {
     const worse = await check({ "m.ts": 'export const n: number = "new wrong";\n' });
     expect([worse.passed, worse.projects?.map((x) => [x.dir, x.passed])]).toEqual([false, [[".", false]]]);
     baseWith({ "base.ts": "export const b = 1;\n" });
+  });
+
+  it("[MUST-FAIL] the typecheck says how many errors were the base's and how many the change added, over its projects", async () => {
+    baseWith({ "tsconfig.json": ROOT_TS, "base.ts": 'export const b: number = "already wrong";\n' });
+    const clean = await check({ "m.ts": "export const n: number = 1;\n" });
+    expect([clean.base_error_count, clean.added_error_count]).toEqual([1, 0]);
+    const worse = await check({ "m.ts": 'export const n: number = "new wrong";\nexport const o: string = 2;\n' });
+    expect([worse.base_error_count, worse.added_error_count]).toEqual([1, 2]);
+    baseWith({ "base.ts": "export const b = 1;\n" });
+    const fresh = await check({ "m.ts": 'export const n: number = "new wrong";\n' });
+    expect([fresh.base_error_count, fresh.added_error_count]).toEqual([0, 1]);
   });
 
   it("[MUST-FAIL] a change in two projects runs both, and passes only if both do", async () => {

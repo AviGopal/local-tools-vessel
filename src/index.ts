@@ -34,6 +34,7 @@ import { readRows } from "./walk-rows.js";
 import { behind, cloneOf, editedClone, refusalOf } from "./clone-freshness.js";
 import { freshFirst, madeCurrent, refreshInPlace } from "./clone-refresh.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
+import { errorsAgainstBase } from "./typecheck-base.js";
 import { runBounded } from "./bounded-run.js";
 
 const PORT = Number(process.env.PORT ?? 8230);
@@ -920,11 +921,16 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
     const combined = `${r.stdout}\n${r.stderr}`;
     const tail = combined.length > 8192 ? combined.slice(-8192) : combined;
     const errorLines = tail.split("\n").filter((l) => /error TS\d+:/.test(l)).slice(0, 20);
+    // On a clone the walk made, the same script on its base: which errors the base already had and which the edits added,
+    // so a clone broken by its own edits is told apart from a base that was broken before them.
+    const made = await madeCurrent(resolvePath(DEFAULT_CWD, cwd)).catch((e) => ({ error: String(e) }));
+    const against = await errorsAgainstBase(combined, made, bunCmd, script, (c, d) => sh(c, d));
     return {
       shape: "codeTypecheckResult",
       cwd, script, exit_code: r.exit_code, ok: r.exit_code === 0,
       error_count: errorLines.length,
       error_lines: errorLines,
+      ...against,
       output_tail: tail.slice(-1500),
     };
   } catch (e) { return { error: (e as Error).message }; }

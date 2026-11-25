@@ -22,6 +22,7 @@ import { currentProtectedList, git, protectedHits, protectedListAt, vesselGit } 
 import { AGENT_SHELL_UID, agentShellSpawn, agentWritableDir, runningAsRoot } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
 import { baseHeld, baseRun, installIdentity } from "./base-cache.js";
+import { addedErrors } from "./typecheck-base.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
 import { suiteBoundOf } from "./suite-bound.js";
@@ -351,13 +352,16 @@ export const regressedOut = (regressed: string[], failed: Map<string, string>, o
  * checked false: no project could be compiled on this node at all, so nothing was compiled and nothing is said of the
  * change (ran false, no passed: a check that did not run is not one that failed), with each project's why. */
 export type Typecheck =
-  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; projects?: ProjectRun[]; uncovered?: string[] }
+  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; projects?: ProjectRun[]; uncovered?: string[] } & ErrorCounts
   | { ran: false; passed: boolean; why: string }
   | { ran: false; checked: false; why: string; projects: ProjectRun[]; uncovered?: string[] };
 /** One TypeScript project the check ran: its directory in the tree ("." for the root); whether the change passed it
  * (it adds no error the base did not already have); and the base's own errors there, which are the base's, not the
  * change's. checked false: the project cannot be compiled on this node at all (the base does not compile either), so
  * nothing is said of the change there. */
+/** Over the projects checked: the errors the base already had (the base's, not the change's) and those the change
+ * added, so a reader tells a change that broke a clean base from one that inherited a broken one. */
+export type ErrorCounts = { base_error_count: number; added_error_count: number };
 export type ProjectRun = { dir: string; passed: boolean; exit_code: number; checked?: false; why?: string; base_errors?: number };
 
 // A source a TypeScript project compiles.
@@ -564,6 +568,7 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const covered = new Set<string>();
   const skipped = new Set<string>();
   const said: string[] = [];
+  const counts: ErrorCounts = { base_error_count: 0, added_error_count: 0 };
   for (const [d, config] of projects) {
     const name = d === "" ? "." : d.replace(/\/$/, "");
     const own = join(containmentZones(process.env).runtime, made.repo, d, "node_modules");
@@ -594,6 +599,8 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
       continue;
     }
     const added = addedErrors(before.errors, after.errors);
+    counts.base_error_count += before.errors.length;
+    counts.added_error_count += added.length;
     const passed = added.length === 0 && after.unplaced.length === 0 && (after.exit_code === 0 || before.exit_code !== 0) && !after.signalled;
     runs.push({ dir: name, passed, exit_code: after.exit_code, ...(before.errors.length > 0 ? { base_errors: before.errors.length } : {}) });
     const mine = [...after.unplaced, ...added];
@@ -611,7 +618,7 @@ async function typecheckTree(t: Trusted, made: Made, dir: string | { why: string
   const failed = runs.find((x) => !x.passed);
   // the compiler's errors lead its output: keep the start
   return { ran: true, passed: failed === undefined && uncovered.length === 0, exit_code: failed?.exit_code ?? 0,
-    out: out.slice(0, CHECK_OUT_MAX), truncated: out.length > CHECK_OUT_MAX, projects: runs, ...(uncovered.length > 0 ? { uncovered } : {}) };
+    out: out.slice(0, CHECK_OUT_MAX), truncated: out.length > CHECK_OUT_MAX, projects: runs, ...counts, ...(uncovered.length > 0 ? { uncovered } : {}) };
 }
 
 /** One project of a written-out tree compiled under the base's config: the files it read, its errors that name a file
@@ -632,22 +639,6 @@ async function compileProject(tsc: string, tree: string, d: string, config: stri
   const errors = errs.filter((l) => /^[^\s(]+\(\d+,\d+\): error TS/.test(l));
   const unplaced = errs.filter((l) => !/^[^\s(]+\(\d+,\d+\): error TS/.test(l));
   return { listed, errors, unplaced, exit_code: r.exit_code, signalled: r.signalled };
-}
-
-/** The change's errors the base does not have, as many times as the change has them more often. Two errors are compared
- * without their line and column, so an error the change only moved is the same error; each one added is given as the
- * change's compile wrote it, where it is now. The key is the comparison's only: a reader is shown where. */
-const errorKey = (e: string): string => e.replace(/\(\d+,\d+\)/, "");
-function addedErrors(base: string[], change: string[]): string[] {
-  const left = new Map<string, number>();
-  for (const e of base) left.set(errorKey(e), (left.get(errorKey(e)) ?? 0) + 1);
-  const out: string[] = [];
-  for (const e of change) {
-    const n = left.get(errorKey(e)) ?? 0;
-    if (n > 0) left.set(errorKey(e), n - 1);
-    else out.push(e);
-  }
-  return out;
 }
 
 /** The TypeScript projects that check a change, as each directory ("" for the root, else "a/b/") with the base's config
