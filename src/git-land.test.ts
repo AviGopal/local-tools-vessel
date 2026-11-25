@@ -1205,15 +1205,19 @@ describe("git_land", () => {
     const fKey = ["flaky-repo", "base-sha", "install", "runner"];
     expect(await suiteCheck(fTree, fBase, 60000, fKey)).toMatchObject({ ran: true, passed: true, base_cached: false, base_rerun: false });
     writeFileSync(flag, "1", { mode: 0o644 });
-    expect(await suiteCheck(fTree, fBase, 60000, fKey)).toMatchObject({ ran: true, passed: true, regressed: [], base_cached: false, base_rerun: true });
+    expect(await suiteCheck(fTree, fBase, 60000, fKey)).toMatchObject({ ran: true, passed: true, regressed: [], base_cached: false, base_rerun: true, base_failed_kept: [] });
+    // [MUST-FAIL] the mirror, not run again: x failed in the kept run, so a tree that breaks x reads it as the base's own,
+    // and the record names it
+    const breaksX = dirOf("breaks-x", 'test("x", () => { throw new Error("broken"); });');
+    expect(await suiteCheck(breaksX, fBase, 60000, fKey)).toMatchObject({ ran: true, passed: true, base_cached: true, base_rerun: false,
+      base_failed_kept: [expect.stringMatching(/x$/)] });
     // [GUARD] a test the tree breaks is still its regression, read against a kept base: run again, it passed there
     rmSync(flag);
     const gKey = ["flaky-repo", "base-sha-2", "install", "runner"];
     expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: false });
-    const breaksX = dirOf("breaks-x", 'test("x", () => { throw new Error("broken"); });');
     expect(await suiteCheck(breaksX, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)], base_rerun: true });
     // [GUARD] the same tree again on a kept base where nothing regresses: read as kept, not run again
-    expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: true, base_rerun: false });
+    expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: true, base_rerun: false, base_failed_kept: [] });
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {

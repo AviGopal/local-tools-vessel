@@ -404,8 +404,10 @@ export type SuiteCheck =
 export type Bound = { status: "bound"; run: "base" | "tree"; ms: number };
 /** How many tests each run reported, and how long each took (base_cached: the base's run read was one made for an
  * earlier diff of the same base, so base_ms is not its run's; base_rerun: a kept run read a regression, and the base was
- * run again to judge it, replacing the kept run): recorded so the bound, and how often a kept base is wrong, can be read. */
-export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean; base_rerun: boolean };
+ * run again to judge it, replacing the kept run; base_failed_kept: the tests that do not pass on the tree and were read
+ * as the base's own from a kept run, not run again, so a kept flaky failure that hides a regression can be read):
+ * recorded so the bound, and how often a kept base is wrong either way, can be read. */
+export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean; base_rerun: boolean; base_failed_kept: string[] };
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
@@ -766,7 +768,8 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
     if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
   }
   const before = b.passed;
-  return { before, base: b, tree: { ...r, passed: treePassed }, size: { base_count: before.size + b.failed.size, tree_count: treePassed.size + r.failed.size, base_ms, tree_ms, base_cached, base_rerun } };
+  const base_failed_kept = base_cached ? [...b.failed.keys()].filter((n) => !treePassed.has(n)).sort() : [];
+  return { before, base: b, tree: { ...r, passed: treePassed }, size: { base_count: before.size + b.failed.size, tree_count: treePassed.size + r.failed.size, base_ms, tree_ms, base_cached, base_rerun, base_failed_kept } };
 }
 // a run stopped at the bound says so as fields, beside its why
 const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
