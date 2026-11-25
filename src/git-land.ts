@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { currentProtectedList, git, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
+import { baseHeld, baseRun, installIdentity } from "./base-cache.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
 import { suiteBoundOf } from "./suite-bound.js";
@@ -401,8 +402,9 @@ export type SuiteCheck =
   | ({ ran: false; passed: false; why: string } & Partial<Bound>);
 /** A run stopped at the suite's bound, said as fields: which run, and the bound it was stopped at. */
 export type Bound = { status: "bound"; run: "base" | "tree"; ms: number };
-/** How many tests each run reported, and how long each took: recorded so the bound can be read against them. */
-export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number };
+/** How many tests each run reported, and how long each took (base_cached: the base's run was one made for an earlier diff
+ * of the same base, so base_ms is not its run's): recorded so the bound can be read against them. */
+export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean };
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
@@ -733,19 +735,27 @@ export async function suiteCheck(dir: string | { why: string }, base: string | {
 // The whole suite's two runs, base then tree, as suiteCheck reads them; a suite-form gap's check reads the same runs.
 type CheckRun = Awaited<ReturnType<typeof runCheck>>;
 type SuiteRuns = { before: Set<string>; base: CheckRun; tree: CheckRun & { passed: Set<string> }; size: SuiteSize } | ({ why: string } & Partial<Bound>);
-async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteRuns> {
+// With a key (git_diff gives one: the repository, the base's sha, the install, the runner), the base's run is the one
+// kept for that key, made once (base-cache.ts); with none, it is run here.
+async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[]): Promise<SuiteRuns> {
   if (typeof dir !== "string") return { why: dir.why };
   if (typeof base !== "string") return { why: base.why };
-  const timedRun = async (at: string) => { const t0 = performance.now(); const r = await runCheck(at, null, "suite-report", stepMs); return { r, ms: Math.round(performance.now() - t0) }; };
+  const timedRun = async (at: string, kept?: readonly unknown[]) => {
+    const t0 = performance.now();
+    const live = () => runCheck(at, null, "suite-report", stepMs);
+    const r = kept === undefined ? await live() : await baseRun(kept, live);
+    return { r, ms: Math.round(performance.now() - t0) };
+  };
   const stopped = (run: "base" | "tree") => ({ why: `the suite did not finish on the ${run} within the step bound (${stepMs} ms)`, status: "bound" as const, run, ms: stepMs });
-  const { r: b, ms: base_ms } = await timedRun(base);
+  const base_cached = key !== undefined && baseHeld(key);
+  const { r: b, ms: base_ms } = await timedRun(base, key);
   if (b.killed) return stopped("base");
   if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
   const before = b.passed;
   const { r, ms: tree_ms } = await timedRun(dir);
   if (r.killed) return stopped("tree");
   if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
-  return { before, base: b, tree: { ...r, passed: r.passed }, size: { base_count: before.size + b.failed.size, tree_count: r.passed.size + r.failed.size, base_ms, tree_ms } };
+  return { before, base: b, tree: { ...r, passed: r.passed }, size: { base_count: before.size + b.failed.size, tree_count: r.passed.size + r.failed.size, base_ms, tree_ms, base_cached } };
 }
 // a run stopped at the bound says so as fields, beside its why
 const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
@@ -854,6 +864,7 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
   suiteBound?: number): Promise<DiffResult> {
   // the whole suite's two runs take the owner's bound (suite-bound.ts) when it sets one; every other step keeps STEP_MS
   const suiteMs = suiteBound ?? STEP_MS;
+  const modules = join(containmentZones(process.env).runtime, made.repo, "node_modules");
   const work = mkdtempSync(join(tmpdir(), "diff-"));
   const steps: Array<[string, number]> = [];
   const t0 = performance.now();
@@ -888,14 +899,16 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
       : { ran: false, passed: false, why: behind };
     const baseDir = ff ? await timed(steps, "base_out", () => writeOut(t, made, work, t.origin, "base")) : { why: behind };
     const refused = typeof dir === "string" ? await suiteRefuses(t) : null;
+    // the base's suite run is reused by every diff of the same base, against the same packages and runner
+    const key = [made.repo, base, installIdentity(modules), Bun.version] as const;
     const suiteDir = refused === null ? dir : { why: refused };
     // a gap whose check is the whole suite runs it once, in its check, and the suite's own verdict reads the same runs
     let runs: SuiteRuns | undefined;
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", async () => {
-      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs);
+      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs, key);
       return gapCheck(t, made.repo, dir, gap, baseDir, runs);
     }) };
-    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir, suiteMs)));
+    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir, suiteMs, key)));
     // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
     // why it did not pass, and the diff, the longest field, is what is cut
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, fast_forward: ff, typecheck, suite, ...check,

@@ -2,7 +2,7 @@
 // fast-forwards origin; every check runs in a repository of its own. Throwaway repositories; records is an in-memory
 // table; origin is a local bare repository, so the file transport is allowed for these tests only.
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readlinkSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
@@ -957,6 +957,26 @@ describe("git_land", () => {
     expect(ok.check).toEqual(expect.objectContaining({ gap_id: "R1", ran: true, passed: true, regressed: [] }));
     expect("test_file" in (ok.check as object)).toBe(false);
     expect(ok.suite).toMatchObject({ ran: true, passed: true });
+    // [MUST-FAIL] the same base again: its suite run is the one kept, and the verdicts are the same as from a live run
+    const again = await checkOf({ "calc.ts": fixed });
+    expect(again.check).toEqual(ok.check);
+    expect(again.suite).toMatchObject({ ran: true, passed: true, base_cached: true });
+    // [MUST-FAIL] a new install of the repository's packages: the base is run again, against them. The installed
+    // node_modules is put back as it was after.
+    const mods = join(T, "runtime", "demo", "node_modules");
+    const real = readlinkSync(mods);
+    rmSync(mods);
+    mkdirSync(mods);
+    for (const n of readdirSync(real)) symlinkSync(join(real, n), join(mods, n));
+    mkdirSync(join(mods, "added-pkg"));
+    try {
+      const fresh = await checkOf({ "calc.ts": fixed });
+      expect(fresh.check).toEqual(ok.check);
+      expect(fresh.suite).toMatchObject({ ran: true, passed: true, base_cached: false });
+    } finally {
+      rmSync(mods, { recursive: true, force: true });
+      symlinkSync(real, mods);
+    }
     // named still red: it does not pass
     expect((await checkOf({ "notes.txt": "n\n" })).check).toMatchObject({ ran: true, passed: false });
     // [MUST-FAIL] a suite of another vessel says nothing of this clone's: not run, and the why names both
@@ -1022,13 +1042,16 @@ describe("git_land", () => {
   });
 
   it("[MUST-FAIL] the owner's suite bound reaches the whole suite's runs and nothing else: a suite-form gap's check stopped at it says so as fields", async () => {
-    // a bound of 1 ms: the suite's first run, the base's, is stopped at once. git, the write-out and the scan keep
-    // their own bound, so the diff is still made; were the 1 ms theirs, there would be no diff
+    // a bound of 1 ms: the suite's first run it makes is stopped at once (the base's, or the tree's when an earlier diff
+    // of this base left its run kept). git, the write-out and the scan keep their own bound, so the diff is still made;
+    // were the 1 ms theirs, there would be no diff
     const gap = { gap_id: "R1", vessel: "demo", only_tests: ["add > adds"] };
     const { cwd } = await changeOf({ "notes.txt": "n\n" });
     const r = await diffClone(cwd, made.get(cwd)!, ["file"], gap as never, 1);
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
-    const stopped = { ran: false, passed: false, why: "the suite did not finish on the base within the step bound (1 ms)", status: "bound", run: "base", ms: 1 } as const;
+    expect(["base", "tree"]).toContain(String((r.suite as { run?: string }).run));
+    const side = (r.suite as { run?: string }).run === "tree" ? "tree" : "base";
+    const stopped = { ran: false, passed: false, why: `the suite did not finish on the ${side} within the step bound (1 ms)`, status: "bound", run: side, ms: 1 } as const;
     expect(r.suite).toEqual(stopped);
     expect(r.check).toEqual({ gap_id: "R1", ...stopped });
     // with no owner bound, the step bound holds: the same change's suite runs to its end
@@ -1042,7 +1065,10 @@ describe("git_land", () => {
     const { cwd } = await changeOf({ "notes.txt": "n\n" });
     const r = await diffClone(cwd, made.get(cwd)!, ["file"], null, 1);
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
-    expect(r.suite).toEqual({ ran: false, passed: false, why: "the suite did not finish on the base within the step bound (1 ms)", status: "bound", run: "base", ms: 1 });
+    // the first run made is stopped: the base's, or the tree's when an earlier diff of this base left its run kept
+    expect(["base", "tree"]).toContain(String((r.suite as { run?: string }).run));
+    const side = (r.suite as { run?: string }).run === "tree" ? "tree" : "base";
+    expect(r.suite).toEqual({ ran: false, passed: false, why: `the suite did not finish on the ${side} within the step bound (1 ms)`, status: "bound", run: side, ms: 1 });
     expect(r.check).toBeUndefined();
   }, 120000);
 
