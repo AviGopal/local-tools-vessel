@@ -1028,7 +1028,7 @@ describe("git_land", () => {
     const { cwd } = await changeOf({ "notes.txt": "n\n" });
     const r = await diffClone(cwd, made.get(cwd)!, ["file"], gap as never, 1);
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
-    const stopped = { ran: false, passed: false, why: "the suite did not finish on the base within the step bound (1 ms)", status: "bound", run: "base", ms: 1 };
+    const stopped = { ran: false, passed: false, why: "the suite did not finish on the base within the step bound (1 ms)", status: "bound", run: "base", ms: 1 } as const;
     expect(r.suite).toEqual(stopped);
     expect(r.check).toEqual({ gap_id: "R1", ...stopped });
     // with no owner bound, the step bound holds: the same change's suite runs to its end
@@ -1036,6 +1036,14 @@ describe("git_land", () => {
     const d = await diffClone(again, made.get(again)!, ["file"], null);
     if (!("tree" in d)) throw new Error(JSON.stringify(d));
     expect(d.suite).toMatchObject({ ran: true });
+  }, 120000);
+
+  it("[MUST-FAIL] a diff with no gap takes the owner's suite bound too: its suite stopped at it says so as fields, and the diff is made", async () => {
+    const { cwd } = await changeOf({ "notes.txt": "n\n" });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"], null, 1);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.suite).toEqual({ ran: false, passed: false, why: "the suite did not finish on the base within the step bound (1 ms)", status: "bound", run: "base", ms: 1 });
+    expect(r.check).toBeUndefined();
   }, 120000);
 
   it("[MUST-FAIL] a change of no gap cannot write the suite's report or choose how the suite runs: a test, a preload, or bunfig alone", async () => {
