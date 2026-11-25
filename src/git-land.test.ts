@@ -1284,6 +1284,26 @@ describe("git_land", () => {
     rmSync(flag);
     expect(await suiteCheck(fTree, xGreen, 60000, bK2, tK2)).toMatchObject({ ran: true, passed: true, regressed: [], base_cached: true, base_rerun: false,
       tree_cached: false, tree_rerun: true });
+    // [MUST-FAIL] a kept tree run read a regression and its fresh run is stopped at the bound: the tree's run is said
+    // stopped, never judged as a regression from a run that did not finish
+    const flagged = (then: string) => `if (!require("node:fs").existsSync(${JSON.stringify(flag)})) ${then}`;
+    const slowOff = dirOf("slow-off", `test("x", async () => { ${flagged("await Bun.sleep(600000);")} else throw new Error("flaked"); }, 600000);`);
+    const [bK3, tK3] = [["tree-repo-3", "base-sha", "install", "runner"], ["tree-repo-3#tree", "tree-sha", "install", "runner"]];
+    writeFileSync(flag, "1", { mode: 0o644 });
+    expect(await suiteCheck(slowOff, xGreen, 60000, bK3, tK3)).toMatchObject({ ran: true, passed: false, tree_cached: false, tree_rerun: false });
+    rmSync(flag);
+    expect(await suiteCheck(slowOff, xGreen, 4000, bK3, tK3)).toEqual({ ran: false, passed: false,
+      why: "the suite did not finish on the tree within the step bound (4000 ms)", status: "bound", run: "tree", ms: 4000 });
+    // [MUST-FAIL] the base's mirror: a kept base run where x passed, a tree that breaks x, and the base's fresh run is
+    // stopped at the bound: said so, never a regression read against the kept run
+    const onFlag = (then: string) => `if (require("node:fs").existsSync(${JSON.stringify(flag)})) ${then}`;
+    const slowOn = dirOf("slow-on", `test("x", async () => { ${onFlag("await Bun.sleep(600000);")} }, 600000);`);
+    const sKey = ["base-repo-5", "base-sha", "install", "runner"];
+    expect(await suiteCheck(breaksX, slowOn, 60000, sKey)).toMatchObject({ ran: true, passed: false, base_cached: false, base_rerun: false });
+    writeFileSync(flag, "1", { mode: 0o644 });
+    expect(await suiteCheck(breaksX, slowOn, 4000, sKey)).toEqual({ ran: false, passed: false,
+      why: "the suite did not finish on the base within the step bound (4000 ms)", status: "bound", run: "base", ms: 4000 });
+    rmSync(flag);
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {
