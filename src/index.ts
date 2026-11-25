@@ -644,7 +644,7 @@ const gitDiff: ResolverHandler = async (ctx) => {
       // the walk names its selection on every call: the gap the clone is for, if its root is one, is checked on the tree
       const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref")).catch((e) => ({ error: String(e) }));
       // the whole suite's runs are bounded by the owner's suite_bound row for this repository, when there is one
-      return diffMade(readRows, made, gap).catch(refusedOrError);
+      return diffMade(made, gap).catch(refusedOrError);
     }
   }
   const staged = (ctx.body as Record<string,unknown>)?.staged === true;

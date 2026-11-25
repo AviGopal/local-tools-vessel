@@ -1050,14 +1050,37 @@ describe("git_land", () => {
     const owner = { id: "b1", seq: 1, shape: "suite_bound", role: "owner", repo: "demo", suite_step_ms: 1 } as Row;
     const rows = (all: Row[]) => async (q: Query) => all.filter((r) => r.shape === q.shape);
     const { cwd } = await changeOf({ "notes.txt": "n\n" });
-    const r = await diffMade(rows([owner]), made.get(cwd)!, null, ["file"]);
+    const r = await diffMade(made.get(cwd)!, null, ["file"], rows([owner]));
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     expect(r.suite).toMatchObject({ ran: false, status: "bound", ms: 1 });
     // [GUARD] no row: the step bound holds, and the suite runs to its end
     const { cwd: again } = await changeOf({ "notes.txt": "n\n" });
-    const d = await diffMade(rows([]), made.get(again)!, null, ["file"]);
+    const d = await diffMade(made.get(again)!, null, ["file"], rows([]));
     if (!("tree" in d)) throw new Error(JSON.stringify(d));
     expect(d.suite).toMatchObject({ ran: true });
+  }, 120000);
+
+  it("[MUST-FAIL] git_diff given no rows reads the owner's suite_bound row from records, as the handler calls it", async () => {
+    const owner = { id: "b2", seq: 1, shape: "suite_bound", role: "owner", repo: "demo", suite_step_ms: 1 } as Row;
+    const [realFetch, endpoint] = [globalThis.fetch, process.env.DISCOVERY_ENDPOINT];
+    const asked: unknown[] = [];
+    process.env.DISCOVERY_ENDPOINT = "http://records.test";
+    globalThis.fetch = (async (u: unknown, init?: RequestInit) => {
+      if (!String(u).startsWith("http://records.test/")) return realFetch(u as string, init);
+      const { pointer } = JSON.parse(String(init?.body)) as { pointer: Query & { type: string } };
+      asked.push(pointer);
+      return Response.json(pointer.type === "record_read" && pointer.shape === "suite_bound" ? [owner] : []);
+    }) as typeof fetch;
+    try {
+      const { cwd } = await changeOf({ "notes.txt": "n\n" });
+      const r = await diffMade(made.get(cwd)!, null, ["file"]);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      expect(r.suite).toMatchObject({ ran: false, status: "bound", ms: 1 });
+      expect(asked).toContainEqual(expect.objectContaining({ type: "record_read", shape: "suite_bound" }));
+    } finally {
+      globalThis.fetch = realFetch;
+      if (endpoint === undefined) delete process.env.DISCOVERY_ENDPOINT; else process.env.DISCOVERY_ENDPOINT = endpoint;
+    }
   }, 120000);
 
   it("[MUST-FAIL] a change of no gap cannot write the suite's report or choose how the suite runs: a test, a preload, or bunfig alone", async () => {

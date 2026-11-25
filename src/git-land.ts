@@ -841,9 +841,10 @@ async function uncommitted(cwd: string): Promise<string[] | null> {
 }
 
 /** git_diff on a clone git_worktree made: its diff, the whole suite's runs bounded by the owner's suite_bound row for the
- * clone's repository when there is one (suite-bound.ts); a row that cannot be read leaves the step bound. */
-export async function diffMade(rows: (q: Query) => Promise<Row[] | { error: string }>, made: Made, gap: GapRef | null | { error: string },
-  transports?: string[]): Promise<DiffResult> {
+ * clone's repository when there is one (suite-bound.ts); a row that cannot be read leaves the step bound. The rows are
+ * records' own unless a caller gives others, so the handler names no row source it could get wrong. */
+export async function diffMade(made: Made, gap: GapRef | null | { error: string }, transports?: string[],
+  rows: (q: Query) => Promise<Row[] | { error: string }> = readRows): Promise<DiffResult> {
   const suiteBound = await suiteBoundOf(rows, made.repo).catch(() => undefined);
   return diffClone(made.cwd, made, transports, gap, suiteBound);
 }
