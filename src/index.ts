@@ -30,6 +30,7 @@ import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { detect } from "./walk-failure-detect.js";
 import { diffClone, gapOf, isGapCheckFile, landClone } from "./git-land.js";
+import { suiteBoundOf } from "./suite-bound.js";
 import { readRows } from "./walk-rows.js";
 import { behind, cloneOf, editedClone, refusalOf } from "./clone-freshness.js";
 import { freshFirst, madeCurrent, refreshInPlace } from "./clone-refresh.js";
@@ -643,7 +644,9 @@ const gitDiff: ResolverHandler = async (ctx) => {
     if (made && !("error" in made)) {
       // the walk names its selection on every call: the gap the clone is for, if its root is one, is checked on the tree
       const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref")).catch((e) => ({ error: String(e) }));
-      return diffClone(made.cwd, made, undefined, gap).catch(refusedOrError);
+      // the whole suite's runs are bounded by the owner's suite_bound row for this repository, when there is one
+      const suiteBound = await suiteBoundOf(readRows, made.repo).catch(() => undefined);
+      return diffClone(made.cwd, made, undefined, gap, suiteBound).catch(refusedOrError);
     }
   }
   const staged = (ctx.body as Record<string,unknown>)?.staged === true;

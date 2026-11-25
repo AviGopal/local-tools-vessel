@@ -389,15 +389,19 @@ export type GapRef = { gap_id: string; test_file?: string; vessel?: string; only
  * what git_land reads; anything that keeps the check from running does not pass. */
 export type GapCheck =
   | { gap_id: string; test_file?: string; ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
-  | { gap_id?: string; test_file?: string; ran: false; passed: false; why: string };
+  | ({ gap_id?: string; test_file?: string; ran: false; passed: false; why: string } & Partial<Bound>);
 
 /** What the repository's whole test suite says of the tree: every test the runner finds, run on the base and then on the
  * tree as the gap's check runs its one file; regressed names each test that passed on the base and does not on the tree
  * (a test red on both is the base's, not the change's). passed is what git_land reads; a run that did not finish, or
  * wrote no report, does not pass. */
 export type SuiteCheck =
-  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] }
-  | { ran: false; passed: false; why: string };
+  | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] } & SuiteSize
+  | ({ ran: false; passed: false; why: string } & Partial<Bound>);
+/** A run stopped at the suite's bound, said as fields: which run, and the bound it was stopped at. */
+export type Bound = { status: "bound"; run: "base" | "tree"; ms: number };
+/** How many tests each run reported, and how long each took: recorded so the bound can be read against them. */
+export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number };
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
@@ -727,24 +731,28 @@ export async function suiteCheck(dir: string | { why: string }, base: string | {
 
 // The whole suite's two runs, base then tree, as suiteCheck reads them; a suite-form gap's check reads the same runs.
 type CheckRun = Awaited<ReturnType<typeof runCheck>>;
-type SuiteRuns = { before: Set<string>; base: CheckRun; tree: CheckRun & { passed: Set<string> } } | { why: string };
+type SuiteRuns = { before: Set<string>; base: CheckRun; tree: CheckRun & { passed: Set<string> }; size: SuiteSize } | ({ why: string } & Partial<Bound>);
 async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteRuns> {
   if (typeof dir !== "string") return { why: dir.why };
   if (typeof base !== "string") return { why: base.why };
-  const b = await runCheck(base, null, "suite-report", stepMs);
-  if (b.killed) return { why: `the suite did not finish on the base within the step bound (${stepMs} ms)` };
+  const timedRun = async (at: string) => { const t0 = performance.now(); const r = await runCheck(at, null, "suite-report", stepMs); return { r, ms: Math.round(performance.now() - t0) }; };
+  const stopped = (run: "base" | "tree") => ({ why: `the suite did not finish on the ${run} within the step bound (${stepMs} ms)`, status: "bound" as const, run, ms: stepMs });
+  const { r: b, ms: base_ms } = await timedRun(base);
+  if (b.killed) return stopped("base");
   if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
   const before = b.passed;
-  const r = await runCheck(dir, null, "suite-report", stepMs);
-  if (r.killed) return { why: `the suite did not finish on the tree within the step bound (${stepMs} ms)` };
+  const { r, ms: tree_ms } = await timedRun(dir);
+  if (r.killed) return stopped("tree");
   if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
-  return { before, base: b, tree: { ...r, passed: r.passed } };
+  return { before, base: b, tree: { ...r, passed: r.passed }, size: { base_count: before.size, tree_count: r.passed.size + r.failed.size, base_ms, tree_ms } };
 }
+// a run stopped at the bound says so as fields, beside its why
+const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
 const suiteOf = (s: SuiteRuns): SuiteCheck => {
-  if ("why" in s) return { ran: false, passed: false, why: s.why };
+  if ("why" in s) return { ran: false, passed: false, why: s.why, ...boundOf(s) };
   const regressed = [...s.before].filter((n) => !s.tree.passed.has(n)).sort();
   return { ran: true, passed: regressed.length === 0, exit_code: s.tree.exit_code, out: regressedOut(regressed, s.tree.failed, s.tree.out, CHECK_OUT_MAX),
-    truncated: s.tree.out.length > CHECK_OUT_MAX, regressed };
+    truncated: s.tree.out.length > CHECK_OUT_MAX, regressed, ...s.size };
 };
 
 // A gap's named test, in a whole suite's report: there every name starts at its file, and the detector writes it
@@ -786,11 +794,11 @@ async function gapCheck(t: Trusted, repo: string, dir: string | { why: string },
     // the gap's check is the whole suite: its named tests red on the base and green on the tree, and no test that
     // passed on the base red on the tree (a fix that turns the named tests green by breaking others does not pass)
     if (runs === undefined) return { ...id, ran: false, passed: false, why: "the whole suite was not run" };
-    if ("why" in runs) return { ...id, ran: false, passed: false, why: runs.why };
+    if ("why" in runs) return { ...id, ran: false, passed: false, why: runs.why, ...boundOf(runs) };
     const was = gap.only_tests.length === 0 ? runs.base.exit_code !== 0 : gap.only_tests.some((n) => !greenIn(runs.base, n));
     if (!was) return { ...id, ran: false, passed: false, why: "the gap's tests already pass on the base" };
     const s = suiteOf(runs);
-    if (!s.ran) return { ...id, ran: false, passed: false, why: s.why };
+    if (!s.ran) return { ...id, ran: false, passed: false, why: s.why, ...boundOf(s) };
     const now = gap.only_tests.length === 0 ? runs.tree.exit_code === 0 : gap.only_tests.every((n) => greenIn(runs.tree, n));
     return { ...id, ran: true, passed: now && s.regressed.length === 0 && !runs.tree.signalled, exit_code: s.exit_code, out: s.out,
       truncated: s.truncated, regressed: s.regressed };
@@ -832,7 +840,10 @@ async function uncommitted(cwd: string): Promise<string[] | null> {
 }
 
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */
-export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports, gap: GapRef | null | { error: string } = null): Promise<DiffResult> {
+export async function diffClone(cwd: string, made: Made, transports: string[] = DEFAULTS.transports, gap: GapRef | null | { error: string } = null,
+  suiteBound?: number): Promise<DiffResult> {
+  // the whole suite's two runs take the owner's bound (suite-bound.ts) when it sets one; every other step keeps STEP_MS
+  const suiteMs = suiteBound ?? STEP_MS;
   const work = mkdtempSync(join(tmpdir(), "diff-"));
   const steps: Array<[string, number]> = [];
   const t0 = performance.now();
@@ -871,10 +882,10 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     // a gap whose check is the whole suite runs it once, in its check, and the suite's own verdict reads the same runs
     let runs: SuiteRuns | undefined;
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", async () => {
-      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir);
+      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs);
       return gapCheck(t, made.repo, dir, gap, baseDir, runs);
     }) };
-    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir)));
+    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir, suiteMs)));
     // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
     // why it did not pass, and the diff, the longest field, is what is cut
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, fast_forward: ff, typecheck, suite, ...check,

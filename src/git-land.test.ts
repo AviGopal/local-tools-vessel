@@ -1021,6 +1021,23 @@ describe("git_land", () => {
     }
   });
 
+  it("[MUST-FAIL] the owner's suite bound reaches the whole suite's runs and nothing else: a suite-form gap's check stopped at it says so as fields", async () => {
+    // a bound of 1 ms: the suite's first run, the base's, is stopped at once. git, the write-out and the scan keep
+    // their own bound, so the diff is still made; were the 1 ms theirs, there would be no diff
+    const gap = { gap_id: "R1", vessel: "demo", only_tests: ["add > adds"] };
+    const { cwd } = await changeOf({ "notes.txt": "n\n" });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"], gap as never, 1);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    const stopped = { ran: false, passed: false, why: "the suite did not finish on the base within the step bound (1 ms)", status: "bound", run: "base", ms: 1 };
+    expect(r.suite).toEqual(stopped);
+    expect(r.check).toEqual({ gap_id: "R1", ...stopped });
+    // with no owner bound, the step bound holds: the same change's suite runs to its end
+    const { cwd: again } = await changeOf({ "notes.txt": "n\n" });
+    const d = await diffClone(again, made.get(again)!, ["file"], null);
+    if (!("tree" in d)) throw new Error(JSON.stringify(d));
+    expect(d.suite).toMatchObject({ ran: true });
+  }, 120000);
+
   it("[MUST-FAIL] a change of no gap cannot write the suite's report or choose how the suite runs: a test, a preload, or bunfig alone", async () => {
     // the base from the cases above, with a preload the base's bunfig names
     const seed = join(T, "seed");
@@ -1084,13 +1101,22 @@ describe("git_land", () => {
     };
     const ok = dirOf("ok", 'test("ok", () => {});');
     const hangs = dirOf("hang", 'test("waits", async () => { await new Promise(() => {}); }, 600000);');
-    expect(await suiteCheck(hangs, ok, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the tree within the step bound (4000 ms)" });
-    expect(await suiteCheck(ok, hangs, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the base within the step bound (4000 ms)" });
+    // stopped at the bound: said in words and as fields, which run and at what bound
+    expect(await suiteCheck(hangs, ok, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the tree within the step bound (4000 ms)",
+      status: "bound", run: "tree", ms: 4000 });
+    expect(await suiteCheck(ok, hangs, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the base within the step bound (4000 ms)",
+      status: "bound", run: "base", ms: 4000 });
     // a run that exits before the runner reports leaves no report: it does not pass, and says on which side
     const exits = dirOf("exit", 'process.exit(0);\ntest("never", () => {});');
     expect(await suiteCheck(exits, ok, 60000)).toEqual({ ran: false, passed: false, why: "the suite's run on the tree wrote no report" });
     expect(await suiteCheck(ok, exits, 60000)).toEqual({ ran: false, passed: false, why: "the suite's run on the base wrote no report" });
     expect(await suiteCheck(ok, ok, 60000)).toMatchObject({ ran: true, passed: true, regressed: [] });
+    // a run that finished says how many tests each side reported and how long each took, and is not marked as stopped
+    const two = dirOf("two", 'test("a", () => {});\ntest("b", () => { throw new Error("red"); });');
+    const sized = await suiteCheck(two, ok, 60000);
+    expect(sized).toMatchObject({ ran: true, base_count: 1, tree_count: 2 });
+    expect([typeof (sized as { base_ms?: unknown }).base_ms, typeof (sized as { tree_ms?: unknown }).tree_ms]).toEqual(["number", "number"]);
+    expect("status" in sized).toBe(false);
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {

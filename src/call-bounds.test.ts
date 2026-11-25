@@ -70,7 +70,8 @@ describe("discovery holds this vessel's calls with no limit", () => {
     expect(v).toBeGreaterThan(0);
     // above 2^31 - 1 a timer can fire at once: "no limit" would become "cut at once"
     expect(v).toBeLessThanOrEqual(2147483647);
-    const own = Math.max(num("git-land.ts", "STEP_MS"), num("git-commit.ts", "GIT_TIMEOUT_MS"), num("script-runner.ts", "EXPORT_STEP_MS"),
+    // the suite's bound is the owner's, clamped at SUITE_MS_MAX: no row can set a bound past what discovery waits for
+    const own = Math.max(num("git-land.ts", "STEP_MS"), num("suite-bound.ts", "SUITE_MS_MAX"), num("git-commit.ts", "GIT_TIMEOUT_MS"), num("script-runner.ts", "EXPORT_STEP_MS"),
       num("index.ts", "MAX_TIMEOUT_SEC", 1000), num("script-runner.ts", "MAX_TIMEOUT_S", 1000));
     expect(v).toBeGreaterThanOrEqual(own);
   });
