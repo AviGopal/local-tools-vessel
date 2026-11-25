@@ -824,9 +824,11 @@ const codeInsertAfterLine: ResolverHandler = async (ctx) => {
     const lines = src.split("\n");
     if (afterLine > lines.length) return { error: `after_line ${afterLine} exceeds file length ${lines.length}` };
     const insertIdx = afterLine; // 0 means insert at top
-    lines.splice(insertIdx, 0, text);
+    // the text's own lines, each counted: the counts answered are the file's as written, what code_read_lines then reads
+    const added = text.split("\n");
+    lines.splice(insertIdx, 0, ...added);
     await Bun.write(path, lines.join("\n"));
-    return { shape: "codeInsertResult", path, after_line: afterLine, lines_added: 1, new_total_lines: lines.length, after: await afterOf(path) };
+    return { shape: "codeInsertResult", path, after_line: afterLine, lines_added: added.length, new_total_lines: lines.length, after: await afterOf(path) };
   } catch (e) { return { error: (e as Error).message }; }
 };
 
@@ -850,7 +852,8 @@ const codeReplaceLines: ResolverHandler = async (ctx) => {
     const src = await Bun.file(path).text();
     const lines = src.split("\n");
     if (endLine > lines.length) return { error: `end_line ${endLine} exceeds file length ${lines.length}` };
-    const removed = lines.splice(startLine - 1, endLine - startLine + 1, text);
+    // the text's own lines, each counted: new_total_lines is the file's as written, what code_read_lines then reads
+    const removed = lines.splice(startLine - 1, endLine - startLine + 1, ...text.split("\n"));
     await Bun.write(path, lines.join("\n"));
     return { shape: "codeReplaceResult", path, start_line: startLine, end_line: endLine, lines_removed: removed.length, new_total_lines: lines.length, after: await afterOf(path) };
   } catch (e) { return { error: (e as Error).message }; }
