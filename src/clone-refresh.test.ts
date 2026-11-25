@@ -426,4 +426,30 @@ describe("a clone holding commits and edits together: git_commit runs in it as i
     expect(r).toMatchObject({ ok: false, why: "the new base could not be fetched into the clone", changed: true })
     expect("held" in r).toBe(false)
   })
+
+  it("[MUST-FAIL] a clean clone holding commits of its own, whose new base cannot be fetched, is said changed", async () => {
+    const c = await clone()
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3\n4\n5c\n"); commitAll(c.cwd, "own, fetch fails"); asOwner(c.cwd)
+    const r = await refreshed(c.cwd, c.made.base, c.made.base, c.made.branch, join(T, "no-such-copy"))
+    expect(r).toMatchObject({ ok: false, why: "the new base could not be fetched into the clone", changed: true })
+  })
+
+  it("[GUARD] a clean clone with nothing of its own, whose new base cannot be fetched, is not said changed", async () => {
+    const c = await clone()
+    asOwner(c.cwd)
+    const r = await refreshed(c.cwd, c.made.base, c.made.base, c.made.branch, join(T, "no-such-copy"))
+    expect(r).toMatchObject({ ok: false, why: "the new base could not be fetched into the clone", changed: false })
+  })
+
+  it("[MUST-FAIL] a clone whose branch shares no history with the new base is refused and said changed, left as it was", async () => {
+    const c = await clone()
+    const own = g(c.cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    g(c.cwd, "checkout", "-q", "--orphan", "unrelated"); writeFileSync(join(c.cwd, "o.txt"), "o\n"); commitAll(c.cwd, "unrelated root")
+    const head = g(c.cwd, "rev-parse", "HEAD")
+    g(c.cwd, "update-ref", `refs/heads/${own}`, head); g(c.cwd, "checkout", "-q", own); asOwner(c.cwd)
+    const to = moveOrigin("b.txt", "b-unrelated\n")
+    const r = await refreshed(c.cwd, c.made.base, to, "dev", COPY)
+    expect(r).toMatchObject({ ok: false, why: "the clone shares no history with the new base", changed: true })
+    expect(g(c.cwd, "rev-parse", "HEAD")).toBe(head)
+  })
 })
