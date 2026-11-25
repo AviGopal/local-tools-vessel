@@ -418,8 +418,12 @@ const baseRead = (run: { passed: Set<string> | null; failed: Map<string, string>
 export type SuiteCheck =
   | { ran: true; passed: boolean; exit_code: number; out: string; truncated: boolean; regressed: string[] } & SuiteSize
   | ({ ran: false; passed: false; why: string } & Partial<Bound>);
-/** A run stopped at the suite's bound, said as fields: which run, and the bound it was stopped at. */
-export type Bound = { status: "bound"; run: "base" | "tree"; ms: number };
+/** A run stopped at the suite's bound, said as fields: which run, the bound it was stopped at, how long it had run
+ * (elapsed_ms), and how many tests it had reported a result for by then (reported: its runner's "(pass)" and "(fail)"
+ * lines; a stopped run writes no report), so a run cut short is a measurement of how far it got, not only "past the
+ * bound". The runner prints a passed test's line only when no agent marker (CLAUDECODE, AGENT) is in its env, which the
+ * shell user's run never has; with one, reported counts only the failures. */
+export type Bound = { status: "bound"; run: "base" | "tree"; ms: number; elapsed_ms: number; reported: number };
 /** How many tests each run reported, and how long each took (base_cached: the base's run read was one made for an
  * earlier diff of the same base, so base_ms is not its run's; base_rerun: a kept run read a regression, and the base was
  * run again to judge it, replacing the kept run; base_failed_kept: the tests that do not pass on the tree and were read
@@ -766,20 +770,21 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
     const r = kept === undefined ? await live() : await baseRun(kept, live, fresh);
     return { r, ms: Math.round(performance.now() - t0) };
   };
-  const stopped = (run: "base" | "tree") => ({ why: `the suite did not finish on the ${run} within the step bound (${stepMs} ms)`, status: "bound" as const, run, ms: stepMs });
+  const stopped = (run: "base" | "tree", r: CheckRun, elapsed_ms: number) => ({ why: `the suite did not finish on the ${run} within the step bound (${stepMs} ms)`,
+    status: "bound" as const, run, ms: stepMs, elapsed_ms, reported: r.out.replace(/\x1b\[[0-9;]*m/g, "").split("\n").filter((l) => /^\((pass|fail)\) /.test(l)).length });
   let base_cached = key !== undefined && baseHeld(key);
   let { r: b, ms: base_ms } = await timedRun(base, key);
-  if (b.killed) return stopped("base");
+  if (b.killed) return stopped("base", b, base_ms);
   if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
   let tree_cached = treeKey !== undefined && baseHeld(treeKey);
   let { r, ms: tree_ms } = await timedRun(dir, treeKey);
-  if (r.killed) return stopped("tree");
+  if (r.killed) return stopped("tree", r, tree_ms);
   if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
   const tree_rerun = tree_cached && [...b.passed].some((n) => !r.passed!.has(n));
   if (tree_rerun) {
     ({ r, ms: tree_ms } = await timedRun(dir, treeKey, true));
     tree_cached = false;
-    if (r.killed) return stopped("tree");
+    if (r.killed) return stopped("tree", r, tree_ms);
     if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
   }
   const treePassed = r.passed;
@@ -787,7 +792,7 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
   if (base_rerun) {
     ({ r: b, ms: base_ms } = await timedRun(base, key, true));
     base_cached = false;
-    if (b.killed) return stopped("base");
+    if (b.killed) return stopped("base", b, base_ms);
     if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
   }
   const before = b.passed;
@@ -795,7 +800,7 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
   return { before, base: b, tree: { ...r, passed: treePassed }, size: { base_count: before.size + b.failed.size, tree_count: treePassed.size + r.failed.size, base_ms, tree_ms, base_cached, base_rerun, base_failed_kept, tree_cached, tree_rerun } };
 }
 // a run stopped at the bound says so as fields, beside its why
-const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
+const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms, elapsed_ms: s.elapsed_ms, reported: s.reported } : {};
 const suiteOf = (s: SuiteRuns): SuiteCheck => {
   if ("why" in s) return { ran: false, passed: false, why: s.why, ...boundOf(s) };
   const regressed = [...s.before].filter((n) => !s.tree.passed.has(n)).sort();

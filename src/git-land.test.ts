@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } f
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, readlinkSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AFTER_MS } from "./bounded-run";
 import { commitInClone } from "./git-commit";
 import { diffClone, diffMade, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
 import type { Trusted, Typecheck } from "./git-land";
@@ -1079,9 +1080,11 @@ describe("git_land", () => {
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     expect(["base", "tree"]).toContain(String((r.suite as { run?: string }).run));
     const side = (r.suite as { run?: string }).run === "tree" ? "tree" : "base";
-    const stopped = { ran: false, passed: false, why: `the suite did not finish on the ${side} within the step bound (1 ms)`, status: "bound", run: side, ms: 1 } as const;
+    const stopped = { ran: false, passed: false, why: `the suite did not finish on the ${side} within the step bound (1 ms)`, status: "bound", run: side, ms: 1, elapsed_ms: expect.any(Number), reported: expect.any(Number) } as const;
     expect(r.suite).toEqual(stopped);
     expect(r.check).toEqual({ gap_id: "R1", ...stopped });
+    // [MUST-FAIL] the time it ran is its own, measured: past a 1 ms bound, never the bound restated
+    expect(Number((r.suite as { elapsed_ms?: number }).elapsed_ms)).toBeGreaterThan(1);
     // with no owner bound, the step bound holds: the same change's suite runs to its end
     const { cwd: again } = await changeOf({ "notes.txt": "n\n" });
     const d = await diffClone(again, made.get(again)!, ["file"], null);
@@ -1096,8 +1099,9 @@ describe("git_land", () => {
     // the first run made is stopped: the base's, or the tree's when an earlier diff of this base left its run kept
     expect(["base", "tree"]).toContain(String((r.suite as { run?: string }).run));
     const side = (r.suite as { run?: string }).run === "tree" ? "tree" : "base";
-    expect(r.suite).toEqual({ ran: false, passed: false, why: `the suite did not finish on the ${side} within the step bound (1 ms)`, status: "bound", run: side, ms: 1 });
+    expect(r.suite).toEqual({ ran: false, passed: false, why: `the suite did not finish on the ${side} within the step bound (1 ms)`, status: "bound", run: side, ms: 1, elapsed_ms: expect.any(Number), reported: expect.any(Number) });
     expect(r.check).toBeUndefined();
+    expect(Number((r.suite as { elapsed_ms?: number }).elapsed_ms)).toBeGreaterThan(1);
   }, 120000);
 
   it("[MUST-FAIL] a diff with no gap keeps its base's run, and the next diff of that base reads it", async () => {
@@ -1214,9 +1218,20 @@ describe("git_land", () => {
     const hangs = dirOf("hang", 'test("waits", async () => { await new Promise(() => {}); }, 600000);');
     // stopped at the bound: said in words and as fields, which run and at what bound
     expect(await suiteCheck(hangs, ok, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the tree within the step bound (4000 ms)",
-      status: "bound", run: "tree", ms: 4000 });
+      status: "bound", run: "tree", ms: 4000, elapsed_ms: expect.any(Number), reported: 0 });
     expect(await suiteCheck(ok, hangs, 4000)).toEqual({ ran: false, passed: false, why: "the suite did not finish on the base within the step bound (4000 ms)",
-      status: "bound", run: "base", ms: 4000 });
+      status: "bound", run: "base", ms: 4000, elapsed_ms: expect.any(Number), reported: 0 });
+    // [MUST-FAIL] a stopped run says how long it ran and how many tests it had reported by then: a measurement, not
+    // only "past the bound"
+    const partway = dirOf("partway", 'test("a", () => {});\ntest("b", () => {});\ntest("c", () => { throw new Error("red"); });\n' +
+      'test("waits", async () => { await new Promise(() => {}); }, 600000);');
+    const cut = await suiteCheck(partway, ok, 4000) as Record<string, unknown>;
+    expect(cut).toMatchObject({ ran: false, status: "bound", run: "tree", ms: 4000, reported: 3 });
+    expect(Number(cut.elapsed_ms)).toBeGreaterThanOrEqual(4000);
+    expect(Number(cut.elapsed_ms)).toBeLessThan(4000 + 2 * AFTER_MS + 5000);
+    const cutBase = await suiteCheck(ok, partway, 4000) as Record<string, unknown>;
+    expect(cutBase).toMatchObject({ ran: false, status: "bound", run: "base", ms: 4000, reported: 3 });
+    expect(Number(cutBase.elapsed_ms)).toBeGreaterThanOrEqual(4000);
     // a run that exits before the runner reports leaves no report: it does not pass, and says on which side
     const exits = dirOf("exit", 'process.exit(0);\ntest("never", () => {});');
     expect(await suiteCheck(exits, ok, 60000)).toEqual({ ran: false, passed: false, why: "the suite's run on the tree wrote no report" });
@@ -1293,7 +1308,7 @@ describe("git_land", () => {
     expect(await suiteCheck(slowOff, xGreen, 60000, bK3, tK3)).toMatchObject({ ran: true, passed: false, tree_cached: false, tree_rerun: false });
     rmSync(flag);
     expect(await suiteCheck(slowOff, xGreen, 4000, bK3, tK3)).toEqual({ ran: false, passed: false,
-      why: "the suite did not finish on the tree within the step bound (4000 ms)", status: "bound", run: "tree", ms: 4000 });
+      why: "the suite did not finish on the tree within the step bound (4000 ms)", status: "bound", run: "tree", ms: 4000, elapsed_ms: expect.any(Number), reported: 0 });
     // [MUST-FAIL] and a fresh run that writes no report says so, never read as a regression either
     const exitsOff = dirOf("exits-off", `${flagged("process.exit(0);")}\ntest("x", () => { throw new Error("flaked"); });`);
     const [bK4, tK4] = [["tree-repo-4", "base-sha", "install", "runner"], ["tree-repo-4#tree", "tree-sha", "install", "runner"]];
@@ -1309,7 +1324,7 @@ describe("git_land", () => {
     expect(await suiteCheck(breaksX, slowOn, 60000, sKey)).toMatchObject({ ran: true, passed: false, base_cached: false, base_rerun: false });
     writeFileSync(flag, "1", { mode: 0o644 });
     expect(await suiteCheck(breaksX, slowOn, 4000, sKey)).toEqual({ ran: false, passed: false,
-      why: "the suite did not finish on the base within the step bound (4000 ms)", status: "bound", run: "base", ms: 4000 });
+      why: "the suite did not finish on the base within the step bound (4000 ms)", status: "bound", run: "base", ms: 4000, elapsed_ms: expect.any(Number), reported: 0 });
     rmSync(flag);
     const exitsOn = dirOf("exits-on", `${onFlag("process.exit(0);")}\ntest("x", () => {});`);
     const eKey = ["base-repo-6", "base-sha", "install", "runner"];
