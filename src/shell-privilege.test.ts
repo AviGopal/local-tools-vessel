@@ -82,6 +82,43 @@ describe("agent shell privilege", () => {
     expect(r.out.trim()).toBe("true");
   });
 
+  // A repo root owns, with one committed file, that the shell user may read; and a child that drops the command's
+  // env, as a test that spawns its own server does, reading that file with git.
+  const rootRepo = () => {
+    const repo = mkdtempSync(join(TMP, "shell-privilege-owned-"));
+    Bun.spawnSync(["chmod", "755", repo]);
+    Bun.spawnSync(["git", "init", "-q", repo]);
+    Bun.spawnSync(["bash", "-c", `echo scope > ${repo}/f && git -C ${repo} add f && git -C ${repo} -c user.name=t -c user.email=t@t commit -qm f`]);
+    return repo;
+  };
+  const ownEnv = async (repo: string, opts?: { gitAnyOwner?: boolean }) => {
+    const s = agentShellSpawn(["bash", "-c", `env -i PATH="$PATH" HOME="$HOME" git -C ${repo} show HEAD:f; env -i PATH="$PATH" HOME="$HOME" git config --global --get safe.directory || echo none`],
+      agentShellEnv(process.env), TMP, true, opts);
+    try {
+      const p = Bun.spawn(s.argv, { cwd: "/", env: s.env, stdout: "pipe", stderr: "pipe" });
+      const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      return { out, err };
+    } finally { await s.done(); }
+  };
+
+  it.if(root)("[MUST-FAIL] as root, a check's run (gitAnyOwner) reads a root-owned repo with git from a child with an env of its own", async () => {
+    const r = await ownEnv(rootRepo(), { gitAnyOwner: true });
+    expect(r.err).not.toContain("dubious ownership");
+    expect(r.out.trim().split("\n")).toEqual(["scope", "*"]);
+  });
+
+  it.if(root)("[GUARD] as root, an agent's own shell keeps git's refusal there: its HOME carries no safe.directory", async () => {
+    const r = await ownEnv(rootRepo());
+    expect(r.err).toContain("dubious ownership");
+    expect(r.out.trim()).toBe("none");
+  });
+
+  it("[GUARD] only the checks' runs ask for it: asShellUser does, the agent's shells and git-commit's spawn do not", () => {
+    const src = (f: string) => readFileSync(join(import.meta.dir, f), "utf8");
+    expect(src("git-land.ts")).toMatch(/agentShellSpawn\([^;]*gitAnyOwner: true/);
+    for (const f of ["index.ts", "git-commit.ts"]) expect(src(f)).not.toContain("gitAnyOwner");
+  });
+
   it.if(root)("as root, a command cannot turn its HOME into a symlink that root then hands over", async () => {
     const target = rootOnlyDir();
     // The entry sits in a root-only parent: rm can empty it but not remove it, so ln -s can at most

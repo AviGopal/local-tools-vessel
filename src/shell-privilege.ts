@@ -38,7 +38,7 @@
 //   - a writable default cwd for bounded_shell (agentWritableDir; /workspace/tmp is root 0755).
 //
 // FAILS CLOSED. Without setpriv the spawn fails, so the command does not run as root.
-import { chmodSync, lchownSync, lstatSync, mkdirSync, mkdtempSync, rmdirSync } from "node:fs";
+import { chmodSync, lchownSync, lstatSync, mkdirSync, mkdtempSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** nobody:nogroup, the account the image already carries. */
@@ -94,10 +94,19 @@ function homes(tmp: string): string {
 /**
  * The argv and env an agent shell command is spawned with, and what to do once it has exited.
  * `env` is the allowlisted env from agentShellEnv; nothing changes unless this vessel runs as root.
+ * gitAnyOwner: the command's HOME also carries safe.directory=* in its git config (global scope), for a check whose
+ * tests spawn processes with an env of their own: the command scope above does not reach those, and older git (the
+ * image's) honours safe.directory only in global and system scope. Without it, a test that reads a root-owned repo
+ * the shell user may read is refused by git, and passes as the shell user where it fails as root. It grants no file
+ * permission. Only the checks' runs ask for it (asShellUser); an agent's own shells keep git's refusal.
  */
-export function agentShellSpawn(argv: string[], env: Record<string, string>, tmp: string, root = runningAsRoot()): { argv: string[]; env: Record<string, string>; done: () => Promise<void> } {
+export function agentShellSpawn(argv: string[], env: Record<string, string>, tmp: string, root = runningAsRoot(),
+  opts: { gitAnyOwner?: boolean } = {}): { argv: string[]; env: Record<string, string>; done: () => Promise<void> } {
   if (!root) return { argv, env, done: async () => {} };
-  const home = handOver(mkdtempSync(join(homes(tmp), "home-")));
+  const made = mkdtempSync(join(homes(tmp), "home-"));
+  // written by root into the HOME it just made, before the shell user owns it: nothing can be there first
+  if (opts.gitAnyOwner) writeFileSync(join(made, ".gitconfig"), "[safe]\n\tdirectory = *\n", { mode: 0o644, flag: "wx" });
+  const home = handOver(made);
   return {
     argv: ["setpriv", ...SETPRIV_ARGS, "--", ...argv],
     env: {

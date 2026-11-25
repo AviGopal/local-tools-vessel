@@ -675,10 +675,12 @@ async function projectsOf(t: Trusted, files: string[], ownerOf = new Map<string,
 /**
  * A command run in `dir` as the shell user, env PATH only, within the step time; its output, with dir shown as ".".
  * What it runs is the walk's tree (its tests, the code they import), so it can start something that outlives it; it is
- * run bounded as a whole (bounded-run.ts), and killed says the bound ended it.
+ * run bounded as a whole (bounded-run.ts), and killed says the bound ended it. Its git reads a repository another user
+ * owns, from processes its tests start with an env of their own too (gitAnyOwner): a test that reads such a repository
+ * fails here as it fails run as root, so a check never passes only because git refused the shell user.
  */
 export async function asShellUser(argv: string[], dir: string, stepMs = STEP_MS): Promise<{ exit_code: number; signalled: boolean; out: string; killed: boolean }> {
-  const s = agentShellSpawn(argv, { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir());
+  const s = agentShellSpawn(argv, { PATH: process.env.PATH ?? "/usr/bin:/bin" }, tmpdir(), runningAsRoot(), { gitAnyOwner: true });
   try {
     const r = await runBounded(s.argv, { cwd: dir, env: s.env, stepMs });
     return { exit_code: r.exit_code, signalled: r.signalled, out: `${r.stdout}${r.stderr}`.split(dir).join("."), killed: r.killed };
