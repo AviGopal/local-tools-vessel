@@ -1307,8 +1307,11 @@ describe("git_land", () => {
     writeFileSync(flag, "1", { mode: 0o644 });
     expect(await suiteCheck(slowOff, xGreen, 60000, bK3, tK3)).toMatchObject({ ran: true, passed: false, tree_cached: false, tree_rerun: false });
     rmSync(flag);
-    expect(await suiteCheck(slowOff, xGreen, 4000, bK3, tK3)).toEqual({ ran: false, passed: false,
+    const cutRerun = await suiteCheck(slowOff, xGreen, 4000, bK3, tK3);
+    expect(cutRerun).toEqual({ ran: false, passed: false,
       why: "the suite did not finish on the tree within the step bound (4000 ms)", status: "bound", run: "tree", ms: 4000, elapsed_ms: expect.any(Number), reported: 0 });
+    // the stopped fresh run's own time, never the kept base run's
+    expect(Number((cutRerun as { elapsed_ms?: number }).elapsed_ms)).toBeGreaterThanOrEqual(4000);
     // [MUST-FAIL] and a fresh run that writes no report says so, never read as a regression either
     const exitsOff = dirOf("exits-off", `${flagged("process.exit(0);")}\ntest("x", () => { throw new Error("flaked"); });`);
     const [bK4, tK4] = [["tree-repo-4", "base-sha", "install", "runner"], ["tree-repo-4#tree", "tree-sha", "install", "runner"]];
@@ -1323,8 +1326,11 @@ describe("git_land", () => {
     const sKey = ["base-repo-5", "base-sha", "install", "runner"];
     expect(await suiteCheck(breaksX, slowOn, 60000, sKey)).toMatchObject({ ran: true, passed: false, base_cached: false, base_rerun: false });
     writeFileSync(flag, "1", { mode: 0o644 });
-    expect(await suiteCheck(breaksX, slowOn, 4000, sKey)).toEqual({ ran: false, passed: false,
+    const cutBaseRerun = await suiteCheck(breaksX, slowOn, 4000, sKey);
+    expect(cutBaseRerun).toEqual({ ran: false, passed: false,
       why: "the suite did not finish on the base within the step bound (4000 ms)", status: "bound", run: "base", ms: 4000, elapsed_ms: expect.any(Number), reported: 0 });
+    // the stopped fresh run's own time, never the tree run's
+    expect(Number((cutBaseRerun as { elapsed_ms?: number }).elapsed_ms)).toBeGreaterThanOrEqual(4000);
     rmSync(flag);
     const exitsOn = dirOf("exits-on", `${onFlag("process.exit(0);")}\ntest("x", () => {});`);
     const eKey = ["base-repo-6", "base-sha", "install", "runner"];
