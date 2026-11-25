@@ -958,8 +958,10 @@ describe("git_land", () => {
     expect("test_file" in (ok.check as object)).toBe(false);
     expect(ok.suite).toMatchObject({ ran: true, passed: true });
     // [MUST-FAIL] the same base again: its suite run is the one kept, and the verdicts are the same as from a live run
+    // (the verdict's fields; its out is the tree run's own, timings included)
+    const verdict = (c: unknown) => { const { gap_id, ran, passed, exit_code, regressed } = c as Record<string, unknown>; return { gap_id, ran, passed, exit_code, regressed }; };
     const again = await checkOf({ "calc.ts": fixed });
-    expect(again.check).toEqual(ok.check);
+    expect(verdict(again.check)).toEqual(verdict(ok.check));
     expect(again.suite).toMatchObject({ ran: true, passed: true, base_cached: true });
     // [MUST-FAIL] a new install of the repository's packages: the base is run again, against them. The installed
     // node_modules is put back as it was after.
@@ -971,7 +973,7 @@ describe("git_land", () => {
     mkdirSync(join(mods, "added-pkg"));
     try {
       const fresh = await checkOf({ "calc.ts": fixed });
-      expect(fresh.check).toEqual(ok.check);
+      expect(verdict(fresh.check)).toEqual(verdict(ok.check));
       expect(fresh.suite).toMatchObject({ ran: true, passed: true, base_cached: false });
     } finally {
       rmSync(mods, { recursive: true, force: true });
