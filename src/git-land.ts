@@ -423,9 +423,12 @@ export type Bound = { status: "bound"; run: "base" | "tree"; ms: number };
 /** How many tests each run reported, and how long each took (base_cached: the base's run read was one made for an
  * earlier diff of the same base, so base_ms is not its run's; base_rerun: a kept run read a regression, and the base was
  * run again to judge it, replacing the kept run; base_failed_kept: the tests that do not pass on the tree and were read
- * as the base's own from a kept run, not run again, so a kept flaky failure that hides a regression can be read):
+ * as the base's own from a kept run, not run again, so a kept flaky failure that hides a regression can be read;
+ * tree_cached: the tree's run read was one made for an earlier diff of the same tree, so tree_ms is not its run's;
+ * tree_rerun: a kept tree run read a regression, and the tree was run again to judge it, replacing the kept run):
  * recorded so the bound, and how often a kept base is wrong either way, can be read. */
-export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean; base_rerun: boolean; base_failed_kept: string[] };
+export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean; base_rerun: boolean; base_failed_kept: string[];
+  tree_cached: boolean; tree_rerun: boolean };
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
@@ -736,8 +739,9 @@ export async function suiteRefuses(t: Trusted): Promise<string | null> {
  * regressed test means it does not pass; a test red on the base is not the change's. A run killed at the bound, or one
  * that wrote no report, does not pass, and says which.
  */
-export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[]): Promise<SuiteCheck> {
-  return suiteOf(await suiteRuns(dir, base, stepMs, key));
+export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[],
+  treeKey?: readonly unknown[]): Promise<SuiteCheck> {
+  return suiteOf(await suiteRuns(dir, base, stepMs, key, treeKey));
 }
 
 // The whole suite's two runs, base then tree, as suiteCheck reads them; a suite-form gap's check reads the same runs.
@@ -747,7 +751,11 @@ type SuiteRuns = { before: Set<string>; base: CheckRun; tree: CheckRun & { passe
 // kept for that key, made once (base-cache.ts); with none, it is run here. A test that passed in a kept run and does not
 // pass on the tree is judged on a fresh run of the base, which replaces the kept one: a flaky pass kept would otherwise
 // refuse every diff of the base, and so every land that would move it.
-async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[]): Promise<SuiteRuns> {
+// With a tree key (git_diff gives one: the tree's sha in place of the base's), the tree's run is kept the same way, so a
+// diff asked again of an unchanged tree runs nothing; a regression read from a kept tree run is judged on a fresh run of
+// the tree, as one read against a kept base is, so a flaky failure kept is never what refuses the change.
+async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[],
+  treeKey?: readonly unknown[]): Promise<SuiteRuns> {
   if (typeof dir !== "string") return { why: dir.why };
   if (typeof base !== "string") return { why: base.why };
   const timedRun = async (at: string, kept?: readonly unknown[], fresh = false) => {
@@ -761,9 +769,17 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
   let { r: b, ms: base_ms } = await timedRun(base, key);
   if (b.killed) return stopped("base");
   if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
-  const { r, ms: tree_ms } = await timedRun(dir);
+  let tree_cached = treeKey !== undefined && baseHeld(treeKey);
+  let { r, ms: tree_ms } = await timedRun(dir, treeKey);
   if (r.killed) return stopped("tree");
   if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
+  const tree_rerun = tree_cached && [...b.passed].some((n) => !r.passed!.has(n));
+  if (tree_rerun) {
+    ({ r, ms: tree_ms } = await timedRun(dir, treeKey, true));
+    tree_cached = false;
+    if (r.killed) return stopped("tree");
+    if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
+  }
   const treePassed = r.passed;
   const base_rerun = base_cached && [...b.passed].some((n) => !treePassed.has(n));
   if (base_rerun) {
@@ -774,7 +790,7 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
   }
   const before = b.passed;
   const base_failed_kept = base_cached ? [...b.failed.keys()].filter((n) => !treePassed.has(n)).sort() : [];
-  return { before, base: b, tree: { ...r, passed: treePassed }, size: { base_count: before.size + b.failed.size, tree_count: treePassed.size + r.failed.size, base_ms, tree_ms, base_cached, base_rerun, base_failed_kept } };
+  return { before, base: b, tree: { ...r, passed: treePassed }, size: { base_count: before.size + b.failed.size, tree_count: treePassed.size + r.failed.size, base_ms, tree_ms, base_cached, base_rerun, base_failed_kept, tree_cached, tree_rerun } };
 }
 // a run stopped at the bound says so as fields, beside its why
 const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
@@ -920,14 +936,17 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     const refused = typeof dir === "string" ? await suiteRefuses(t) : null;
     // the base's suite run is reused by every diff of the same base, against the same packages and runner
     const key = [made.repo, base, installIdentity(modules), Bun.version] as const;
+    // the tree's run is kept by its tree's sha the same way, under a name of its own, so the repository's one kept tree
+    // run never replaces its kept base run
+    const treeKey = [`${made.repo}#tree`, t.tree, key[2], key[3]] as const;
     const suiteDir = refused === null ? dir : { why: refused };
     // a gap whose check is the whole suite runs it once, in its check, and the suite's own verdict reads the same runs
     let runs: SuiteRuns | undefined;
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", async () => {
-      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs, key);
+      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs, key, treeKey);
       return gapCheck(t, made.repo, dir, gap, baseDir, runs);
     }) };
-    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir, suiteMs, key)));
+    const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir, suiteMs, key, treeKey)));
     // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
     // why it did not pass, and the diff, the longest field, is what is cut
     return { shape: "gitDiff", cwd, repo: made.repo, base, head: t.head, tree: t.tree, fast_forward: ff, typecheck, suite, ...check,

@@ -976,6 +976,8 @@ describe("git_land", () => {
     const again = await checkOf({ "calc.ts": fixed });
     expect(verdict(again.check)).toEqual(verdict(ok.check));
     expect(again.suite).toMatchObject({ ran: true, passed: true, base_cached: true });
+    // [MUST-FAIL] the same tree again: its run is the one kept too, beside the base's (neither replaces the other)
+    expect(again.suite).toMatchObject({ tree_cached: true, tree_rerun: false });
     // [MUST-FAIL] a new install of the repository's packages: the base is run again, against them. The installed
     // node_modules is put back as it was after.
     const mods = join(T, "runtime", "demo", "node_modules");
@@ -987,7 +989,7 @@ describe("git_land", () => {
     try {
       const fresh = await checkOf({ "calc.ts": fixed });
       expect(verdict(fresh.check)).toEqual(verdict(ok.check));
-      expect(fresh.suite).toMatchObject({ ran: true, passed: true, base_cached: false });
+      expect(fresh.suite).toMatchObject({ ran: true, passed: true, base_cached: false, tree_cached: false });
     } finally {
       rmSync(mods, { recursive: true, force: true });
       symlinkSync(real, mods);
@@ -1088,7 +1090,7 @@ describe("git_land", () => {
   }, 120000);
 
   it("[MUST-FAIL] a diff with no gap takes the owner's suite bound too: its suite stopped at it says so as fields, and the diff is made", async () => {
-    const { cwd } = await changeOf({ "notes.txt": "n\n" });
+    const { cwd } = await changeOf({ "notes.txt": "bound no gap\n" });
     const r = await diffClone(cwd, made.get(cwd)!, ["file"], null, 1);
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     // the first run made is stopped: the base's, or the tree's when an earlier diff of this base left its run kept
@@ -1106,13 +1108,14 @@ describe("git_land", () => {
       return r.suite;
     };
     await suiteOf();
-    expect(await suiteOf()).toMatchObject({ ran: true, base_cached: true });
+    // [MUST-FAIL] and its tree's run too: the same tree diffed again runs nothing
+    expect(await suiteOf()).toMatchObject({ ran: true, base_cached: true, tree_cached: true });
   }, 120000);
 
   it("[MUST-FAIL] git_diff on a walk clone takes the owner's suite_bound row for its repository", async () => {
     const owner = { id: "b1", seq: 1, shape: "suite_bound", role: "owner", repo: "demo", suite_step_ms: 1 } as Row;
     const rows = (all: Row[]) => async (q: Query) => all.filter((r) => r.shape === q.shape);
-    const { cwd } = await changeOf({ "notes.txt": "n\n" });
+    const { cwd } = await changeOf({ "notes.txt": "bound by row\n" });
     const r = await diffMade(made.get(cwd)!, null, ["file"], rows([owner]));
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     expect(r.suite).toMatchObject({ ran: false, status: "bound", ms: 1 });
@@ -1135,7 +1138,7 @@ describe("git_land", () => {
       return Response.json(pointer.type === "record_read" && pointer.shape === "suite_bound" ? [owner] : []);
     }) as typeof fetch;
     try {
-      const { cwd } = await changeOf({ "notes.txt": "n\n" });
+      const { cwd } = await changeOf({ "notes.txt": "bound from records\n" });
       const r = await diffMade(made.get(cwd)!, null, ["file"]);
       if (!("tree" in r)) throw new Error(JSON.stringify(r));
       expect(r.suite).toMatchObject({ ran: false, status: "bound", ms: 1 });
@@ -1266,6 +1269,21 @@ describe("git_land", () => {
     const hKey = ["flaky-repo", "base-sha-3", "install", "runner"];
     expect(await suiteCheck(breaksX, fBase, 60000, hKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)],
       base_cached: false, base_rerun: false });
+    // [MUST-FAIL] a tree asked again is not run again: its kept run is read, and nothing regresses
+    const [bK, tK] = [["tree-repo", "base-sha", "install", "runner"], ["tree-repo#tree", "tree-sha", "install", "runner"]];
+    expect(await suiteCheck(fTree, fBase, 60000, bK, tK)).toMatchObject({ ran: true, passed: true, tree_cached: false, tree_rerun: false });
+    expect(await suiteCheck(fTree, fBase, 60000, bK, tK)).toMatchObject({ ran: true, passed: true, base_cached: true, tree_cached: true, tree_rerun: false });
+    // [GUARD] another tree is never served a kept run: its own key runs it, and its regression is its own
+    expect(await suiteCheck(breaksX, fBase, 60000, bK, ["tree-repo#tree", "tree-sha-2", "install", "runner"])).toMatchObject({ ran: true, passed: false,
+      regressed: [expect.stringMatching(/x$/)], tree_cached: false, tree_rerun: false });
+    // [MUST-FAIL] a kept tree run that read a flaky failure is judged again on a fresh run of the tree, which passes
+    const xGreen = dirOf("x-green", 'test("x", () => {});');
+    const [bK2, tK2] = [["tree-repo-2", "base-sha", "install", "runner"], ["tree-repo-2#tree", "tree-sha", "install", "runner"]];
+    writeFileSync(flag, "1", { mode: 0o644 });
+    expect(await suiteCheck(fTree, xGreen, 60000, bK2, tK2)).toMatchObject({ ran: true, passed: false, tree_cached: false, tree_rerun: false });
+    rmSync(flag);
+    expect(await suiteCheck(fTree, xGreen, 60000, bK2, tK2)).toMatchObject({ ran: true, passed: true, regressed: [], base_cached: true, base_rerun: false,
+      tree_cached: false, tree_rerun: true });
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {
