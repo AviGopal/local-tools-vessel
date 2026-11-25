@@ -706,8 +706,10 @@ async function writeOut(t: Trusted, made: Made, work: string, ref = "refs/land/h
  * report says passed, or null when the run wrote no report. */
 async function runCheck(dir: string, testFile: string | null, report_ = "report", stepMs = STEP_MS): Promise<{ passed: Set<string> | null; failed: Map<string, string>; exit_code: number; signalled: boolean; killed: boolean; out: string }> {
   // Judged from the runner's own report, not from its output, which the tested code shares: a run that exits before the
-  // runner reports leaves no report, and does not pass.
+  // runner reports leaves no report, and does not pass. The report's directory is the same for every run of this tree,
+  // so an earlier run's report is removed first: a run again that wrote none would otherwise be read as the earlier one.
   const report = join(agentWritableDir(`${dir}-${report_}`), "junit.xml");
+  rmSync(report, { force: true });
   const r = await asShellUser([realpathSync(process.execPath), "test", ...(testFile === null ? [] : [`./${testFile}`]), "--timeout", "20000",
     "--reporter=junit", `--reporter-outfile=${report}`], dir, stepMs);
   const read = existsSync(report) ? reportOf(readFileSync(report, "utf8"), testFile === null) : null;

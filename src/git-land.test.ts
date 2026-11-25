@@ -1294,8 +1294,15 @@ describe("git_land", () => {
     rmSync(flag);
     expect(await suiteCheck(slowOff, xGreen, 4000, bK3, tK3)).toEqual({ ran: false, passed: false,
       why: "the suite did not finish on the tree within the step bound (4000 ms)", status: "bound", run: "tree", ms: 4000 });
+    // [MUST-FAIL] and a fresh run that writes no report says so, never read as a regression either
+    const exitsOff = dirOf("exits-off", `${flagged("process.exit(0);")}\ntest("x", () => { throw new Error("flaked"); });`);
+    const [bK4, tK4] = [["tree-repo-4", "base-sha", "install", "runner"], ["tree-repo-4#tree", "tree-sha", "install", "runner"]];
+    writeFileSync(flag, "1", { mode: 0o644 });
+    expect(await suiteCheck(exitsOff, xGreen, 60000, bK4, tK4)).toMatchObject({ ran: true, passed: false, tree_cached: false, tree_rerun: false });
+    rmSync(flag);
+    expect(await suiteCheck(exitsOff, xGreen, 60000, bK4, tK4)).toEqual({ ran: false, passed: false, why: "the suite's run on the tree wrote no report" });
     // [MUST-FAIL] the base's mirror: a kept base run where x passed, a tree that breaks x, and the base's fresh run is
-    // stopped at the bound: said so, never a regression read against the kept run
+    // stopped at the bound, or writes no report: said so, never a regression read against the kept run
     const onFlag = (then: string) => `if (require("node:fs").existsSync(${JSON.stringify(flag)})) ${then}`;
     const slowOn = dirOf("slow-on", `test("x", async () => { ${onFlag("await Bun.sleep(600000);")} }, 600000);`);
     const sKey = ["base-repo-5", "base-sha", "install", "runner"];
@@ -1303,6 +1310,12 @@ describe("git_land", () => {
     writeFileSync(flag, "1", { mode: 0o644 });
     expect(await suiteCheck(breaksX, slowOn, 4000, sKey)).toEqual({ ran: false, passed: false,
       why: "the suite did not finish on the base within the step bound (4000 ms)", status: "bound", run: "base", ms: 4000 });
+    rmSync(flag);
+    const exitsOn = dirOf("exits-on", `${onFlag("process.exit(0);")}\ntest("x", () => {});`);
+    const eKey = ["base-repo-6", "base-sha", "install", "runner"];
+    expect(await suiteCheck(breaksX, exitsOn, 60000, eKey)).toMatchObject({ ran: true, passed: false, base_cached: false, base_rerun: false });
+    writeFileSync(flag, "1", { mode: 0o644 });
+    expect(await suiteCheck(breaksX, exitsOn, 60000, eKey)).toEqual({ ran: false, passed: false, why: "the suite's run on the base wrote no report" });
     rmSync(flag);
   }, 120000);
 
