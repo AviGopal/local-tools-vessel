@@ -1333,6 +1333,23 @@ describe("git_land", () => {
     const ok = await diffClone(fresh.cwd, made.get(fresh.cwd)!, ["file"]);
     expect("tree" in ok && ok.fast_forward).toBe(true);
   });
+
+  it("[MUST-FAIL] a test-file check refused as already green names, as matched, only the base's tests of exactly the gap's names", async () => {
+    // a file run alone reports its tests by their own names, so its refusal reads them by equality: a nested block whose
+    // name ends in the gap's is another test, and is not matched (the whole suite's form, whose names carry the file, is
+    // read by suffix)
+    const seed = join(T, "seed");
+    g(seed, "pull", "-q", "origin", "dev");
+    writeFileSync(join(seed, "nest.test.ts"), 'import { expect, test, describe } from "bun:test";\n' +
+      'describe("add", () => { test("zero", () => { expect(1).toBe(1); }); });\n' +
+      'describe("outer", () => { describe("add", () => { test("zero", () => { expect(1).toBe(1); }); }); });\n');
+    commitAll(seed, "a nested block of the same name"); g(seed, "push", "-q", "origin", "HEAD:dev");
+    const { cwd } = await changeOf({ "own3.txt": "mine\n" });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"], { gap_id: "N1", test_file: "nest.test.ts", only_tests: ["add > zero"] });
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.check).toMatchObject({ ran: false, why: "the gap's test already passes on the base",
+      base: { exit_code: 0, matched: { "add > zero": ["add > zero"] } } });
+  }, 120000);
 });
 
 describe("git_land: the USER's protected list", () => {
