@@ -23,6 +23,7 @@ import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
 import { containmentZones } from "./write-containment.js";
+import { suiteBoundOf } from "./suite-bound.js";
 
 type Run = { stdout: string; stderr: string; exit_code: number };
 export type Deps = {
@@ -744,7 +745,7 @@ async function suiteRuns(dir: string | { why: string }, base: string | { why: st
   const { r, ms: tree_ms } = await timedRun(dir);
   if (r.killed) return stopped("tree");
   if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
-  return { before, base: b, tree: { ...r, passed: r.passed }, size: { base_count: before.size, tree_count: r.passed.size + r.failed.size, base_ms, tree_ms } };
+  return { before, base: b, tree: { ...r, passed: r.passed }, size: { base_count: before.size + b.failed.size, tree_count: r.passed.size + r.failed.size, base_ms, tree_ms } };
 }
 // a run stopped at the bound says so as fields, beside its why
 const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
@@ -837,6 +838,14 @@ async function uncommitted(cwd: string): Promise<string[] | null> {
   const r = await git(["-c", "core.fsmonitor=false", "-C", cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], tmpdir());
   if (r.exit_code !== 0) return null;
   return r.stdout.split("\0").filter((e) => e.length > 3).map((e) => e.slice(3));
+}
+
+/** git_diff on a clone git_worktree made: its diff, the whole suite's runs bounded by the owner's suite_bound row for the
+ * clone's repository when there is one (suite-bound.ts); a row that cannot be read leaves the step bound. */
+export async function diffMade(rows: (q: Query) => Promise<Row[] | { error: string }>, made: Made, gap: GapRef | null | { error: string },
+  transports?: string[]): Promise<DiffResult> {
+  const suiteBound = await suiteBoundOf(rows, made.repo).catch(() => undefined);
+  return diffClone(made.cwd, made, transports, gap, suiteBound);
 }
 
 /** The committed change of a clone git_worktree made, against origin's branch, computed where the clone cannot reach. */

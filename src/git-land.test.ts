@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { commitInClone } from "./git-commit";
-import { diffClone, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
+import { diffClone, diffMade, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
 import type { Trusted, Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
@@ -1046,6 +1046,20 @@ describe("git_land", () => {
     expect(r.check).toBeUndefined();
   }, 120000);
 
+  it("[MUST-FAIL] git_diff on a walk clone takes the owner's suite_bound row for its repository", async () => {
+    const owner = { id: "b1", seq: 1, shape: "suite_bound", role: "owner", repo: "demo", suite_step_ms: 1 } as Row;
+    const rows = (all: Row[]) => async (q: Query) => all.filter((r) => r.shape === q.shape);
+    const { cwd } = await changeOf({ "notes.txt": "n\n" });
+    const r = await diffMade(rows([owner]), made.get(cwd)!, null, ["file"]);
+    if (!("tree" in r)) throw new Error(JSON.stringify(r));
+    expect(r.suite).toMatchObject({ ran: false, status: "bound", ms: 1 });
+    // [GUARD] no row: the step bound holds, and the suite runs to its end
+    const { cwd: again } = await changeOf({ "notes.txt": "n\n" });
+    const d = await diffMade(rows([]), made.get(again)!, null, ["file"]);
+    if (!("tree" in d)) throw new Error(JSON.stringify(d));
+    expect(d.suite).toMatchObject({ ran: true });
+  }, 120000);
+
   it("[MUST-FAIL] a change of no gap cannot write the suite's report or choose how the suite runs: a test, a preload, or bunfig alone", async () => {
     // the base from the cases above, with a preload the base's bunfig names
     const seed = join(T, "seed");
@@ -1125,6 +1139,12 @@ describe("git_land", () => {
     expect(sized).toMatchObject({ ran: true, base_count: 1, tree_count: 2 });
     expect([typeof (sized as { base_ms?: unknown }).base_ms, typeof (sized as { tree_ms?: unknown }).tree_ms]).toEqual(["number", "number"]);
     expect("status" in sized).toBe(false);
+    // each side counts every test its run reported, passed or failed: a base with a red test counts it
+    expect(await suiteCheck(ok, two, 60000)).toMatchObject({ ran: true, base_count: 2, tree_count: 1 });
+    // each run's ms is its own: a base whose test sleeps takes longer than the tree's
+    const slow = dirOf("slow", 'test("s", async () => { await Bun.sleep(1500); });');
+    const timed = await suiteCheck(ok, slow, 60000) as { base_ms: number; tree_ms: number };
+    expect(timed.base_ms - timed.tree_ms).toBeGreaterThanOrEqual(1000);
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {
