@@ -135,4 +135,43 @@ describe("walk failure classes", () => {
     // another waits_for value is a failure the detector sees too
     expect(classesOf(call("w4", "git_land", {}, { status: 403, blames: "callee", waits_for: "something-new", body: "x" })).map((c) => c.tool)).toEqual(["git_land"])
   })
+
+  // an fs_edit miss as the walk writes it: the file's own lines in the body, the tool's class as a field
+  const miss = (root: string, path: string, lines: string, klass: unknown) =>
+    call(root, "fs_edit", { path, old_string: "anchor", new_string: "x" }, { status: 200, blames: "request", class: klass,
+      body: JSON.stringify({ current: lines, error: `old_string not found in file. current is lines 3-9 of ${lines.length} of ${path}` }) })
+
+  test("[MUST-FAIL] a tool that names its failure's class is classed by it: misses showing different lines of different files are one class", () => {
+    const k = classesOf([...miss("w1", "/trees/a/src/index.ts", "const a = 1\nconst b = 2", "anchor_mismatch"),
+      ...miss("w2", "/trees/b/src/x.ts", "export const f = () => g()", "anchor_mismatch")])
+    expect(k).toHaveLength(1)
+    expect(k[0]).toMatchObject({ tool: "fs_edit", class: "anchor_mismatch", signature: "", roots: ["w1", "w2"] })
+    expect(k[0].example).toContain("old_string not found") // the tool's own words are still its example
+  })
+
+  test("[MUST-FAIL] two classes the tool names are two classes, though their bodies sign alike", () => {
+    const k = classesOf([...miss("w1", "/trees/a/f.ts", "same", "anchor_mismatch"), ...miss("w2", "/trees/a/f.ts", "same", "no_resemblance")])
+    expect(k.map((c) => c.class).sort()).toEqual(["anchor_mismatch", "no_resemblance"])
+  })
+
+  test("[GUARD] a failure naming no class (or an empty or non-string one) keeps the key it had: tool, fields, signature", () => {
+    for (const klass of [undefined, "", 3]) {
+      const [k] = classesOf(miss("w1", "/trees/a/f.ts", "x", klass))
+      const signature = k.signature
+      expect(signature).not.toBe("")
+      const key = new Bun.CryptoHasher("sha256").update(JSON.stringify(["fs_edit", undefined, undefined, "request", undefined, "200", signature])).digest("hex").slice(0, 24)
+      expect([k.key, k.class]).toEqual([key, undefined])
+    }
+  })
+
+  test("[GUARD] a produce's class field is a model's word: produce failures are classed by their fields alone, as before", () => {
+    const produce = (root: string, klass: string) => {
+      const s = { id: `s${++n}`, seq: n, shape: "selection", role: "walk", root, a: "produce/answer/ch1" }
+      const h = { id: `h${++n}`, seq: n, shape: "hop", role: "walk", phase: "started", kind: "produce", selection_ref: s.id, call_id: `c${n}`, pointer_type: "answer" }
+      return [s, h, { id: `f${++n}`, seq: n, shape: "failure", role: "walk", selection_ref: s.id, call_id: h.call_id, status: 422, body: "x", class: klass }]
+    }
+    const k = classesOf([...produce("w1", "anchor_mismatch"), ...produce("w2", "whatever")])
+    expect(k).toHaveLength(1)
+    expect(k[0].class).toBeUndefined()
+  })
 })

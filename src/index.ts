@@ -554,9 +554,12 @@ const fsEdit: ResolverHandler = async (ctx) => {
       }
       if (bestScore < 2) idx = -1;
     }
+    // Which kind of miss this was is said as a field, `class`, read by equality wherever the answer goes (the walk lifts it
+    // onto its failure row before cutting the body): the words around it carry the file's own lines and numbers, which
+    // differ on every call.
     if (idx === -1) {
       return { error: `old_string not found in file. NOTHING resembling your anchor occurs in this ${lines.length}-line file — you are` +
-        ` editing from memory, not from the file. Call fs_read on ${path} and copy an EXACT substring.`, path };
+        ` editing from memory, not from the file. Call fs_read on ${path} and copy an EXACT substring.`, path, class: "no_resemblance" };
     }
     // The file's own lines over the span the anchor claims (its first line's match, and as many lines as the anchor has,
     // with two around), VERBATIM and FIRST in the answer: the walk keeps only the start of a refusal (1000 characters of
@@ -572,6 +575,7 @@ const fsEdit: ResolverHandler = async (ctx) => {
       error: `old_string not found in file. current is lines ${from + 1}-${to} of ${lines.length} of ${path} as they are now,` +
         ` verbatim: copy old_string from it exactly, including indentation.`,
       path,
+      class: "anchor_mismatch",
     };
   } catch (e) { return { error: (e as Error).message }; }
 };

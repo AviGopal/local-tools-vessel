@@ -47,4 +47,25 @@ describe("a missed edit", () => {
     expect("current" in out).toBe(false);
     expect(String(out.error)).toContain("NOTHING resembling your anchor");
   });
+
+  it("[MUST-FAIL] says which kind of miss it was as a field: anchor_mismatch with lines, no_resemblance without", async () => {
+    const { resolvers } = await import("./index");
+    const edit = resolvers.get("fs_edit")!;
+    const at = (old_string: string) => edit({ body: { impulse: { pointer: { path: file, old_string, new_string: "x" } } } } as never) as Promise<Record<string, unknown>>;
+    const near = await at(`  const value40 = compute(40, "item-40"); // line 41\n  const invented = true;`);
+    expect([Object.keys(near)[0], near.class]).toEqual(["current", "anchor_mismatch"]); // the lines still lead
+    expect((await at("zzzz qqqq wwww")).class).toBe("no_resemblance");
+  });
+
+  it("an edit that applies, or a file that is not there, names no miss class (a guard)", async () => {
+    const { resolvers } = await import("./index");
+    const edit = resolvers.get("fs_edit")!;
+    const missing = (await edit({ body: { impulse: { pointer: { path: join(dir, "absent.ts"), old_string: "a", new_string: "b" } } } } as never)) as Record<string, unknown>;
+    expect(missing.class).toBeUndefined();
+    const copy = join(dir, "copy.ts");
+    writeFileSync(copy, "const a = 1\n");
+    const ok = (await edit({ body: { impulse: { pointer: { path: copy, old_string: "const a = 1", new_string: "const a = 2" } } } } as never)) as Record<string, unknown>;
+    expect(ok.error).toBeUndefined();
+    expect(ok.class).toBeUndefined();
+  });
 });

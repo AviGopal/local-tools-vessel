@@ -13,7 +13,7 @@ export const STALL = "stall"
 export const UNUSED = "unused"
 export const useOf = (s: Row): unknown => (s.use as { r?: unknown } | undefined)?.r
 export type ClassKey = string
-export type Klass = { key: ClassKey; tool: string; kind?: string; refused?: string; blames?: string; waits_for?: string;
+export type Klass = { key: ClassKey; tool: string; class?: string; kind?: string; refused?: string; blames?: string; waits_for?: string;
   status_band: string; signature: string; example: string; failures: string[]; roots: string[]; first_seq: number; last_seq: number; infra: boolean }
 
 // Whom a failure blames is records' to say: it stamps blames on every walk failure row it stores (fold.ts blames), and
@@ -81,17 +81,23 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     // it is classed by its fields alone (the step's kind of failure: refused, blames, status), never by its body. A tool's
     // failure is what the tool said, classed by its body with the call's own values named.
     const produce = String(sel?.a ?? "").startsWith("produce/") || h?.kind === "produce"
-    const signature = produce ? "" : signatureOf(body, known)
+    // A tool that names the class of its own failure (the walk keeps it as the row's class field) is classed by that name
+    // and its fields, not by its body: the tool says which failures are the same, so any tool can say so with no change
+    // here, and its body's per-call words (a file's own lines, a line count) never split one class into many.
+    const named = !produce && typeof f.class === "string" && f.class !== "" ? f.class : undefined
+    const signature = produce || named !== undefined ? "" : signatureOf(body, known)
     // Nor does its example carry those words: a gap row is a root producers read, and a model's quoted text there would
     // be handed on as if it were the failure. A tool's body is the tool's own words.
     const example = produce ? "" : body.slice(0, 500)
     const fields = { kind: f.kind, refused: f.refused, blames: blamesOf(f), waits_for: f.waits_for } as Record<string, unknown>
     const s = (k: string) => typeof fields[k] === "string" ? String(fields[k]) : undefined
-    const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([tool, s("kind"), s("refused"), s("blames"), s("waits_for"), band(f.status), signature])).digest("hex").slice(0, 24)
+    const key = new Bun.CryptoHasher("sha256").update(JSON.stringify(named !== undefined
+      ? [tool, named, s("kind"), s("refused"), s("blames"), s("waits_for"), band(f.status)]
+      : [tool, s("kind"), s("refused"), s("blames"), s("waits_for"), band(f.status), signature])).digest("hex").slice(0, 24)
     // A failure whose selection names no root is counted under its move (the template or call it ran), never dropped.
     const root = typeof sel?.root === "string" && sel.root !== "" ? sel.root : `move:${String(sel?.a ?? tool)}`
     if (ownRoots.get(key)?.has(root) === true) continue
-    const k = out.get(key) ?? { key, tool, kind: s("kind"), refused: s("refused"), blames: s("blames"), waits_for: s("waits_for"), status_band: band(f.status),
+    const k = out.get(key) ?? { key, tool, ...(named !== undefined ? { class: named } : {}), kind: s("kind"), refused: s("refused"), blames: s("blames"), waits_for: s("waits_for"), status_band: band(f.status),
       signature, example, failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamesOf(f) === "callee" }
     k.failures.push(f.id)
     if (root !== "" && !k.roots.includes(root)) k.roots.push(root)
