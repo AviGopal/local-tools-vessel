@@ -21,7 +21,7 @@ chmodSync(T, 0o755);
 const OUT = join(T, "out");
 mkdirSync(OUT);
 chmodSync(OUT, 0o777);
-const ENV_KEYS = ["SUPER_REPO_DIR", "GATE_PUBLIC_DIR", "MITOSIS_PUSH_CLONE_DIR", "MITOSIS_RUNTIME_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
+const ENV_KEYS = ["SUPER_REPO_DIR", "PULLSYNC_GATE_PUBLIC_DIR", "MITOSIS_PUSH_CLONE_DIR", "MITOSIS_RUNTIME_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const g = (cwd: string, ...args: string[]) => {
@@ -85,7 +85,7 @@ const personOn = (tree: string, id: string, extra: Record<string, unknown> = {})
 
 beforeAll(() => {
   mkdirSync(GATE_PUBLIC); marker(UNGATED);
-  Object.assign(process.env, { SUPER_REPO_DIR: SUPER, GATE_PUBLIC_DIR: GATE_PUBLIC, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
+  Object.assign(process.env, { SUPER_REPO_DIR: SUPER, PULLSYNC_GATE_PUBLIC_DIR: GATE_PUBLIC, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
   // demo's install on this node: this vessel's own, which carries the TypeScript compiler
   mkdirSync(join(T, "runtime", "demo"), { recursive: true });
   symlinkSync(join(import.meta.dir, "..", "node_modules"), join(T, "runtime", "demo", "node_modules"));
@@ -1345,6 +1345,22 @@ describe("git_commit and git_land: a vessel's change is judged by the list curre
       } finally { restore(); }
     });
   }
+
+  it("[GUARD] a super-repo change is judged by the list at its super base, not the current one: a path only the accepted list names commits", async () => {
+    try {
+      scopeAt(BASE_LIST, "the list a super clone is made under");
+      const s = await makeWorktree("super");
+      if ("error" in s) throw new Error(s.error);
+      made.set(s.cwd, s); asOwner(s.cwd);
+      const accepted = scopeAt([...BASE_LIST, "docs/"], "the accepted list protects docs/");
+      marker({ schema: 1, gated: true, source: "accepted", accepted_sha: accepted });
+      mkdirSync(join(s.cwd, "docs"), { recursive: true });
+      writeFileSync(join(s.cwd, "docs", "a.md"), "a\n");
+      const c = await commitInClone(s.cwd, "a doc", undefined, find) as { error?: string; out_of_reach?: string[]; sha?: string };
+      expect(c.out_of_reach).toBeUndefined();
+      expect(c.error).toBeUndefined();
+    } finally { restore(); }
+  });
 
   it("[MUST-FAIL] an accepted commit that holds no list refuses the commit, never reads another commit's list", async () => {
     try {

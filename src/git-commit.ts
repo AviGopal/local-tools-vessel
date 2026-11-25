@@ -98,8 +98,9 @@ export async function protectedListAt(read: (path: string) => Promise<string | n
  * That refusal is the node's state, not the change's: it says unserved protect_list, so records blames the callee and no
  * request's chain is debited for a list nobody could read (as git_land's unserved repository).
  */
+// Where pull-sync writes it: read by pull-sync's own name and default, so a node that moves the dir moves it for both.
 export function gatePublicDir(env: Record<string, string | undefined> = process.env): string {
-  return env.GATE_PUBLIC_DIR?.trim() || "/workspace/.gate-public";
+  return env.PULLSYNC_GATE_PUBLIC_DIR?.trim() || "/workspace/.gate-public";
 }
 export async function currentProtectedList(superDir: string, dir = gatePublicDir()): Promise<{ excluded: string[] } | { error: string; unserved: "protect_list" }> {
   const none = (why: string) => ({ error: `the current protected list cannot be read (${why}): nothing lands without it`, unserved: "protect_list" as const });
