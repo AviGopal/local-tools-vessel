@@ -894,7 +894,8 @@ describe("git_land", () => {
     expect(await check({ "calc.ts": breaks })).toMatchObject({ ran: true, passed: false, regressed: ["add > zero"] });
     // a gap whose named test already passes on the base: nothing for the check to tell
     expect(await check({ "calc.ts": fixed }, { ...gap, only_tests: ["add > zero"] }))
-      .toEqual({ gap_id: "G1", test_file: "calc.test.ts", ran: false, passed: false, why: "the gap's test already passes on the base" });
+      .toEqual({ gap_id: "G1", test_file: "calc.test.ts", ran: false, passed: false, why: "the gap's test already passes on the base",
+        base: { exit_code: 1, matched: { "add > zero": ["add > zero"] }, out: expect.stringContaining("add > adds"), truncated: false, uid: expect.any(Number) } });
     // the base's result is read before anything of the change runs: a change that rewrites the base's report, as if
     // nothing had passed there, still has its red test counted
     const forge = 'import { writeFileSync } from "node:fs";\ntry { writeFileSync("../base-report/" + "jun" + "it.xml", "<testsuites></testsuites>"); } catch {}\n' + breaks;
@@ -996,10 +997,15 @@ describe("git_land", () => {
     // [MUST-FAIL] a name written whole, its file included (as a person may file it), is that test: green on the base,
     // so there is nothing for the check to tell
     expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["life.test.ts > life > adding zero keeps the number"] })).check)
-      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
+      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base", base: expect.objectContaining({
+        exit_code: 1, matched: { "life.test.ts > life > adding zero keeps the number": ["life.test.ts > life > adding zero keeps the number"] } }) });
     // a gap whose named tests already pass on the base: nothing for the check to tell
+    // [MUST-FAIL] the refusal keeps the base's run as data: the report's tests each name matched, its exit, its output's
+    // end, and the user it ran as
     expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: ["add > zero"] })).check)
-      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
+      .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base", base: {
+        exit_code: 1, matched: { "add > zero": [expect.stringMatching(/calc\.test\.ts > add > zero$/)] }, out: expect.stringContaining("add > adds"),
+        truncated: false, uid: process.getuid?.() === 0 ? 65534 : (process.getuid?.() ?? -1) } });
     // no names: the suite's exit, red on the base and green on the tree
     expect((await checkOf({ "calc.ts": fixed }, { ...gap, only_tests: [] })).check).toMatchObject({ ran: true, passed: true });
     expect((await checkOf({ "notes.txt": "n\n" }, { ...gap, only_tests: [] })).check).toMatchObject({ ran: true, passed: false });
@@ -1014,7 +1020,8 @@ describe("git_land", () => {
     commitAll(seed, "a green base"); g(seed, "push", "-q", "origin", "HEAD:dev");
     try {
       expect((await checkOf({ "notes.txt": "n\n" }, { ...gap, only_tests: [] })).check)
-        .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base" });
+        .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base",
+          base: expect.objectContaining({ exit_code: 0, matched: {} }) });
     } finally {
       writeFileSync(join(seed, "calc.ts"), "export const add = (a: number, b: number): number => a - b;\n");
       commitAll(seed, "the base as it was"); g(seed, "push", "-q", "origin", "HEAD:dev");
