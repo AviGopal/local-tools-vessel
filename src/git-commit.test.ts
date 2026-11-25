@@ -18,7 +18,7 @@ const OUT = join(T, "out");
 mkdirSync(OUT);
 chmodSync(OUT, 0o777);
 const PAT = "pat-value-that-must-not-reach-a-hook";
-const ENV_KEYS = ["DISCOVERY_ENDPOINT", "GITHUB_PUSH_TOKEN", "SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
+const ENV_KEYS = ["DISCOVERY_ENDPOINT", "GITHUB_PUSH_TOKEN", "SUPER_REPO_DIR", "GATE_PUBLIC_DIR", "MITOSIS_PUSH_CLONE_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const realFetch = globalThis.fetch;
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -42,6 +42,8 @@ const hook = (name: string, extra = "") =>
   `[ -e LEAKY ] && { cat LEAKY; [ -e OLD ] && cat OLD; echo "hook refused: a finding in LEAKY"; cat LEAKY >&2; echo "hook refused on stderr" >&2; exit 1; }\nexit 0\n`;
 const SUPER = join(T, "super");
 const CLONES = join(T, "clones");
+// An ungated node's gate-public marker: a vessel's commit is judged by the list at the super clone's committed HEAD.
+const GATE_PUBLIC = join(T, "gate-public");
 
 const made = new Map<string, Made>();
 const find = async (cwd: string) => made.get(cwd) ?? { error: `0 walk rows record a clone made at ${cwd}` };
@@ -54,7 +56,9 @@ const clone = async (repo: string): Promise<string> => {
 };
 
 beforeAll(() => {
-  Object.assign(process.env, { DISCOVERY_ENDPOINT: "http://discovery.test", GITHUB_PUSH_TOKEN: PAT, SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: CLONES, WALK_TREES_DIR: join(T, "trees") });
+  mkdirSync(GATE_PUBLIC);
+  writeFileSync(join(GATE_PUBLIC, "source.json"), JSON.stringify({ schema: 1, gated: false, source: "clone", accepted_sha: null }) + "\n");
+  Object.assign(process.env, { DISCOVERY_ENDPOINT: "http://discovery.test", GITHUB_PUSH_TOKEN: PAT, SUPER_REPO_DIR: SUPER, GATE_PUBLIC_DIR: GATE_PUBLIC, MITOSIS_PUSH_CLONE_DIR: CLONES, WALK_TREES_DIR: join(T, "trees") });
   for (const [k, v] of Object.entries(gitEnv)) if (k.startsWith("GIT_")) process.env[k] = v;
   mkdirSync(join(SUPER, "scripts", "git-hooks"), { recursive: true });
   g(SUPER, "init", "-q", "-b", "dev");

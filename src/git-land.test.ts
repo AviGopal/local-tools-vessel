@@ -21,7 +21,7 @@ chmodSync(T, 0o755);
 const OUT = join(T, "out");
 mkdirSync(OUT);
 chmodSync(OUT, 0o777);
-const ENV_KEYS = ["SUPER_REPO_DIR", "MITOSIS_PUSH_CLONE_DIR", "MITOSIS_RUNTIME_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
+const ENV_KEYS = ["SUPER_REPO_DIR", "GATE_PUBLIC_DIR", "MITOSIS_PUSH_CLONE_DIR", "MITOSIS_RUNTIME_DIR", "WALK_TREES_DIR", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "PATH"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const gitEnv = { PATH: process.env.PATH ?? "", HOME: T, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const g = (cwd: string, ...args: string[]) => {
@@ -42,6 +42,11 @@ const COPY = join(T, "clones", "demo");
 const CONFIG = 'title = "t"\n\n[extend]\nuseDefault = true\n\n[[rules]]\nid = "substrate-api-key"\nregex = \'\'\'\\bmb[-_][A-Za-z0-9_-]{32,}\'\'\'\n';
 
 const SCOPE = (excluded: string[]) => JSON.stringify({ autonomyScope: { excluded_paths: excluded } }) + "\n";
+// The gate-public dir pull-sync publishes on a node: its marker names the super commit the gate accepted (gated) or
+// vouches for the super clone's committed HEAD (ungated). An ungated node's marker by default; a leg names another.
+const GATE_PUBLIC = join(T, "gate-public");
+const UNGATED = { schema: 1, gated: false, source: "clone", accepted_sha: null };
+const marker = (m: unknown) => writeFileSync(join(GATE_PUBLIC, "source.json"), typeof m === "string" ? m : JSON.stringify(m) + "\n");
 
 const made = new Map<string, Made>();
 const find = async (cwd: string) => made.get(cwd) ?? { error: "0 walk rows" };
@@ -79,7 +84,8 @@ const personOn = (tree: string, id: string, extra: Record<string, unknown> = {})
 ];
 
 beforeAll(() => {
-  Object.assign(process.env, { SUPER_REPO_DIR: SUPER, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
+  mkdirSync(GATE_PUBLIC); marker(UNGATED);
+  Object.assign(process.env, { SUPER_REPO_DIR: SUPER, GATE_PUBLIC_DIR: GATE_PUBLIC, MITOSIS_PUSH_CLONE_DIR: join(T, "clones"), MITOSIS_RUNTIME_DIR: join(T, "runtime"), WALK_TREES_DIR: join(T, "trees") });
   // demo's install on this node: this vessel's own, which carries the TypeScript compiler
   mkdirSync(join(T, "runtime", "demo"), { recursive: true });
   symlinkSync(join(import.meta.dir, "..", "node_modules"), join(T, "runtime", "demo", "node_modules"));
@@ -1214,11 +1220,10 @@ describe("git_land: the USER's protected list", () => {
     }
   });
 
-  it("[MUST-FAIL] git_land reads a super-repo change's list at origin, and a vessel's at the super base: never the change", async () => {
+  it("[MUST-FAIL] git_land reads a super-repo change's list at origin, and a vessel's as the current list: never the change, never the clone's base", async () => {
     const { listSourceFor } = await import("./git-land");
-    expect(listSourceFor({ repo: "super", super_base: "s".repeat(40) }, "refs/remotes/origin/dev")).toMatchObject({ in: "trusted", ref: "refs/remotes/origin/dev" });
-    expect(listSourceFor({ repo: "demo", super_base: "s".repeat(40) }, "refs/remotes/origin/dev")).toMatchObject({ in: "super", ref: "s".repeat(40) });
-    for (const repo of ["super", "demo"]) expect(listSourceFor({ repo, super_base: "s".repeat(40) }, "refs/remotes/origin/dev").ref).not.toContain("refs/land/head");
+    expect(listSourceFor({ repo: "super" }, "refs/remotes/origin/dev")).toEqual({ in: "trusted", ref: "refs/remotes/origin/dev", where: "origin" });
+    expect(listSourceFor({ repo: "demo" }, "refs/remotes/origin/dev")).toEqual({ in: "current" });
   });
 
   it("[MUST-FAIL] the list is read at the base: a change that drops an entry is judged by the list it would replace", async () => {
@@ -1240,6 +1245,180 @@ describe("git_land: the USER's protected list", () => {
     // an empty or missing list is an error, never no hits
     expect("error" in (await protectedListAt(async () => null, "base"))).toBe(true);
     expect("error" in (await protectedListAt(async () => SCOPE([]), "base"))).toBe(true);
+  });
+});
+
+describe("git_commit and git_land: a vessel's change is judged by the list current now, not its clone's base", () => {
+  const graderOn = (tree: string, id: string): Row[] => [ask,
+    { id: `gd-${id}`, shape: "gitDiff", role: "walk", repo: "demo", tree, input_refs: ["ask1"], typecheck: TC_OK, suite: SUITE_OK } as Row,
+    { id, shape: "land_verdict", repo: "demo", tree, role: "described", r: 1, input_refs: ["ask1", `gd-${id}`] } as Row];
+  const BASE_LIST = ["scripts/substrate/", ".claude/", "repos/demo/protected/"];
+  const scopeAt = (excluded: string[], m: string): string => {
+    // a leg may have removed the list, and git with it the emptied directory
+    mkdirSync(join(SUPER, "scripts", "substrate"), { recursive: true });
+    writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), SCOPE(excluded));
+    // a commit even when the list is as it was: each names its own point in the super's history
+    g(SUPER, "add", "-A"); g(SUPER, "commit", "-q", "--allow-empty", "-m", m);
+    return g(SUPER, "rev-parse", "HEAD");
+  };
+  /** A clone made while the super base's list is `atBase`, then the gate accepts a super commit whose list is `now`. */
+  const cloneThenList = async (atBase: string[], now: string[]): Promise<{ cwd: string; accepted: string }> => {
+    scopeAt(atBase, "the list a clone is made under");
+    g(COPY, "pull", "-q", "origin", "dev");
+    const w = await makeWorktree("demo");
+    if ("error" in w) throw new Error(w.error);
+    made.set(w.cwd, w); asOwner(w.cwd);
+    const accepted = scopeAt(now, "the list the gate accepts later");
+    expect(w.super_base).not.toBe(accepted);
+    marker({ schema: 1, gated: true, source: "accepted", accepted_sha: accepted });
+    return { cwd: w.cwd, accepted };
+  };
+  const put = (cwd: string, file: string) => { mkdirSync(join(cwd, file, ".."), { recursive: true }); writeFileSync(join(cwd, file), `export const v = "${file}"\n`); };
+  const restore = () => { marker(UNGATED); scopeAt(BASE_LIST, "list restored"); };
+
+  // a vessel's main file the person unprotected, in a clone made while its super base still listed it
+  scanned("[MUST-FAIL] a path the person unprotected after the clone was made commits, and lands on a grader's r 1", async () => {
+    try {
+      const { cwd } = await cloneThenList([...BASE_LIST, "repos/demo/src/index.ts"], BASE_LIST);
+      put(cwd, "src/index.ts");
+      const c = await commitInClone(cwd, "fix index", undefined, find) as { error?: string; out_of_reach?: string[]; tree?: string };
+      expect(c.error).toBeUndefined();
+      expect(c.out_of_reach).toBeUndefined();
+      table = graderOn(String(c.tree), "cl1");
+      expect("pushed" in (await landClone(cwd, deps))).toBe(true);
+    } finally { restore(); }
+  });
+
+  scanned("[GUARD] a path still on the current list is refused at commit and at land", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
+      put(cwd, "protected/y.ts");
+      const c = await commitInClone(cwd, "y", undefined, find) as { error?: string; out_of_reach?: string[] };
+      expect(c.out_of_reach).toEqual(["protected/y.ts (protected: repos/demo/protected/)"]);
+      commitAll(cwd, "slipped in by hand");
+      table = graderOn(g(cwd, "rev-parse", "HEAD^{tree}"), "cl2");
+      const r = await landClone(cwd, deps) as { error?: string; out_of_reach?: string[] };
+      expect(r.out_of_reach).toEqual(["protected/y.ts (protected: repos/demo/protected/)"]);
+    } finally { restore(); }
+  });
+
+  scanned("[MUST-FAIL] a path protected after the clone was made is refused at commit and at land", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, [...BASE_LIST, "repos/demo/later/"]);
+      put(cwd, "later/z.ts");
+      const c = await commitInClone(cwd, "z", undefined, find) as { error?: string; out_of_reach?: string[] };
+      expect(c.out_of_reach).toEqual(["later/z.ts (protected: repos/demo/later/)"]);
+      commitAll(cwd, "slipped in by hand");
+      table = graderOn(g(cwd, "rev-parse", "HEAD^{tree}"), "cl3");
+      const r = await landClone(cwd, deps) as { error?: string; out_of_reach?: string[] };
+      expect(r.out_of_reach).toEqual(["later/z.ts (protected: repos/demo/later/)"]);
+    } finally { restore(); }
+  });
+
+  // Each marker or list state that vouches for no current list refuses the commit, never the clone's base read instead
+  // (the base here protects nothing the change touches, so a fallback would commit).
+  const NO_LIST: Array<[string, (accepted: string) => unknown]> = [
+    ["no marker", () => null],
+    ["a marker that is not JSON", () => "{ not json"],
+    ["a marker that is not an object", () => [1]],
+    ["another schema", (a) => ({ schema: 2, gated: true, source: "accepted", accepted_sha: a })],
+    ["no schema", (a) => ({ gated: true, source: "accepted", accepted_sha: a })],
+    ["gated with no usable accepted copy (source none), though it names a commit the clone holds", (a) => ({ schema: 1, gated: true, source: "none", accepted_sha: a })],
+    ["gated, source clone, though it names a commit the clone holds", (a) => ({ schema: 1, gated: true, source: "clone", accepted_sha: a })],
+    ["ungated, source accepted", (a) => ({ schema: 1, gated: false, source: "accepted", accepted_sha: a })],
+    ["an accepted sha that is not 40 hex", (a) => ({ schema: 1, gated: true, source: "accepted", accepted_sha: a.slice(0, 12) })],
+    ["an accepted sha in capitals", (a) => ({ schema: 1, gated: true, source: "accepted", accepted_sha: a.toUpperCase() })],
+    ["an accepted commit the super clone does not hold", () => ({ schema: 1, gated: true, source: "accepted", accepted_sha: "0".repeat(40) })],
+  ];
+  for (const [name, m] of NO_LIST) {
+    it(`[MUST-FAIL] ${name}: the current list cannot be read and the commit is refused`, async () => {
+      try {
+        const { cwd, accepted } = await cloneThenList(BASE_LIST, BASE_LIST);
+        const v = m(accepted);
+        if (v === null) rmSync(join(GATE_PUBLIC, "source.json")); else marker(v);
+        put(cwd, "free.ts");
+        const c = await commitInClone(cwd, "free", undefined, find) as { error?: string; sha?: string; unserved?: string };
+        expect(c.sha).toBeUndefined();
+        expect(String(c.error)).toContain("the current protected list cannot be read");
+        // the node's state, not the change's: records blames the callee, and no request's chain is debited
+        expect(c.unserved).toBe("protect_list");
+      } finally { restore(); }
+    });
+  }
+
+  it("[MUST-FAIL] an accepted commit that holds no list refuses the commit, never reads another commit's list", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
+      g(SUPER, "rm", "-q", "scripts/substrate/autonomy-scope.json");
+      g(SUPER, "commit", "-q", "-m", "an accepted commit with no list");
+      marker({ schema: 1, gated: true, source: "accepted", accepted_sha: g(SUPER, "rev-parse", "HEAD") });
+      // the clone's HEAD holds a list again, so reading anything but the accepted commit would find one
+      scopeAt(BASE_LIST, "the list back after the accepted commit");
+      put(cwd, "free.ts");
+      const c = await commitInClone(cwd, "free", undefined, find) as { error?: string; sha?: string; unserved?: string };
+      expect(c.sha).toBeUndefined();
+      expect(c.unserved).toBe("protect_list");
+    } finally { restore(); }
+  });
+
+  it("[MUST-FAIL] an accepted commit the super clone has not fetched is said as that", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
+      marker({ schema: 1, gated: true, source: "accepted", accepted_sha: "0".repeat(40) });
+      put(cwd, "free.ts");
+      const c = await commitInClone(cwd, "free", undefined, find) as { error?: string };
+      expect(String(c.error)).toContain(`the super-repo clone does not hold the accepted commit ${"0".repeat(12)}`);
+    } finally { restore(); }
+  });
+
+  scanned("[MUST-FAIL] with no current list, git_land refuses as the node's state: unserved protect_list, nothing pushed", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
+      put(cwd, "free2.ts");
+      const c = await commitInClone(cwd, "free2", undefined, find) as { tree?: string };
+      table = graderOn(String(c.tree), "cl4");
+      rmSync(join(GATE_PUBLIC, "source.json"));
+      const before = originHead();
+      const r = await landClone(cwd, deps) as { error?: string; unserved?: string; out_of_reach?: string[] };
+      expect(String(r.error)).toContain("the current protected list cannot be read");
+      expect(r.unserved).toBe("protect_list");
+      expect(r.out_of_reach).toBeUndefined();
+      expect(originHead()).toBe(before);
+    } finally { restore(); }
+  });
+
+  it("[MUST-FAIL] an accepted commit whose list is not readable refuses the commit", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
+      writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), "{ not json\n");
+      commitAll(SUPER, "an unreadable list accepted");
+      marker({ schema: 1, gated: true, source: "accepted", accepted_sha: g(SUPER, "rev-parse", "HEAD") });
+      put(cwd, "free.ts");
+      const c = await commitInClone(cwd, "free", undefined, find) as { error?: string; sha?: string };
+      expect(c.sha).toBeUndefined();
+      expect(String(c.error)).toContain("protected list");
+    } finally { restore(); }
+  });
+
+  it("[MUST-FAIL] ungated, the list is read at the super clone's committed HEAD, never its working tree, and counts only when it protects itself", async () => {
+    try {
+      const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
+      marker(UNGATED);
+      // committed HEAD protects later/; a working-tree edit dropping it is not read
+      scopeAt([...BASE_LIST, "repos/demo/later/"], "ungated HEAD protects later/");
+      writeFileSync(join(SUPER, "scripts", "substrate", "autonomy-scope.json"), SCOPE(BASE_LIST));
+      put(cwd, "later/w.ts");
+      const c = await commitInClone(cwd, "w", undefined, find) as { error?: string; out_of_reach?: string[] };
+      expect(c.out_of_reach).toEqual(["later/w.ts (protected: repos/demo/later/)"]);
+      // a committed HEAD list that does not name its own path is no list
+      scopeAt([".claude/", "repos/demo/protected/"], "ungated HEAD drops its own path");
+      rmSync(join(cwd, "later"), { recursive: true, force: true });
+      put(cwd, "free.ts");
+      const d = await commitInClone(cwd, "free", undefined, find) as { error?: string; sha?: string; unserved?: string };
+      expect(d.sha).toBeUndefined();
+      expect(d.unserved).toBe("protect_list");
+      expect(String(d.error)).toContain("does not protect scripts/substrate/autonomy-scope.json itself");
+    } finally { restore(); }
   });
 });
 

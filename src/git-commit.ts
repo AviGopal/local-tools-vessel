@@ -86,6 +86,47 @@ export async function protectedListAt(read: (path: string) => Promise<string | n
 }
 
 /**
+ * THE CURRENT PROTECTED LIST, for a vessel's change: the list as the node's gate vouches for it now, never as the super
+ * base the clone was made from. A clone outlives a change of the list: read at its base, a path the person unprotected
+ * stayed refused in every older clone, and a path protected later reached none made before it. This vessel cannot read
+ * the gate; pull-sync, the one writer of the gate-public dir (read-only to every unit), names there which super commit
+ * the gate accepted (source.json). The list is read at that commit in the super-repo clone, so its bytes are the ones
+ * the gate accepted whatever the clone's HEAD is. Ungated, the marker vouches for the clone's committed HEAD, which
+ * moves on every fetch, so its list counts only when it protects its own path: then no change the walk makes alone can
+ * loosen it. Anything else (no marker, another schema, a copy it does not vouch for, an accepted commit the clone does
+ * not hold, a list that cannot be read) is no list, and nothing lands without one: never the clone's base instead.
+ * That refusal is the node's state, not the change's: it says unserved protect_list, so records blames the callee and no
+ * request's chain is debited for a list nobody could read (as git_land's unserved repository).
+ */
+export function gatePublicDir(env: Record<string, string | undefined> = process.env): string {
+  return env.GATE_PUBLIC_DIR?.trim() || "/workspace/.gate-public";
+}
+export async function currentProtectedList(superDir: string, dir = gatePublicDir()): Promise<{ excluded: string[] } | { error: string; unserved: "protect_list" }> {
+  const none = (why: string) => ({ error: `the current protected list cannot be read (${why}): nothing lands without it`, unserved: "protect_list" as const });
+  let m: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(dir, "source.json"), "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return none("the gate-public marker is not an object");
+    m = parsed as Record<string, unknown>;
+  } catch {
+    return none("no readable gate-public marker");
+  }
+  if (m.schema !== 1) return none(`the marker's schema is ${String(m.schema)}, not 1`);
+  const acc = m.accepted_sha;
+  const accepted = m.gated === true && m.source === "accepted" && typeof acc === "string" && /^[0-9a-f]{40}$/.test(acc);
+  const clone = m.gated === false && m.source === "clone";
+  if (!accepted && !clone) return none(`the marker vouches for no copy (gated ${String(m.gated)}, source ${String(m.source)})`);
+  const ref = accepted ? String(acc) : "HEAD";
+  const where = accepted ? `the accepted gate ${ref.slice(0, 12)}` : "the super-repo clone's committed HEAD (ungated)";
+  // the gate accepts a commit the clone fetched; one it does not hold yet is said as that, never read from another commit
+  if (accepted && (await vesselGit(["cat-file", "-e", `${ref}^{commit}`], superDir)).exit_code !== 0) return none(`the super-repo clone does not hold the accepted commit ${ref.slice(0, 12)}`);
+  const list = await protectedListAt((path) => vesselGit(["show", `${ref}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), where);
+  if ("error" in list) return none(list.error);
+  if (clone && scopeEntryFor(SCOPE_REL, list.excluded) === null) return none(`the ungated list does not protect ${SCOPE_REL} itself`);
+  return list;
+}
+
+/**
  * The changed paths the protected list names, each with the entry that names it ("path (protected: entry)"). A vessel's
  * paths are named as the super-repo names them (repos/<vessel>/<path>). Pass every name a change touches, old and new.
  */
@@ -141,7 +182,7 @@ function systemHooksDir(): string | null {
 
 export type CommitResult =
   | { shape: "gitCommitResult"; sha: string; tree: string; committed_tree: string; base: string; cwd: string; changed: string[]; scan: "ran" | "skipped" }
-  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number; head?: string; out_of_reach?: string[] };
+  | { error: string; stderr?: string; stderr_withheld?: string; exit_code?: number; head?: string; out_of_reach?: string[]; unserved?: string };
 
 // What a refused commit printed, as the reason the walk is shown: git's stderr, where git also sends everything a hook
 // prints (its stdout too). A hook may print what it read (a test's output, a scan's finding, a file in the tree), and
@@ -252,9 +293,12 @@ export async function commitInClone(
         : there ? "the remote holds it" : "the remote does not hold it, as this clone last saw it: land it";
       return { error: `nothing new to commit: the clone's tree is already its own commit ${head}; ${landing}`, head };
     }
-    // The USER's protected list, as the super base this clone was made from states it.
-    const list = await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`);
-    if ("error" in list) return { error: list.error };
+    // The USER's protected list: for a vessel's clone, the current one (currentProtectedList); for a super-repo clone,
+    // as its super base states it (the change may edit the list itself, and is judged by the list it would replace).
+    const list = made.repo === "super"
+      ? await protectedListAt((path) => vesselGit(["show", `${made.super_base}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), `the super base ${made.super_base.slice(0, 12)}`)
+      : await currentProtectedList(superDir);
+    if ("error" in list) return { error: list.error, ...("unserved" in list && typeof list.unserved === "string" ? { unserved: list.unserved } : {}) };
     const out_of_reach = protectedHits(changed, made.repo, list.excluded);
     if (out_of_reach.length > 0) return { error: `the change touches paths outside the walk's reach (${out_of_reach.join(", ")}): not committed; no verdict lands them`, out_of_reach };
 

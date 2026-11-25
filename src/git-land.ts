@@ -18,7 +18,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
+import { currentProtectedList, git, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
 import { type Made, madeClone, type Query, readRows, type Row } from "./walk-rows.js";
@@ -97,12 +97,10 @@ export type LandResult =
 /**
  * Where the USER's protected list is read for a change: never from the change's own tree. A super-repo change is
  * judged by origin's copy (the fetched base it would move: the change may edit the list itself); a vessel's, by the
- * super base its clone was made from (a vessel's tree holds no list).
+ * current list (currentProtectedList), never the super base its clone was made from (a vessel's tree holds no list).
  */
-export function listSourceFor(made: Pick<Made, "repo" | "super_base">, origin: string): { in: "trusted" | "super"; ref: string; where: string } {
-  return made.repo === "super"
-    ? { in: "trusted", ref: origin, where: "origin" }
-    : { in: "super", ref: made.super_base, where: `the super base ${made.super_base.slice(0, 12)}` };
+export function listSourceFor(made: Pick<Made, "repo">, origin: string): { in: "trusted"; ref: string; where: string } | { in: "current" } {
+  return made.repo === "super" ? { in: "trusted", ref: origin, where: "origin" } : { in: "current" };
 }
 
 export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<LandResult> {
@@ -135,14 +133,12 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     if (((await out(["rev-list", "--merges", range])) ?? "x") !== "") return { error: "the change holds a merge commit; only a straight line of commits lands" };
     const changed = ((await out(["diff", "--name-only", "--no-renames", origin, "refs/land/head"])) ?? "").split("\n").filter(Boolean);
     if (changed.length === 0) return { error: "nothing to land: the change does not differ from origin" };
-    // The USER's protected list as the base states it: for a super-repo change, origin's (the fetched base this change
-    // would move, never the change's own tree); for a vessel's, the super base its clone was made from. A path it names is
-    // out of the walk's reach: refused whatever any verdict says (git_commit's answer is advisory, so it is judged again here).
+    // The USER's protected list: for a super-repo change, origin's (the fetched base this change would move, never the
+    // change's own tree); for a vessel's, the current one. A path it names is out of the walk's reach: refused whatever
+    // any verdict says (git_commit's answer is advisory, so it is judged again here).
     const src = listSourceFor(made, origin);
-    const list = await protectedListAt(src.in === "trusted"
-      ? (path) => out(["show", `${src.ref}:${path}`])
-      : (path) => vesselGit(["show", `${src.ref}:${path}`], superDir).then((r) => r.exit_code === 0 ? r.stdout : null), src.where);
-    if ("error" in list) return { error: list.error, tree };
+    const list = src.in === "trusted" ? await protectedListAt((path) => out(["show", `${src.ref}:${path}`]), src.where) : await currentProtectedList(superDir);
+    if ("error" in list) return { error: list.error, tree, ...("unserved" in list && typeof list.unserved === "string" ? { unserved: list.unserved } : {}) };
     const out_of_reach = protectedHits(changed, made.repo, list.excluded);
     if (out_of_reach.length > 0) return { error: `the change touches paths outside the walk's reach (${out_of_reach.join(", ")}): nothing lands it`, out_of_reach, tree };
 
