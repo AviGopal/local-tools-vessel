@@ -394,13 +394,14 @@ export type GapCheck =
   | ({ gap_id?: string; test_file?: string; ran: false; passed: false; why: string; base?: BaseRead } & Partial<Bound>);
 
 /** The base's run as the check read it, kept on a refusal that the gap's tests already pass there: its exit, the tests
- * of its report each named test matched as passed (a name without its file can match a test of another file), its
- * output's end, and the user it ran as. The gap's closer reads the same tests as it runs them, as its own user; when the
+ * of its report each named test matched as passed by the rule that refusal decided with (the test file's: its exact name;
+ * the suite's: a name without its file can match a test of another file), its output's end, and the user it ran as. The gap's closer reads the same tests as it runs them, as its own user; when the
  * two disagree, the rows show both runs, not a refusal's words alone. */
 export type BaseRead = { exit_code: number; matched: Record<string, string[]>; out: string; truncated: boolean; uid: number };
-const baseRead = (run: { passed: Set<string> | null; failed: Map<string, string>; exit_code: number; out: string }, names: string[]): BaseRead => ({
+const baseRead = (run: { passed: Set<string> | null; failed: Map<string, string>; exit_code: number; out: string }, names: string[],
+  hit: (x: string, n: string) => boolean): BaseRead => ({
   exit_code: run.exit_code,
-  matched: Object.fromEntries(names.map((n) => [n, [...(run.passed ?? [])].filter((x) => matches(x, n)).sort()])),
+  matched: Object.fromEntries(names.map((n) => [n, [...(run.passed ?? [])].filter((x) => hit(x, n)).sort()])),
   out: keptCheckOut(run.out, CHECK_OUT_MAX), truncated: run.out.length > CHECK_OUT_MAX,
   // the checks run as the agent shell user when this vessel is root (asShellUser), as itself otherwise
   uid: runningAsRoot() ? AGENT_SHELL_UID : process.getuid?.() ?? -1,
@@ -834,7 +835,7 @@ async function gapCheck(t: Trusted, repo: string, dir: string | { why: string },
     if (runs === undefined) return { ...id, ran: false, passed: false, why: "the whole suite was not run" };
     if ("why" in runs) return { ...id, ran: false, passed: false, why: runs.why, ...boundOf(runs) };
     const was = gap.only_tests.length === 0 ? runs.base.exit_code !== 0 : gap.only_tests.some((n) => !greenIn(runs.base, n));
-    if (!was) return { ...id, ran: false, passed: false, why: "the gap's tests already pass on the base", base: baseRead(runs.base, gap.only_tests) };
+    if (!was) return { ...id, ran: false, passed: false, why: "the gap's tests already pass on the base", base: baseRead(runs.base, gap.only_tests, matches) };
     const s = suiteOf(runs);
     if (!s.ran) return { ...id, ran: false, passed: false, why: s.why, ...boundOf(s) };
     const now = gap.only_tests.length === 0 ? runs.tree.exit_code === 0 : gap.only_tests.every((n) => greenIn(runs.tree, n));
@@ -845,7 +846,7 @@ async function gapCheck(t: Trusted, repo: string, dir: string | { why: string },
   if (b.passed === null) return { ...id, ran: false, passed: false, why: "the test run on the base wrote no report" };
   const before = b.passed;
   const red = gap.only_tests.length === 0 ? b.exit_code !== 0 : gap.only_tests.some((n) => !before.has(n));
-  if (!red) return { ...id, ran: false, passed: false, why: "the gap's test already passes on the base", base: baseRead(b, gap.only_tests) };
+  if (!red) return { ...id, ran: false, passed: false, why: "the gap's test already passes on the base", base: baseRead(b, gap.only_tests, (x, n) => x === n) };
   const r = await runCheck(dir, gap.test_file);
   const tail = { exit_code: r.exit_code, out: keptCheckOut(r.out, CHECK_OUT_MAX), truncated: r.out.length > CHECK_OUT_MAX };
   if (r.passed === null) return { ...id, ran: true, passed: false, ...tail, out: `the test run wrote no report\n${tail.out}`, regressed: [] };

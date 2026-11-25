@@ -1017,12 +1017,17 @@ describe("git_land", () => {
     const seed = join(T, "seed");
     g(seed, "pull", "-q", "origin", "dev");
     writeFileSync(join(seed, "calc.ts"), fixed);
+    // a base test that prints past what a check keeps: the refusal keeps the base's output within the same bound
+    writeFileSync(join(seed, "noise.test.ts"), 'import { test } from "bun:test";\ntest("noise", () => { console.log("n".repeat(5000)); });\n');
     commitAll(seed, "a green base"); g(seed, "push", "-q", "origin", "HEAD:dev");
     try {
-      expect((await checkOf({ "notes.txt": "n\n" }, { ...gap, only_tests: [] })).check)
-        .toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base",
-          base: expect.objectContaining({ exit_code: 0, matched: {} }) });
+      const refused = (await checkOf({ "notes.txt": "n\n" }, { ...gap, only_tests: [] })).check;
+      expect(refused).toEqual({ gap_id: "R1", ran: false, passed: false, why: "the gap's tests already pass on the base",
+        base: expect.objectContaining({ exit_code: 0, matched: {}, truncated: true }) });
+      // [MUST-FAIL] the base's output is kept within a check's bound, as the tree's is
+      expect(((refused as { base: { out: string } }).base.out).length).toBeLessThanOrEqual(4 * 1024);
     } finally {
+      rmSync(join(seed, "noise.test.ts"));
       writeFileSync(join(seed, "calc.ts"), "export const add = (a: number, b: number): number => a - b;\n");
       commitAll(seed, "the base as it was"); g(seed, "push", "-q", "origin", "HEAD:dev");
     }
