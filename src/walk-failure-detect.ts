@@ -133,11 +133,14 @@ export const detect = async (): Promise<Report> => {
     const due = k.failures.length >= rule.min_count && k.roots.length >= rule.min_roots;
     if (!due && (prev === undefined || prev.status !== "open")) { out.push(filed); continue; }
     const reopened = Number(prev?.reopened ?? 0) + (prev !== undefined && prev.status !== "open" ? 1 : 0);
-    const row = { gap_id, status: "open", category: "walk_failure", walkable: !k.infra, tool: k.tool, kind: k.kind, refused: k.refused,
+    // A class its tool named is keyed by that name and carries no signature: the name is on the row, as whoever acts on the
+    // gap reads the row, not its key.
+    const row = { gap_id, status: "open", category: "walk_failure", walkable: !k.infra, tool: k.tool, ...(k.class !== undefined ? { class: k.class } : {}), kind: k.kind, refused: k.refused,
       blames: k.blames, waits_for: k.waits_for, status_band: k.status_band, signature: k.signature.slice(0, 500), example: k.example,
       count: k.failures.length, root_count: k.roots.length, roots: k.roots.slice(-EVIDENCE), evidence: k.failures.slice(-EVIDENCE),
       first_seq: k.first_seq, last_seq: k.last_seq, reopened, window_rows: rule.window_rows, head: at }
-    const same = prev !== undefined && prev.status === "open" && prev.count === row.count && prev.root_count === row.root_count && prev.walkable === row.walkable;
+    const same = prev !== undefined && prev.status === "open" && prev.count === row.count && prev.root_count === row.root_count && prev.walkable === row.walkable
+      && prev.class === row.class;
     filed.action = same ? "unchanged" : prev === undefined ? "opened" : prev.status !== "open" ? "reopened" : "updated";
     if (!same) await put(row);
     out.push(filed);

@@ -318,3 +318,31 @@ describe("walk_failure_detect and output nobody took", () => {
     expect(gapRows()[0]).toMatchObject({ kind: "unused", roots: [`move:${EDIT}`] });
   });
 });
+
+describe("a filed class's name", () => {
+  it("[MUST-FAIL] a class its tool named is on its gap row, beside the signature it does not carry", async () => {
+    rule();
+    for (const root of ["w1", "w2", "w2"]) fail(root, "fs_edit", "/trees/a", { status: 200, blames: "request", class: "anchor_mismatch", body: `old_string not found in file (${root})` });
+    expect((await report()).classes.map((c) => c.action)).toEqual(["opened"]);
+    expect(gapRows()[0]).toMatchObject({ tool: "fs_edit", class: "anchor_mismatch", signature: "", count: 3 });
+  });
+
+  it("[MUST-FAIL] an open gap filed before its row carried the name is written once more with it, then left as it is", async () => {
+    rule();
+    for (const root of ["w1", "w2", "w2"]) fail(root, "fs_edit", "/trees/a", { status: 200, blames: "request", class: "anchor_mismatch", body: "old_string not found in file" });
+    await report();
+    delete gapRows()[0].class;
+    expect((await report()).classes.map((c) => c.action)).toEqual(["updated"]);
+    expect(gapRows().at(-1)).toMatchObject({ class: "anchor_mismatch", count: 3 });
+    expect((await report()).classes.map((c) => c.action)).toEqual(["unchanged"]);
+  });
+
+  it("[GUARD] a class no tool named carries no class field: its signature says what it is", async () => {
+    rule();
+    for (const [root, cwd] of [["w1", "/trees/a"], ["w2", "/trees/b"], ["w2", "/trees/c"]]) missing(root, cwd);
+    await report();
+    const [g] = gapRows();
+    expect("class" in g).toBe(false);
+    expect(g.signature).toBe("no such directory: <cwd>");
+  });
+});
