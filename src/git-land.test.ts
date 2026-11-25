@@ -1362,6 +1362,19 @@ describe("git_commit and git_land: a vessel's change is judged by the list curre
     } finally { restore(); }
   });
 
+  it("[GUARD] an accepted sha that names a tree, not a commit, is no list: the gate accepts commits only", async () => {
+    try {
+      const { cwd, accepted } = await cloneThenList(BASE_LIST, BASE_LIST);
+      // the tree holds the same list, so reading it would commit: only the check that the sha is a commit refuses it
+      marker({ schema: 1, gated: true, source: "accepted", accepted_sha: g(SUPER, "rev-parse", `${accepted}^{tree}`) });
+      put(cwd, "free.ts");
+      const c = await commitInClone(cwd, "free", undefined, find) as { error?: string; sha?: string; unserved?: string };
+      expect(c.sha).toBeUndefined();
+      expect(String(c.error)).toContain("does not hold the accepted commit");
+      expect(c.unserved).toBe("protect_list");
+    } finally { restore(); }
+  });
+
   it("[MUST-FAIL] an accepted commit that holds no list refuses the commit, never reads another commit's list", async () => {
     try {
       const { cwd } = await cloneThenList(BASE_LIST, BASE_LIST);
