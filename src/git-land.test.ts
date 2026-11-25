@@ -1232,6 +1232,13 @@ describe("git_land", () => {
     const cutBase = await suiteCheck(ok, partway, 4000) as Record<string, unknown>;
     expect(cutBase).toMatchObject({ ran: false, status: "bound", run: "base", ms: 4000, reported: 3 });
     expect(Number(cutBase.elapsed_ms)).toBeGreaterThanOrEqual(4000);
+    // [GUARD] reported counts the runner's result lines only: a test's own output holding "(pass) " mid-line is not
+    // one, and a result line in colour (a runner printing to a terminal) is one once its colour codes are read past
+    const hold = 'test("waits", async () => { await new Promise(() => {}); }, 600000);';
+    const midline = dirOf("midline", 'test("a", () => { console.log("  log: (pass) x"); console.error("  err: (fail) y"); });\n' + hold);
+    expect(await suiteCheck(midline, ok, 4000)).toMatchObject({ ran: false, status: "bound", run: "tree", ms: 4000, reported: 1 });
+    const coloured = dirOf("coloured", 'test("a", () => { process.stderr.write("\\x1b[32m(pass)\\x1b[0m z\\n"); });\n' + hold);
+    expect(await suiteCheck(coloured, ok, 4000)).toMatchObject({ ran: false, status: "bound", run: "tree", ms: 4000, reported: 2 });
     // a run that exits before the runner reports leaves no report: it does not pass, and says on which side
     const exits = dirOf("exit", 'process.exit(0);\ntest("never", () => {});');
     expect(await suiteCheck(exits, ok, 60000)).toEqual({ ran: false, passed: false, why: "the suite's run on the tree wrote no report" });
