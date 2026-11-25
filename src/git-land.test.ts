@@ -530,7 +530,7 @@ describe("git_land", () => {
     if (!("tree" in r)) throw new Error(JSON.stringify(r));
     // every field a typecheck may carry, read without narrowing (a check that did not run has no passed)
     return r.typecheck as { ran: boolean; passed?: boolean; checked?: false; why?: string; exit_code?: number;
-      projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string };
+      projects?: Array<{ dir: string; passed: boolean; checked?: false; why?: string; base_errors?: number }>; uncovered?: string[]; out?: string; truncated?: boolean };
   };
 
   it("[MUST-FAIL] an undefined call in a second project's file does not pass, named in that project; a correct one passes", async () => {
