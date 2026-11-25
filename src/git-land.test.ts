@@ -1194,6 +1194,26 @@ describe("git_land", () => {
     const slow = dirOf("slow", 'test("s", async () => { await Bun.sleep(1500); });');
     const timed = await suiteCheck(ok, slow, 60000) as { base_ms: number; tree_ms: number };
     expect(timed.base_ms - timed.tree_ms).toBeGreaterThanOrEqual(1000);
+    // a test whose outcome a file outside the repository decides, as a flaky one's is decided by something it does not own
+    const flagDir = mkdtempSync(join(tmpdir(), "flag-"));
+    chmodSync(flagDir, 0o755);
+    const flag = join(flagDir, "on");
+    const flaky = `test("x", () => { if (require("node:fs").existsSync(${JSON.stringify(flag)})) throw new Error("flaked"); });`;
+    const [fBase, fTree] = [dirOf("flaky-base", flaky), dirOf("flaky-tree", flaky)];
+    // [MUST-FAIL] x passed in the kept base run; it fails on the tree and on the base now: the base is run again, and the
+    // change is not refused for it
+    const fKey = ["flaky-repo", "base-sha", "install", "runner"];
+    expect(await suiteCheck(fTree, fBase, 60000, fKey)).toMatchObject({ ran: true, passed: true, base_cached: false, base_rerun: false });
+    writeFileSync(flag, "1", { mode: 0o644 });
+    expect(await suiteCheck(fTree, fBase, 60000, fKey)).toMatchObject({ ran: true, passed: true, regressed: [], base_cached: false, base_rerun: true });
+    // [GUARD] a test the tree breaks is still its regression, read against a kept base: run again, it passed there
+    rmSync(flag);
+    const gKey = ["flaky-repo", "base-sha-2", "install", "runner"];
+    expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: false });
+    const breaksX = dirOf("breaks-x", 'test("x", () => { throw new Error("broken"); });');
+    expect(await suiteCheck(breaksX, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)], base_rerun: true });
+    // [GUARD] the same tree again on a kept base where nothing regresses: read as kept, not run again
+    expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: true, base_rerun: false });
   }, 120000);
 
   it("[MUST-FAIL] a gap's check that fails and then prints past the bound still shows how it failed", async () => {

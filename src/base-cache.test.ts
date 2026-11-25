@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, renameSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type BaseRun, baseHeld, baseRun, installIdentity } from "./base-cache.js";
+import { BASE_OUT_KEPT, type BaseRun, baseHeld, baseRun, installIdentity } from "./base-cache.js";
 
 const done = (over: Partial<BaseRun> = {}): BaseRun => ({ passed: new Set(["a"]), failed: new Map([["b", "x"]]), exit_code: 1, signalled: false, killed: false, out: "log", ...over });
 const counted = (r: () => BaseRun, wait = 0) => {
@@ -25,6 +25,42 @@ describe("the base's suite run, kept per key", () => {
     expect([...(second.passed ?? [])]).toEqual([...(first.passed ?? [])]);
     expect([...second.failed]).toEqual([...first.failed]);
     expect([second.exit_code, second.signalled, second.killed]).toEqual([1, false, false]);
+    // its output's tail is kept, bounded, so the base's evidence is still there
+    const long = ["demo", "sha-out", "inst", "1.0"];
+    await baseRun(long, async () => done({ out: `head${"o".repeat(BASE_OUT_KEPT)}tail` }));
+    const kept = await baseRun(long, async () => done({ out: "other" }));
+    expect(kept.out.length).toBe(BASE_OUT_KEPT);
+    expect(kept.out.endsWith("tail")).toBe(true);
+  });
+
+  test("[MUST-FAIL] fresh: the kept run is not read, and the new run replaces it; a run in flight is still shared", async () => {
+    const key = ["fresh-repo", "sha", "inst", "1.0"];
+    await baseRun(key, async () => done({ exit_code: 0 }));
+    expect((await baseRun(key, async () => done({ exit_code: 2 }), true)).exit_code).toBe(2);
+    expect((await baseRun(key, async () => done({ exit_code: 3 }))).exit_code).toBe(2);
+    const { n, run } = counted(() => done(), 30);
+    const flight = ["fresh-repo", "sha-flight", "inst", "1.0"];
+    await Promise.all([baseRun(flight, run), baseRun(flight, run, true)]);
+    expect(n.runs).toBe(1);
+  });
+
+  test("[MUST-FAIL] one base is kept per repository: a new base's run replaces it; another repository's stays", async () => {
+    const { n, run } = counted(() => done());
+    await baseRun(["one-repo", "sha-a", "i", "1"], run);
+    await baseRun(["two-repo", "sha-a", "i", "1"], run);
+    await baseRun(["one-repo", "sha-b", "i", "1"], run);
+    expect(baseHeld(["one-repo", "sha-a", "i", "1"])).toBe(false);
+    expect(baseHeld(["two-repo", "sha-a", "i", "1"])).toBe(true);
+    await baseRun(["one-repo", "sha-b", "i", "1"], run);
+    expect(n.runs).toBe(3);
+  });
+
+  test("[GUARD] a run replaced while in flight is not kept when it ends", async () => {
+    const slow = ["race-repo", "sha-a", "i", "1"];
+    const ends = baseRun(slow, async () => { await Bun.sleep(30); return done(); });
+    await baseRun(["race-repo", "sha-b", "i", "1"], async () => done());
+    await ends;
+    expect(baseHeld(slow)).toBe(false);
   });
 
   test("[GUARD] a new base sha, or a changed install identity or runner, runs again", async () => {

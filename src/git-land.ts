@@ -402,9 +402,10 @@ export type SuiteCheck =
   | ({ ran: false; passed: false; why: string } & Partial<Bound>);
 /** A run stopped at the suite's bound, said as fields: which run, and the bound it was stopped at. */
 export type Bound = { status: "bound"; run: "base" | "tree"; ms: number };
-/** How many tests each run reported, and how long each took (base_cached: the base's run was one made for an earlier diff
- * of the same base, so base_ms is not its run's): recorded so the bound can be read against them. */
-export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean };
+/** How many tests each run reported, and how long each took (base_cached: the base's run read was one made for an
+ * earlier diff of the same base, so base_ms is not its run's; base_rerun: a kept run read a regression, and the base was
+ * run again to judge it, replacing the kept run): recorded so the bound, and how often a kept base is wrong, can be read. */
+export type SuiteSize = { base_count: number; tree_count: number; base_ms: number; tree_ms: number; base_cached: boolean; base_rerun: boolean };
 
 export type DiffResult =
   | { shape: "gitDiff"; cwd: string; repo: string; base: string; head: string; tree: string; diff: string; truncated: boolean;
@@ -728,34 +729,44 @@ export async function suiteRefuses(t: Trusted): Promise<string | null> {
  * regressed test means it does not pass; a test red on the base is not the change's. A run killed at the bound, or one
  * that wrote no report, does not pass, and says which.
  */
-export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS): Promise<SuiteCheck> {
-  return suiteOf(await suiteRuns(dir, base, stepMs));
+export async function suiteCheck(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[]): Promise<SuiteCheck> {
+  return suiteOf(await suiteRuns(dir, base, stepMs, key));
 }
 
 // The whole suite's two runs, base then tree, as suiteCheck reads them; a suite-form gap's check reads the same runs.
 type CheckRun = Awaited<ReturnType<typeof runCheck>>;
 type SuiteRuns = { before: Set<string>; base: CheckRun; tree: CheckRun & { passed: Set<string> }; size: SuiteSize } | ({ why: string } & Partial<Bound>);
 // With a key (git_diff gives one: the repository, the base's sha, the install, the runner), the base's run is the one
-// kept for that key, made once (base-cache.ts); with none, it is run here.
+// kept for that key, made once (base-cache.ts); with none, it is run here. A test that passed in a kept run and does not
+// pass on the tree is judged on a fresh run of the base, which replaces the kept one: a flaky pass kept would otherwise
+// refuse every diff of the base, and so every land that would move it.
 async function suiteRuns(dir: string | { why: string }, base: string | { why: string }, stepMs = STEP_MS, key?: readonly unknown[]): Promise<SuiteRuns> {
   if (typeof dir !== "string") return { why: dir.why };
   if (typeof base !== "string") return { why: base.why };
-  const timedRun = async (at: string, kept?: readonly unknown[]) => {
+  const timedRun = async (at: string, kept?: readonly unknown[], fresh = false) => {
     const t0 = performance.now();
     const live = () => runCheck(at, null, "suite-report", stepMs);
-    const r = kept === undefined ? await live() : await baseRun(kept, live);
+    const r = kept === undefined ? await live() : await baseRun(kept, live, fresh);
     return { r, ms: Math.round(performance.now() - t0) };
   };
   const stopped = (run: "base" | "tree") => ({ why: `the suite did not finish on the ${run} within the step bound (${stepMs} ms)`, status: "bound" as const, run, ms: stepMs });
-  const base_cached = key !== undefined && baseHeld(key);
-  const { r: b, ms: base_ms } = await timedRun(base, key);
+  let base_cached = key !== undefined && baseHeld(key);
+  let { r: b, ms: base_ms } = await timedRun(base, key);
   if (b.killed) return stopped("base");
   if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
-  const before = b.passed;
   const { r, ms: tree_ms } = await timedRun(dir);
   if (r.killed) return stopped("tree");
   if (r.passed === null) return { why: "the suite's run on the tree wrote no report" };
-  return { before, base: b, tree: { ...r, passed: r.passed }, size: { base_count: before.size + b.failed.size, tree_count: r.passed.size + r.failed.size, base_ms, tree_ms, base_cached } };
+  const treePassed = r.passed;
+  const base_rerun = base_cached && [...b.passed].some((n) => !treePassed.has(n));
+  if (base_rerun) {
+    ({ r: b, ms: base_ms } = await timedRun(base, key, true));
+    base_cached = false;
+    if (b.killed) return stopped("base");
+    if (b.passed === null) return { why: "the suite's run on the base wrote no report" };
+  }
+  const before = b.passed;
+  return { before, base: b, tree: { ...r, passed: treePassed }, size: { base_count: before.size + b.failed.size, tree_count: treePassed.size + r.failed.size, base_ms, tree_ms, base_cached, base_rerun } };
 }
 // a run stopped at the bound says so as fields, beside its why
 const boundOf = (s: Partial<Bound>): Partial<Bound> => s.status === "bound" ? { status: s.status, run: s.run, ms: s.ms } : {};
