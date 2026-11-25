@@ -235,6 +235,30 @@ describe("a clone moved onto a newer base that no row records is a fact, read fr
     expect(g(c.cwd, "log", "--format=%s", `${to}..HEAD`)).toBe("own change");
   });
 
+  it("[MUST-FAIL] carried once, then behind again: a refresh from the recorded base replays only the clone's own commits", async () => {
+    const c = await clone();
+    writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3w\n4\n5\n"); commitAll(c.cwd, "own change"); asOwner(c.cwd);
+    moveOrigin("b.txt", "b-once\n");
+    expect(await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made))).toMatchObject({ clone: { carried: "commits" } });
+    // the copy moves again, over the same path its first move changed; the rows still say the base the clone was made at
+    const to = moveOrigin("b.txt", "b-twice\n");
+    const r = await refreshed(c.cwd, c.made.base, to, "dev", COPY);
+    expect(r).toMatchObject({ ok: true, carried: "commits" });
+    expect(g(c.cwd, "log", "--format=%s", `${to}..HEAD`)).toBe("own change");
+    expect(g(c.cwd, "diff", "--name-only", to, "HEAD")).toBe("a.txt");
+  });
+
+  it("[MUST-FAIL] carried once with no change of its own, then edited and behind again: the edit is carried, not held as commits", async () => {
+    const c = await clone();
+    moveOrigin("b.txt", "b-clean-once\n");
+    expect(await refreshInPlace({ dir: c.cwd, repo: "demo" }, process.env, at(c.made))).toMatchObject({ clone: {} });
+    writeFileSync(join(c.cwd, "b.txt"), "b-clean-once\nmine\n"); asOwner(c.cwd);
+    const to = moveOrigin("a.txt", "1\n2\n3\n4\n5\n6\n");
+    const r = await refreshed(c.cwd, c.made.base, to, "dev", COPY);
+    expect(r).toMatchObject({ ok: true, carried: "uncommitted" });
+    expect(readFileSync(join(c.cwd, "b.txt"), "utf8")).toBe("b-clean-once\nmine\n");
+  });
+
   it("[MUST-FAIL] control: a clone whose move a row records gives no fact; a clone at its recorded base gives none", async () => {
     const c = await clone();
     const to = moveOrigin("b.txt", "b10\n");

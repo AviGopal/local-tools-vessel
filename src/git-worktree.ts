@@ -147,13 +147,15 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
 
 // Bring a clone made at `from` to `to`. The copy's branch is fetched into it (the same upload-pack form the clone was made
 // with: never shared objects), then its own branch moved to `to`:
-//   - unchanged (nothing modified or untracked, no commit past `from`): moved, as before;
+//   - unchanged (nothing modified or untracked, no commit of its own): moved, as before;
 //   - uncommitted edits only: moved with a checkout, which keeps them in place when `to` changed none of those files and
 //     refuses, changing nothing, when it did (carried: "uncommitted");
-//   - commits past `from` only: replayed onto `to` (git decides what conflicts); on a conflict the replay is undone, the
+//   - commits of its own only: replayed onto `to` (git decides what conflicts); on a conflict the replay is undone, the
 //     clone left as it was, and the conflicting paths are named (carried: "commits");
 //   - both: not carried (commit or drop the edits first; nothing is guessed), and said as held: "commits_and_edits",
-//     refused before anything is fetched or moved, so a commit made in the clone as it is ends exactly this state.
+//     refused before anything is moved, so a commit made in the clone as it is ends exactly this state.
+// The clone's commits are those past where it forks from `to` (merge-base), never past `from`: a clone moved since its
+// row was written sits past `from`.
 // Not ok: changed says whether the clone held a change (so a fresh clone does not hide it), conflicts which paths `to`
 // also changed, why in words. Nothing here edits a file or resolves a conflict.
 export type Refresh = { ok: true; carried?: "uncommitted" | "commits" }
@@ -189,17 +191,25 @@ export async function refreshed(cwd: string, from: string, to: string, branch: s
     return no("the clone is not on its own walk/ branch", held !== null && held !== "");
   }
   const dirty = await out(["status", "--porcelain", "--untracked-files=all"]);
-  const ahead = await out(["rev-list", "HEAD", "--not", from]);
-  if (dirty === null || ahead === null) return no("the clone could not be read");
-  if (dirty !== "" && ahead !== "") return { ...no("the clone holds both commits and uncommitted edits; commit or drop the edits first", true), held: "commits_and_edits" };
+  if (dirty === null) return no("the clone could not be read");
+  // The new base is fetched first: a fetch adds objects and moves nothing, so a clone refused below is still exactly as it
+  // was. Its objects tell where the clone really forks from the copy's history (the newest commit both hold), which is
+  // the base its own work sits on. `from` is the base a row recorded, and a clone moved since (a refresh in place the
+  // asker's rows do not say) sits past it: counted from there, the copy's own commits it was carried over would be read
+  // as the clone's, replayed again (a conflict where the copy changed that path twice), and a clean clone with an edit
+  // held as commits and edits.
   if ((await out(["fetch", "--quiet", "--upload-pack=git -c 'safe.directory=*' upload-pack", source, branch], 300_000)) === null) {
-    return no("the new base could not be fetched into the clone", dirty !== "" || ahead !== "");
+    return no("the new base could not be fetched into the clone", dirty !== "" || ((await out(["rev-list", "HEAD", "--not", from])) ?? "") !== "");
   }
-  // The paths the new base changed since the clone's base: uncommitted edits to any of them cannot be carried.
-  const moved = new Set(((await out(["diff", "--name-only", "--no-renames", from, to])) ?? "").split("\n").filter(Boolean));
+  const fork = await out(["merge-base", "HEAD", to]);
+  const ahead = fork === null ? null : await out(["rev-list", "HEAD", "--not", fork]);
+  if (fork === null || ahead === null) return no("the clone shares no history with the new base", true);
+  if (dirty !== "" && ahead !== "") return { ...no("the clone holds both commits and uncommitted edits; commit or drop the edits first", true), held: "commits_and_edits" };
+  // The paths the new base changed since the clone's fork: uncommitted edits to any of them cannot be carried.
+  const moved = new Set(((await out(["diff", "--name-only", "--no-renames", fork, to])) ?? "").split("\n").filter(Boolean));
   if (ahead !== "") {
     // git's own replay decides what conflicts; a conflicting one is undone, leaving the clone as it was.
-    const r = await run(["rebase", "--quiet", "--onto", to, from], 300_000);
+    const r = await run(["rebase", "--quiet", "--onto", to, fork], 300_000);
     if (r.exit_code !== 0) {
       const conflicts = ((await out(["diff", "--name-only", "--diff-filter=U"])) ?? "").split("\n").filter(Boolean);
       await run(["rebase", "--abort"]);
