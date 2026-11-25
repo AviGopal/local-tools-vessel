@@ -1074,6 +1074,17 @@ describe("git_land", () => {
     expect(r.check).toBeUndefined();
   }, 120000);
 
+  it("[MUST-FAIL] a diff with no gap keeps its base's run, and the next diff of that base reads it", async () => {
+    const suiteOf = async () => {
+      const { cwd } = await changeOf({ "notes.txt": "n\n" });
+      const r = await diffClone(cwd, made.get(cwd)!, ["file"]);
+      if (!("tree" in r)) throw new Error(JSON.stringify(r));
+      return r.suite;
+    };
+    await suiteOf();
+    expect(await suiteOf()).toMatchObject({ ran: true, base_cached: true });
+  }, 120000);
+
   it("[MUST-FAIL] git_diff on a walk clone takes the owner's suite_bound row for its repository", async () => {
     const owner = { id: "b1", seq: 1, shape: "suite_bound", role: "owner", repo: "demo", suite_step_ms: 1 } as Row;
     const rows = (all: Row[]) => async (q: Query) => all.filter((r) => r.shape === q.shape);
@@ -1220,6 +1231,13 @@ describe("git_land", () => {
     expect(await suiteCheck(breaksX, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)], base_rerun: true });
     // [GUARD] the same tree again on a kept base where nothing regresses: read as kept, not run again
     expect(await suiteCheck(fTree, fBase, 60000, gKey)).toMatchObject({ ran: true, passed: true, base_cached: true, base_rerun: false, base_failed_kept: [] });
+    // [MUST-FAIL] the kept base's reds the record names are those still red on the tree: one the tree makes pass is not
+    const reds = dirOf("two-red", 'test("p", () => { throw new Error("red"); });\ntest("q", () => { throw new Error("red"); });');
+    const fixesP = dirOf("fixes-p", 'test("p", () => {});\ntest("q", () => { throw new Error("red"); });');
+    const rKey = ["reds-repo", "base-sha", "install", "runner"];
+    expect(await suiteCheck(reds, reds, 60000, rKey)).toMatchObject({ ran: true, base_cached: false });
+    expect(await suiteCheck(fixesP, reds, 60000, rKey)).toMatchObject({ ran: true, passed: true, base_cached: true,
+      base_failed_kept: [expect.stringMatching(/q$/)] });
     // [MUST-FAIL] a base run for this diff is not run again: a tree that breaks x on a key's first diff is refused at once
     const hKey = ["flaky-repo", "base-sha-3", "install", "runner"];
     expect(await suiteCheck(breaksX, fBase, 60000, hKey)).toMatchObject({ ran: true, passed: false, regressed: [expect.stringMatching(/x$/)],

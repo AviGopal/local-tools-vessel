@@ -133,6 +133,14 @@ describe("the install identity", () => {
     at(join(same, "typescript"), same);
     expect(installIdentity(same)).not.toBe(kept);
     // a linked package: what it links to is replaced, the link is not
+    // a package changed in place, a file added to its directory: the same directory, a new modification time
+    for (const p of ["typescript", "@scope/pkg"]) {
+      const inPlace = modules();
+      at(join(inPlace, p));
+      const was = installIdentity(inPlace);
+      writeFileSync(join(inPlace, p, "added.js"), "");
+      expect(installIdentity(inPlace)).not.toBe(was);
+    }
     const m = modules();
     const target = mkdtempSync(join(tmpdir(), "linked-"));
     mkdirSync(join(target, "pkg"));
