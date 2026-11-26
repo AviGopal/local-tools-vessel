@@ -604,7 +604,8 @@ export async function runAllowlistedScript(pointer: Record<string, unknown>, dep
   const argv = buildArgv(entry.args_schema, pointer.args);
   if (!argv.ok) return refuse("args_invalid", argv.why);
 
-  const root = containmentZones(env).supers[0];
+  const configuredSuperRepo = env.SUPER_REPO_DIR?.trim();
+  const root = configuredSuperRepo || containmentZones(env).supers[0];
   // If the root is empty, it implies no super-repo clone is configured.
   if (!root) return refuse("no_super_repo_clone", "no live super-repo clone is configured on this node");
 
