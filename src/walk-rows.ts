@@ -61,7 +61,9 @@ export async function endedCalls(pointerType: string): Promise<Row[] | { error: 
  * The one change clone the walk made at `cwd` and has not landed. A walk-written git_worktree row must name it: none
  * means git_worktree did not make it, and is refused. Several may, since git_worktree hands an unchanged clone out again
  * rather than making another; they must agree on the repo, branch, base and origin (rows that disagree are a collision,
- * refused), and the latest one's super_base, the super-repo HEAD whose hooks judge, is the one that holds. `where`
+ * refused), and the latest one's super_base, the super-repo HEAD whose hooks judge, is the one that holds. A field a row
+ * does not carry is unknown there, not different: each field is compared over the rows that carry it and taken from the
+ * newest of them, and each must be carried by at least one. `where`
  * matches top-level fields only, so the rows are git_worktree's ended hops and their cwd is matched here: a bounded set,
  * the clones made, not every hop.
  */
@@ -75,20 +77,24 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   const moved = moves.filter((r) => r.role === "walk" && r.cwd === cwd).map((r): Row => ({ ...r, output: r as Record<string, unknown> }))
   const mine = [...made.filter((r) => r.role === "walk" && r.output?.cwd === cwd), ...moved].sort((a, b) => Number(a.seq) - Number(b.seq))
   if (mine.length === 0) return { error: `no walk row records a clone made at ${cwd}: a commit or landing needs one` };
-  const same = (k: string) => new Set(mine.map((r) => String(r.output?.[k] ?? ""))).size === 1;
+  // A row written without a field (a refused land's record of where the clone is, before it carried them all) says
+  // nothing about that field: read as "" it would be a second clone here, and the clone refused for good.
+  const carrying = (k: string) => mine.filter((r) => typeof r.output?.[k] === "string" && r.output[k] !== "");
+  const same = (k: string) => new Set(carrying(k).map((r) => String(r.output?.[k]))).size <= 1;
   // One clone's base moves only by a refresh, which says the base it moved from: each row keeps the one before's base or
   // was refreshed from it. Any other difference is two clones at one place, a collision.
-  const chained = mine.every((r, i) => i === 0 || r.output?.base === mine[i - 1].output?.base || r.output?.refreshed_from === mine[i - 1].output?.base);
+  const based = carrying("base");
+  const chained = based.every((r, i) => i === 0 || r.output?.base === based[i - 1].output?.base || r.output?.refreshed_from === based[i - 1].output?.base);
   if (!["repo", "branch", "origin_url"].every(same) || !chained) {
     return { error: `${mine.length} walk rows record different clones made at ${cwd}: a commit or landing needs one` };
   }
   const landed = await endedCalls("git_land");
   if (!Array.isArray(landed)) return landed;
   if (landed.some((r) => r.role === "walk" && r.output?.cwd === cwd)) return { error: `the clone at ${cwd} has already landed` };
-  const o = mine[mine.length - 1].output ?? {};
-  const s = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : "");
+  // Each from the newest row that carries it; one no row carries leaves the clone unknown, and nothing is committed in it.
+  const s = (k: string) => String(carrying(k).at(-1)?.output?.[k] ?? "");
   if (!s("base") || !s("super_base") || !s("repo") || !s("branch") || !s("origin_url")) {
-    return { error: `the row for ${cwd} lacks its base, repo, branch or origin` };
+    return { error: `the rows for ${cwd} lack its base, repo, branch or origin` };
   }
   return { cwd, repo: s("repo"), branch: s("branch"), base: s("base"), super_base: s("super_base"), origin_url: s("origin_url") };
 }
