@@ -896,7 +896,9 @@ const RELATIVE = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.st
  * runner, not by two that can read the same test differently. The commit is fetched from origin as git_diff fetches it
  * (https, no credential) and must be on its branch; nothing of the node's checkout is run. It writes nothing.
  */
-export async function gapCheckAt(q: GapCheckAsk, opts: { source?: string; transports?: string[] } = {}): Promise<GapCheckAt> {
+// `run` stands in for the runner in a test only: a signal that lands after bun has written its report cannot be made
+// from a test file (bun writes no report when killed, and runs no exit handler after it), and that run must not pass.
+export async function gapCheckAt(q: GapCheckAsk, opts: { source?: string; transports?: string[]; run?: typeof runCheck } = {}): Promise<GapCheckAt> {
   const no = (why: string, more: Partial<{ head: string; test_file: string; out: string }> = {}): GapCheckAt =>
     ({ shape: "gapCheck", ran: false, passed: false, why, ...(NAME.test(String(q.repo)) ? { repo: q.repo } : {}), ...more });
   if (!NAME.test(String(q.repo))) return no("repo must be a repository's name");
@@ -926,7 +928,7 @@ export async function gapCheckAt(q: GapCheckAsk, opts: { source?: string; transp
     const dir = await writeOut(t, { repo: q.repo } as Made, work, q.ref, "gap");
     if (typeof dir !== "string") return no(dir.why, at);
     if (!existsSync(join(dir, q.test_file))) return no(`${q.test_file} is not in the tree at ${q.ref}`, at);
-    const r = await runCheck(dir, q.test_file);
+    const r = await (opts.run ?? runCheck)(dir, q.test_file);
     const kept = { out: r.out.slice(-GAP_CHECK_OUT_MAX), truncated: r.out.length > GAP_CHECK_OUT_MAX };
     if (r.killed) return no(`the test run did not finish within the step bound (${STEP_MS} ms)`, { ...at, out: kept.out });
     if (r.passed === null) return no("the test run wrote no report", { ...at, out: kept.out });

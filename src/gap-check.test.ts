@@ -73,6 +73,14 @@ describe("gap_check", () => {
       .toMatchObject({ ran: true, passed: false, names: { "add > adds": { result: "pass" }, "add > gone": { result: "absent" } } });
   });
 
+  it("[MUST-FAIL] a run a signal ended does not pass, even where its report says every named test passed", async () => {
+    // bun writes no report when a test file kills it, so the runner is stood in for: the report as a clean run's, the end
+    // a signal's
+    const run = async () => ({ passed: new Set(["add > adds"]), failed: new Map<string, string>(), exit_code: 0, signalled: true, killed: false, out: "1 pass" });
+    expect(await gapCheckAt(ask(green), { ...opts, run })).toMatchObject({ ran: true, passed: false, signalled: true, names: { "add > adds": { result: "pass" } } });
+    expect(await gapCheckAt(ask(green, { only_tests: [] }), { ...opts, run })).toMatchObject({ ran: true, passed: false, signalled: true, exit_code: 0 });
+  });
+
   it("[MUST-FAIL] with no names, the file's own exit decides", async () => {
     expect(await gapCheckAt(ask(base, { only_tests: [] }), opts)).toMatchObject({ ran: true, passed: false, names: {}, exit_code: 1 });
     expect(await gapCheckAt(ask(green, { only_tests: [] }), opts)).toMatchObject({ ran: true, passed: true, names: {}, exit_code: 0 });
