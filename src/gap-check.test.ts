@@ -110,6 +110,22 @@ describe("gap_check", () => {
     expect(error).not.toContain("(fail)");
   });
 
+  it("[GUARD] a failing name the report gives no message for takes the runner's own block for it; one it gives a message for keeps the report's", async () => {
+    // the runner is stood in for, since a bun whose report carries every message never reaches the output
+    const out = "calc.test.ts:\n(pass) add > zero [0.05ms]\nerror: expect(received).toBe(expected)\n\nExpected: 3\nReceived: -1\n\n      at <anonymous> (calc.test.ts:1:1)\n(fail) add > adds [0.12ms]\n\n 1 pass\n 1 fail\n";
+    const runWith = (said: string) => async () => ({ passed: new Set(["add > zero"]), failed: new Map([["add > adds", said]]), exit_code: 1, signalled: false, killed: false, out });
+    const error = async (said: string) => {
+      const r = await gapCheckAt(ask(base, { only_tests: ["add > adds"] }), { ...opts, run: runWith(said) });
+      if (!r.ran) throw new Error(r.why);
+      return (r.names["add > adds"] as { error?: string }).error ?? "";
+    };
+    const fromOut = await error("");
+    expect(fromOut.startsWith("error: expect(received).toBe(expected)")).toBe(true);
+    expect(fromOut).toContain("Received: -1");
+    expect(fromOut).not.toContain("(pass)");
+    expect(await error("the report's own message")).toBe("the report's own message");
+  });
+
   it("[GUARD] a run's out past the bound is kept from its end, where the runner prints its failures and counts", async () => {
     const long = `HEAD-OF-RUN\n${"x".repeat(300 * 1024)}\nEND-OF-RUN 1 pass`;
     const run = async () => ({ passed: new Set(["add > adds"]), failed: new Map<string, string>(), exit_code: 0, signalled: false, killed: false, out: long });
