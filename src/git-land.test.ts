@@ -10,7 +10,8 @@ import { commitInClone } from "./git-commit";
 import { diffClone, diffMade, gapCheckAt, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
 import type { Trusted, Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
-import type { Made, Query, Row } from "./walk-rows";
+import { madeClone, type Made, type Query, type Row } from "./walk-rows";
+import { recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 // Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
 // fixtures: the test root is opened up, and what hooks write goes to a directory anyone may write.
@@ -156,6 +157,33 @@ describe("git_land's branch", () => {
 });
 
 describe("git_land", () => {
+  scanned("[MUST-FAIL] a refused land's clone, recorded as the walk records it, leaves the clone one a commit or landing still takes", async () => {
+    const { cwd, tree } = await change("refused-row.txt", "r\n");
+    table = [];
+    const refused = await landClone(cwd, deps) as { error: string; clone?: Record<string, unknown> };
+    expect(String(refused.error)).toContain("no verdict approves this tree");
+    // the walk's rows at this cwd: git_worktree's call that made the clone, then the refusal's clone as a gitWorktree row
+    const w = made.get(cwd)!;
+    const walkRows: Array<Record<string, unknown>> = [
+      ...walkCall("wt", "git_worktree", "sel-1", { ...w }).map((h, i) => ({ ...h, seq: i + 1 })),
+      { id: "gw-refused", shape: "gitWorktree", role: "walk", seq: 3, ...refused.clone },
+    ];
+    const env = { d: process.env.DISCOVERY_ENDPOINT, k: process.env.METABOB_API_KEY };
+    const realFetch = globalThis.fetch;
+    process.env.DISCOVERY_ENDPOINT = "http://discovery.test";
+    process.env.METABOB_API_KEY = "test-node-key";
+    globalThis.fetch = (async (_u: unknown, init?: RequestInit) =>
+      Response.json(recordRead(walkRows, JSON.parse(String(init?.body)).pointer))) as typeof fetch;
+    try {
+      const again = await madeClone(cwd);
+      expect("error" in again ? again.error : again).toEqual({ cwd, repo: w.repo, branch: w.branch, base: w.base, super_base: w.super_base, origin_url: w.origin_url });
+    } finally {
+      globalThis.fetch = realFetch;
+      for (const [k, v] of [["DISCOVERY_ENDPOINT", env.d], ["METABOB_API_KEY", env.k]] as const) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+    expect(tree).toBe(String(refused.clone?.tree));
+  });
+
   scanned("[MUST-FAIL] lands nothing without a verdict on its tree, nor with a verdict on another tree", async () => {
     const before = originHead();
     const { cwd, tree } = await change("a.txt", "two\n");

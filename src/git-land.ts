@@ -95,7 +95,7 @@ export type LandResult =
   | { shape: "gitLand"; cwd: string; repo: string; branch: string; head: string; tree: string; changed: string[];
       verdict_ref: string; verdict_by: string; scan: { ran: true; rules: string[] }; pushed: true }
   | { error: string; stderr?: string; rules?: string[]; widening?: string[]; tree?: string; head?: string; out_of_reach?: string[]; unserved?: string;
-      clone?: { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; head: string; tree: string } };
+      clone?: { shape: "gitWorktree"; cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; head: string; tree: string } };
 
 /**
  * Where the USER's protected list is read for a change: never from the change's own tree. A super-repo change is
@@ -167,9 +167,11 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
 
     const verdict = await approved(d, made, tree);
     // refused: where the clone is now, as a row the walk records (its newest tree, read by no words), so the next move is a
-    // diff of this tree rather than the land asked again
+    // diff of this tree rather than the land asked again. The walk's gitWorktree rows at a cwd are what a later commit or
+    // landing reads the clone from (walk-rows.ts madeClone), so this one carries every field the others do: a row lacking
+    // one reads as a different clone at the same place, and every later commit or landing there is refused.
     if ("error" in verdict) return { ...verdict, tree,
-      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, head, tree } };
+      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, super_base: made.super_base, origin_url: made.origin_url, head, tree } };
 
     // No hooks run beside the credential: an empty directory this vessel owns.
     const hooksDir = mkdtempSync(join(work, "hooks-"));
