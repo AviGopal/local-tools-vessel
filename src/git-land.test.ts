@@ -162,6 +162,9 @@ describe("git_land", () => {
     table = [];
     const refused = await landClone(cwd, deps) as { error: string; clone?: Record<string, unknown> };
     expect(String(refused.error)).toContain("no verdict approves this tree");
+    // the refusal's record carries every field the clone's other records do, whatever a reader tolerates
+    const w0 = made.get(cwd)!;
+    expect(refused.clone).toMatchObject({ repo: w0.repo, branch: w0.branch, base: w0.base, super_base: w0.super_base, origin_url: w0.origin_url });
     // the walk's rows at this cwd: git_worktree's call that made the clone, then the refusal's clone as a gitWorktree row
     const w = made.get(cwd)!;
     const walkRows: Array<Record<string, unknown>> = [

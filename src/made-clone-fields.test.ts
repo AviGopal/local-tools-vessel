@@ -37,6 +37,12 @@ describe("madeClone, over rows that do not all carry every field", () => {
     expect(await madeClone(CWD)).toEqual(made);
   });
 
+  it("[GUARD] a field recorded as \"\" is not carried: no second clone, and its value comes from the rows that carry it", async () => {
+    rows = [...handouts(14), located({ origin_url: "", super_base: "" })];
+    const { shape: _s, ...made } = CLONE;
+    expect(await madeClone(CWD)).toEqual(made);
+  });
+
   it("[GUARD] a field no row at the cwd carries leaves the clone unknown: refused", async () => {
     const { origin_url: _o, ...noOrigin } = CLONE;
     rows = [...handouts(3, noOrigin), located()];
