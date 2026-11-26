@@ -884,7 +884,8 @@ export type GapCheckAt =
 // What a run's output keeps for its caller: the closer reads each failing name's assertion from it, as from its own run
 const GAP_CHECK_OUT_MAX = 256 * 1024;
 const SHA = /^[0-9a-f]{40}$/;
-const NAME = /^[A-Za-z0-9._-]+$/;
+// a name of dots alone is a path out of the clones zone (".." is its parent), never a repository's name
+const NAME = /^(?!\.+$)[A-Za-z0-9._-]+$/;
 const BRANCH = /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/;
 const RELATIVE = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.startsWith("-") && !p.split("/").some((x) => x === ".." || x === "");
 

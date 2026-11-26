@@ -91,6 +91,10 @@ describe("gap_check", () => {
     // a path that leaves the tree is refused by its form, even where it names a file that is there: the tree is written
     // out to a directory named gap, so ../gap/ comes back into it
     expect(await gapCheckAt(ask(green, { test_file: "../gap/calc.test.ts" }), opts)).toMatchObject({ ran: false, passed: false, why: "test_file must be a path inside the repository" });
+    // a repository named by dots alone would be read from the clones zone itself or its parent: refused by its form
+    for (const repo of [".", "..", "..."]) {
+      expect(await gapCheckAt(ask(green, { repo }), opts)).toMatchObject({ ran: false, passed: false, why: "repo must be a repository's name" });
+    }
   });
 
   it("[MUST-FAIL] is served to a caller by its shape, works in no clone, and is not offered to the walk", async () => {
