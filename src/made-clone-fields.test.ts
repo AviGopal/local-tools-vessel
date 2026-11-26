@@ -49,6 +49,19 @@ describe("madeClone, over rows that do not all carry every field", () => {
     expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("its base, repo, branch or origin");
   });
 
+  it("[GUARD] super_base no row at the cwd carries leaves the clone unknown: refused", async () => {
+    const { super_base: _s, ...noSuper } = CLONE;
+    rows = [...handouts(3, noSuper), located()];
+    expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("its base, repo, branch or origin");
+  });
+
+  it("[GUARD] base no row at the cwd carries leaves the clone unknown: refused", async () => {
+    const { base: _b, ...noBase } = CLONE;
+    const { base: _l, ...unbased } = located();
+    rows = [...handouts(3, noBase), unbased];
+    expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("its base, repo, branch or origin");
+  });
+
   it("[GUARD] two rows that both carry origin_url and differ are two clones at one place: refused", async () => {
     rows = [...handouts(2), ...handouts(1, { ...CLONE, origin_url: "https://example.invalid/other.git" }), located()];
     expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("walk rows record different clones");
