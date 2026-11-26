@@ -883,6 +883,21 @@ export type GapCheckAt =
 
 // What a run's output keeps for its caller: the closer reads each failing name's assertion from it, as from its own run
 const GAP_CHECK_OUT_MAX = 256 * 1024;
+// A failure's message as the runner printed it: bun's junit report names a failure's type and not its message, and prints
+// the message to its output after the line that ended the test before it, ending with "(fail) <name>". Read from its
+// "error:" line on, when the report gives none. It is what a closer shows of a failure, never what it decides by: the
+// verdict is the report's, and the tested code shares this output. Bounded, since a closer keeps it in a row.
+const FAIL_MESSAGE_MAX = 2000;
+export const failMessageOf = (out: string, name: string): string => {
+  const lines = out.split("\n");
+  const at = lines.findIndex((l) => l === `(fail) ${name}` || l.startsWith(`(fail) ${name} [`));
+  if (at < 0) return "";
+  let from = at - 1;
+  while (from >= 0 && !/^\((pass|fail|skip|todo)\) /.test(lines[from]) && !/^\S.*\.(test|spec)\.[cm]?[jt]sx?:$/.test(lines[from])) from--;
+  const block = lines.slice(from + 1, at);
+  const e = block.findIndex((l) => l.startsWith("error:"));
+  return (e >= 0 ? block.slice(e) : block).join("\n").trim().slice(0, FAIL_MESSAGE_MAX);
+};
 const SHA = /^[0-9a-f]{40}$/;
 // a name of dots alone is a path out of the clones zone (".." is its parent), never a repository's name
 const NAME = /^(?!\.+$)[A-Za-z0-9._-]+$/;
@@ -934,7 +949,7 @@ export async function gapCheckAt(q: GapCheckAsk, opts: { source?: string; transp
     if (r.passed === null) return no("the test run wrote no report", { ...at, out: kept.out });
     const passed = r.passed;
     const names = Object.fromEntries(q.only_tests.map((n): [string, NameState] => [n, passed.has(n) ? { result: "pass" }
-      : r.failed.has(n) ? { result: "fail", error: r.failed.get(n) ?? "" } : { result: "absent" }]));
+      : r.failed.has(n) ? { result: "fail", error: r.failed.get(n) || failMessageOf(r.out, n) } : { result: "absent" }]));
     const green = q.only_tests.length === 0 ? r.exit_code === 0 : q.only_tests.every((n) => names[n].result === "pass");
     return { shape: "gapCheck", ran: true, passed: green && !r.signalled, repo: q.repo, ...at, names, exit_code: r.exit_code,
       signalled: r.signalled, ...kept, uid: runningAsRoot() ? AGENT_SHELL_UID : process.getuid?.() ?? -1 };

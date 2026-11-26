@@ -5,8 +5,8 @@ import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bu
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gapCheckAt } from "./git-land";
-import { resolvers } from "./index";
+import { failMessageOf, gapCheckAt } from "./git-land";
+import { gapCheckVia, resolvers } from "./index";
 import { SHAPE_ANSWERS, SHAPE_INPUTS, wrapsClone } from "./shape-inputs";
 
 setDefaultTimeout(120_000);
@@ -57,6 +57,21 @@ afterAll(() => {
   rmSync(T, { recursive: true, force: true });
 });
 
+describe("a failure's message from the runner's output", () => {
+  const out = ["bun test v1", "", "a.test.ts:", "1 | src", "    ^", "error: expect(received).toBe(expected)", "", "Expected: 3", "Received: -1", "",
+    "      at <anonymous> (a.test.ts:2:60)", "(fail) add > adds [0.18ms]", "1 | src", "error: boom here", "      at <anonymous> (a.test.ts:2:167)",
+    "(fail) add > throws [0.06ms]", "(pass) add > zero [0.01ms]", "", " 1 pass", " 2 fail"].join("\n");
+  it("[MUST-FAIL] each name's own block, from its error line, and none of the one before", () => {
+    expect(failMessageOf(out, "add > adds")).toBe("error: expect(received).toBe(expected)\n\nExpected: 3\nReceived: -1\n\n      at <anonymous> (a.test.ts:2:60)");
+    expect(failMessageOf(out, "add > throws")).toBe("error: boom here\n      at <anonymous> (a.test.ts:2:167)");
+  });
+  it("[MUST-FAIL] a name the output does not fail is no message, and a long one is bounded", () => {
+    expect(failMessageOf(out, "add > zero")).toBe("");
+    expect(failMessageOf(out, "add > add")).toBe("");
+    expect(failMessageOf(`a.test.ts:\nerror: ${"y".repeat(5000)}\n(fail) add > big [1ms]`, "add > big").length).toBe(2000);
+  });
+});
+
 describe("gap_check", () => {
   it("[MUST-FAIL] runs the test file at the commit asked: red where the source is broken, green where it is fixed, each name by the report", async () => {
     const r = await gapCheckAt(ask(base, { only_tests: ["add > adds", "add > zero"] }), opts);
@@ -71,6 +86,38 @@ describe("gap_check", () => {
   it("[MUST-FAIL] a name the report does not hold is absent, and does not pass", async () => {
     expect(await gapCheckAt(ask(green, { only_tests: ["add > adds", "add > gone"] }), opts))
       .toMatchObject({ ran: true, passed: false, names: { "add > adds": { result: "pass" }, "add > gone": { result: "absent" } } });
+  });
+
+  it("[GUARD] served by its shape, the handler runs the names, file and commit the pointer asks, and gives each name back", async () => {
+    const serve = gapCheckVia(opts);
+    const at = (ref: string, more: Record<string, unknown> = {}) => serve({ body: { impulse: { pointer: { type: "gap_check", ...(ask(ref, more) as object) } } } } as never);
+    expect(await at(base, { only_tests: ["add > adds", "add > zero", "add > gone"] })).toMatchObject({ ran: true, passed: false, repo: "demo", head: base,
+      test_file: "calc.test.ts", names: { "add > adds": { result: "fail" }, "add > zero": { result: "pass" }, "add > gone": { result: "absent" } } });
+    expect(await at(green)).toMatchObject({ ran: true, passed: true, head: green, names: { "add > adds": { result: "pass" } } });
+    // a branch origin does not have is fetched as asked, and refused
+    expect(await at(green, { branch: "main" })).toMatchObject({ ran: false, passed: false });
+  });
+
+  it("[MUST-FAIL] a failing name carries the runner's own message for it, which is what a closer reads", async () => {
+    const r = await gapCheckAt(ask(base), opts);
+    if (!r.ran) throw new Error(r.why);
+    // the report names the failure's type only; the message is the runner's own block for that name
+    const error = (r.names["add > adds"] as { error?: string }).error ?? "";
+    expect(error.startsWith("error: expect(received).toBe(expected)")).toBe(true);
+    expect(error).toContain("Expected: 3");
+    expect(error).toContain("Received: -1");
+    expect(error).not.toContain("(fail)");
+  });
+
+  it("[GUARD] a run's out past the bound is kept from its end, where the runner prints its failures and counts", async () => {
+    const long = `HEAD-OF-RUN\n${"x".repeat(300 * 1024)}\nEND-OF-RUN 1 pass`;
+    const run = async () => ({ passed: new Set(["add > adds"]), failed: new Map<string, string>(), exit_code: 0, signalled: false, killed: false, out: long });
+    const r = await gapCheckAt(ask(green), { ...opts, run });
+    expect(r).toMatchObject({ ran: true, passed: true, truncated: true });
+    if (!r.ran) throw new Error(r.why);
+    expect(r.out.endsWith("END-OF-RUN 1 pass")).toBe(true);
+    expect(r.out.includes("HEAD-OF-RUN")).toBe(false);
+    expect(r.out.length).toBe(256 * 1024);
   });
 
   it("[MUST-FAIL] a run a signal ended does not pass, even where its report says every named test passed", async () => {

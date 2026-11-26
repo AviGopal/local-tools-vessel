@@ -693,12 +693,14 @@ const gitLand: ResolverHandler = async (ctx) => {
 };
 
 // A gap's test file run at one commit of origin's branch by git_diff's own runner (git-land.ts gapCheckAt): what the
-// failing-test closer closes a gap on. Not offered to the walk (no declared inputs); it writes nothing.
-const gapCheck: ResolverHandler = async (ctx) => {
+// failing-test closer closes a gap on. Not offered to the walk (no declared inputs); it writes nothing. Made from the
+// runner's options so a test can serve it over a local origin; served with none, origin is fetched over https only.
+export const gapCheckVia = (opts: Parameters<typeof gapCheckAt>[1] = {}): ResolverHandler => async (ctx) => {
   const p = ((ctx.body as { impulse?: { pointer?: Record<string, unknown> } })?.impulse?.pointer ?? ctx.body ?? {}) as Record<string, unknown>;
   return gapCheckAt({ repo: String(p.repo ?? ""), ref: String(p.ref ?? ""), branch: String(p.branch ?? ""),
-    test_file: String(p.test_file ?? ""), only_tests: (Array.isArray(p.only_tests) ? p.only_tests : []) as string[] }).catch(refusedOrError);
+    test_file: String(p.test_file ?? ""), only_tests: (Array.isArray(p.only_tests) ? p.only_tests : []) as string[] }, opts).catch(refusedOrError);
 };
+const gapCheck = gapCheckVia();
 
 const gitWorktree: ResolverHandler = async (ctx) => {
   const repo = str(ctx.body, "impulse", "pointer", "repo") ?? str(ctx.body, "repo");
