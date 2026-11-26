@@ -1079,7 +1079,7 @@ export const wrapped = (name: string, handler: ResolverHandler, refresh: typeof 
     const why = await behind(clone, process.env, refusalOf(out)).catch(() => null);
     // First: the walk keeps the start of a long answer (a cut hop) and of a refusal (its failure row), so a note at the
     // end would be lost on exactly the long reads and refusals a stale clone draws.
-    return why === null ? out : { clone_behind: why, ...out };
+    return why === null ? out : typeof why === "string" ? { clone_behind: why, ...out } : { ...why, ...out };
   };
 for (const [name, handler] of resolvers) if (wrapsClone(name)) resolvers.set(name, wrapped(name, handler));
 

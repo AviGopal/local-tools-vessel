@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { withClones } from "./clones-lock.js";
-import { clonePlace, committedTree, refreshed, type Refresh } from "./git-worktree.js";
+import { clonePlace, committedTree, movedOnAnswer, refreshed, type Refresh, type Unread, unreadOf } from "./git-worktree.js";
 import { madeClone } from "./walk-rows.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
@@ -19,7 +19,7 @@ export type Refreshed = { shape: "gitWorktree"; cwd: string; repo: string; branc
 
 /** A refresh that did not finish: where the clone is when it moved, why, the conflicting paths, whether it held a change
  *  (changed, when the refusal said), and held when what it holds is commits and uncommitted edits together. */
-export type Refused = { clone?: Refreshed; error: string; conflicts: string[]; changed?: boolean; held?: "commits_and_edits" };
+export type Refused = { clone?: Refreshed; error: string; conflicts: string[]; changed?: boolean; held?: "commits_and_edits"; unread?: Unread };
 
 /** The clone brought to its copy's HEAD (clone: where it is now), why it could not be (error, with the paths), or null when it is not
  *  behind or is not a clone a walk row records (then nothing is touched). */
@@ -37,9 +37,12 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
   const origin = await read(["config", "--get", "remote.origin.url"], source);
   if (!to || !branch || branch === "HEAD" || !superBase || !origin) return null;
   // Not behind: the copy's HEAD is already under the clone's (as the shell user, who owns the clone).
-  if ((await git(["-C", clone.dir, "merge-base", "--is-ancestor", to, "HEAD"], tmpdir())).exit_code === 0) return null;
+  const has = await git(["-C", clone.dir, "merge-base", "--is-ancestor", to, "HEAD"], tmpdir());
+  if (has.exit_code === 0) return null;
   const m = await made(clone.dir);
   if ("error" in m || m.origin_url !== origin) return null;
+  // git did not answer: the clone is not known to be behind, and nothing is moved.
+  if (!movedOnAnswer(has, to)) return { error: `${clone.dir} could not be read`, conflicts: [], unread: unreadOf(has) };
   const facts = { shape: "gitWorktree" as const, cwd: clone.dir, repo: clone.repo, branch, base: to, super_base: superBase, origin_url: origin,
     refreshed_from: m.base };
   // Where the clone is now, each read on its own: one that fails (a spawn failing) is not said, and never unsays the move.
@@ -56,8 +59,10 @@ export async function refreshInPlace(clone: { dir: string; repo: string }, env: 
       return { clone: { ...facts, ...(await where()) }, error: `${clone.dir} was brought onto ${to.slice(0, 12)} but the refresh did not finish: ${String(e).slice(0, 200)}`, conflicts: [] };
     }
     if (!r.ok) {
-      const error = `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`;
-      const said = { error, conflicts: r.conflicts, changed: r.changed, ...(r.held ? { held: r.held } : {}) };
+      const error = "unread" in r ? `${clone.dir} could not be read`
+        : `${clone.dir} is behind this node's copy of ${clone.repo} and could not be brought onto it: ${r.why}`;
+      const said = { error, conflicts: r.conflicts, ...(r.changed !== undefined ? { changed: r.changed } : {}),
+        ...("held" in r && r.held ? { held: r.held } : {}), ...("unread" in r ? { unread: r.unread } : {}) };
       return (await onTo()) ? { clone: { ...facts, ...(await where()) }, ...said } : said;
     }
     return { clone: { ...facts, ...(r.carried ? { carried: r.carried } : {}), ...(await where()) } };
@@ -86,7 +91,7 @@ export async function freshFirst(clone: { dir: string; repo: string } | null, ru
   // A clone that moved before the refresh failed: the move is said first (the walk records it), and the tool does not run.
   if (r !== null && "error" in r) {
     return { ...(r.clone ? { clone: r.clone } : {}), error: r.error, conflicts: r.conflicts,
-      ...(r.changed !== undefined ? { changed: r.changed } : {}), ...(r.held ? { held: r.held } : {}) };
+      ...(r.changed !== undefined ? { changed: r.changed } : {}), ...(r.held ? { held: r.held } : {}), ...(r.unread ? { unread: r.unread } : {}) };
   }
   // The tool runs knowing the move this call just made (thisCall, below): its rows cannot say it yet (the walk records it
   // from this answer), so without it the tool would read the clone's old base and refuse its own refresh.

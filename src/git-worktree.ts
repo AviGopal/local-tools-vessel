@@ -159,7 +159,28 @@ async function chooseOrClone(trees: string, repo: string, base: string, superBas
 // Not ok: changed says whether the clone held a change (so a fresh clone does not hide it), conflicts which paths `to`
 // also changed, why in words. Nothing here edits a file or resolves a conflict.
 export type Refresh = { ok: true; carried?: "uncommitted" | "commits" }
-  | { ok: false; changed: boolean; conflicts: string[]; why: string; held?: "commits_and_edits" };
+  | { ok: false; changed: boolean; conflicts: string[]; why: string; held?: "commits_and_edits" }
+  | { ok: false; changed?: undefined; conflicts: []; why: string; unread: Unread };
+
+/** Why git could not read a clone, as fields: its exit and the class of what it wrote, not its words. A clone git could not
+ *  read is said as that, never as off its branch or behind: those are what git answered, this is that it did not answer. */
+export type Unread = { exit_code: number; stderr_class: "timeout" | "dubious_ownership" | "not_a_repository" | "lock" | "permission" | "other" };
+export function unreadOf(r: { exit_code: number; stderr: string }): Unread {
+  const e = r.stderr;
+  const stderr_class = /\[killed at the step bound/.test(e) ? "timeout"
+    : /dubious ownership/i.test(e) ? "dubious_ownership"
+    : /not a git repository/i.test(e) ? "not_a_repository"
+    : /Unable to create '[^']*\.lock'|\.lock': File exists/.test(e) ? "lock"
+    : /Permission denied/i.test(e) ? "permission"
+    : "other";
+  return { exit_code: r.exit_code, stderr_class };
+}
+/** Whether `merge-base --is-ancestor <at> HEAD` failing in a clone is an answer that the copy (at its commit `at`) moved
+ *  on: not under HEAD (exit 1), or `at` a commit the clone does not hold at all (git names that commit not a valid one;
+ *  a clone missing its own HEAD's commit is named the same way, and is a clone git could not read). Else git did not
+ *  answer, and the clone could not be read. */
+export const movedOnAnswer = (r: { exit_code: number; stderr: string }, at: string): boolean =>
+  r.exit_code === 1 || (r.exit_code === 128 && r.stderr.includes(`Not a valid commit name ${at}`));
 // Where a clone is now: its HEAD and HEAD's tree, as fields, so a reader (the walk's newest tree) never parses a sha out
 // of words. Read after a move; nothing is said when either cannot be read.
 export async function clonePlace(cwd: string): Promise<{ head: string; tree: string } | Record<string, never>> {
@@ -180,18 +201,22 @@ export async function committedTree(cwd: string): Promise<{ committed_tree: stri
 export async function refreshed(cwd: string, from: string, to: string, branch: string, source: string): Promise<Refresh> {
   const run = (args: string[], timeoutMs?: number) => git(["-C", cwd, ...args], tmpdir(), timeoutMs ? { timeoutMs } : undefined);
   const out = async (args: string[], timeoutMs?: number) => { const r = await run(args, timeoutMs); return r.exit_code === 0 ? r.stdout.trim() : null; };
-  const no = (why: string, changed = false, conflicts: string[] = []): Extract<Refresh, { ok: false }> => ({ ok: false, changed, conflicts, why });
+  const no = (why: string, changed = false, conflicts: string[] = []): Extract<Refresh, { ok: false; changed: boolean }> => ({ ok: false, changed, conflicts, why });
   // A replay a restart cut off leaves the clone mid-rebase, off its own branch: undone first, which puts the clone back
   // on its branch exactly as it was, so it is carried (or named) like any other.
   if (existsSync(join(cwd, ".git", "rebase-merge")) || existsSync(join(cwd, ".git", "rebase-apply"))) await run(["rebase", "--abort"]);
-  const own = await out(["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (!own || !own.startsWith("walk/")) {
+  const unread = (r: { exit_code: number; stderr: string }): Refresh => ({ ok: false, conflicts: [], why: "the clone could not be read", unread: unreadOf(r) });
+  const head = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (head.exit_code !== 0) return unread(head);
+  const own = head.stdout.trim();
+  if (!own.startsWith("walk/")) {
     // Still off its branch: whatever it holds past its base is named, never dropped in silence by a fresh clone.
     const held = await out(["rev-list", "HEAD", "--not", from]);
     return no("the clone is not on its own walk/ branch", held !== null && held !== "");
   }
-  const dirty = await out(["status", "--porcelain", "--untracked-files=all"]);
-  if (dirty === null) return no("the clone could not be read");
+  const status = await run(["status", "--porcelain", "--untracked-files=all"]);
+  if (status.exit_code !== 0) return unread(status);
+  const dirty = status.stdout.trim();
   // The new base is fetched first: a fetch adds objects and moves nothing, so a clone refused below is still exactly as it
   // was. Its objects tell where the clone really forks from the copy's history (the newest commit both hold), which is
   // the base its own work sits on. `from` is the base a row recorded, and a clone moved since (a refresh in place the
