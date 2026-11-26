@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AFTER_MS } from "./bounded-run";
 import { commitInClone } from "./git-commit";
-import { diffClone, diffMade, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
+import { diffClone, diffMade, gapCheckAt, gapOf, landClone, passedIn, suiteCheck, suiteRefuses } from "./git-land";
 import type { Trusted, Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import type { Made, Query, Row } from "./walk-rows";
@@ -913,6 +913,21 @@ describe("git_land", () => {
     // nothing had passed there, still has its red test counted
     const forge = 'import { writeFileSync } from "node:fs";\ntry { writeFileSync("../base-report/" + "jun" + "it.xml", "<testsuites></testsuites>"); } catch {}\n' + breaks;
     expect(await check({ "calc.ts": forge })).toMatchObject({ ran: true, passed: false, regressed: ["add > zero"] });
+  });
+
+  it("[MUST-FAIL] gap_check reads a commit as git_diff's gap check reads that commit as its base: one runner, one verdict per name", async () => {
+    // the base from the cases above: add subtracts, so "add > adds" fails there and "add > zero" passes
+    const { cwd } = await changeOf({ "calc.ts": "export const add = (a: number, b: number): number => a + b;\n" });
+    const r = await diffClone(cwd, made.get(cwd)!, ["file"], { gap_id: "G1", test_file: "calc.test.ts", only_tests: ["add > zero"] } as never);
+    if (!("tree" in r) || r.check?.ran !== false || !r.check.base) throw new Error(JSON.stringify(r));
+    const at = await gapCheckAt({ repo: "demo", ref: made.get(cwd)!.base, branch: "dev", test_file: "calc.test.ts", only_tests: ["add > zero", "add > adds"] },
+      { transports: ["file"] });
+    if (!at.ran) throw new Error(at.why);
+    expect(at.exit_code).toBe(r.check.base.exit_code);
+    expect(at.uid).toBe(r.check.base.uid);
+    expect(r.check.base.matched["add > zero"]).toEqual(["add > zero"]);
+    expect(at.names).toMatchObject({ "add > zero": { result: "pass" }, "add > adds": { result: "fail" } });
+    expect(at.passed).toBe(false);
   });
 
   it("[MUST-FAIL] git_diff runs the whole suite on the base and the tree: a test green on the base and red on the tree is named, one red on both is not", async () => {

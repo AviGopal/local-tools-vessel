@@ -113,7 +113,8 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
 // How a call works in a walk clone behind this node's copy (index.ts, clone-refresh.ts freshFirst). A call not named here
 // works in the clone, so the clone is brought onto the copy first and the call does not run in one that cannot be.
 //   - unwrapped: it works in no one clone, so nothing is refreshed or said of one. git_worktree makes clones,
-//     walk_trees_reclaim removes them, walk_failure_detect reads and writes rows.
+//     walk_trees_reclaim removes them, walk_failure_detect reads and writes rows,
+//     gap_check runs a test file at a commit of origin.
 //   - runs_on_held_edits: it also runs in a clone whose refresh is refused for holding commits and uncommitted edits
 //     together. git_commit commits what the clone holds against the base it was made at, which needs no current base, and
 //     what it makes (commits only) is what a later refresh replays; refusing it there left the walk no way on but a fresh
@@ -122,6 +123,7 @@ export const SHAPE_IN_CLONE: Record<string, "unwrapped" | "runs_on_held_edits"> 
   git_worktree: "unwrapped",
   walk_trees_reclaim: "unwrapped",
   walk_failure_detect: "unwrapped",
+  gap_check: "unwrapped",
   git_commit: "runs_on_held_edits",
 }
 export const wrapsClone = (name: string): boolean => SHAPE_IN_CLONE[name] !== "unwrapped"

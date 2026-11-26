@@ -872,6 +872,74 @@ async function gapCheck(t: Trusted, repo: string, dir: string | { why: string },
   return { ...id, ran: true, passed: named && regressed.length === 0 && !r.signalled, ...tail, regressed };
 }
 
+/** What gap_check is asked: a repository's test file run at one commit of origin's branch, and the tests a gap names in it. */
+export type GapCheckAsk = { repo: string; ref: string; branch: string; test_file: string; only_tests: string[] };
+/** Each named test as the run's report says it: passed, failed (with the runner's message), or in neither (absent). */
+export type NameState = { result: "pass" } | { result: "fail"; error: string } | { result: "absent" };
+export type GapCheckAt =
+  | { shape: "gapCheck"; ran: true; passed: boolean; repo: string; head: string; test_file: string; names: Record<string, NameState>;
+      exit_code: number; signalled: boolean; out: string; truncated: boolean; uid: number }
+  | { shape: "gapCheck"; ran: false; passed: false; why: string; repo?: string; head?: string; test_file?: string; out?: string };
+
+// What a run's output keeps for its caller: the closer reads each failing name's assertion from it, as from its own run
+const GAP_CHECK_OUT_MAX = 256 * 1024;
+const SHA = /^[0-9a-f]{40}$/;
+const NAME = /^[A-Za-z0-9._-]+$/;
+const BRANCH = /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/;
+const RELATIVE = (p: string): boolean => p !== "" && !p.startsWith("/") && !p.startsWith("-") && !p.split("/").some((x) => x === ".." || x === "");
+
+/**
+ * A gap's test file run at one commit of origin's branch by the check's own runner (writeOut, runCheck): the tree written
+ * out of a repository this vessel owns, run as the shell user with the installed node_modules, judged from the runner's
+ * report. The failing-test closer asks this for the verdict it closes a gap on, so the gap is closed and refused by one
+ * runner, not by two that can read the same test differently. The commit is fetched from origin as git_diff fetches it
+ * (https, no credential) and must be on its branch; nothing of the node's checkout is run. It writes nothing.
+ */
+export async function gapCheckAt(q: GapCheckAsk, opts: { source?: string; transports?: string[] } = {}): Promise<GapCheckAt> {
+  const no = (why: string, more: Partial<{ head: string; test_file: string; out: string }> = {}): GapCheckAt =>
+    ({ shape: "gapCheck", ran: false, passed: false, why, ...(NAME.test(String(q.repo)) ? { repo: q.repo } : {}), ...more });
+  if (!NAME.test(String(q.repo))) return no("repo must be a repository's name");
+  if (!SHA.test(String(q.ref))) return no("ref must be a full commit sha");
+  if (!BRANCH.test(String(q.branch)) || String(q.branch).split("/").includes("..")) return no("branch must be a branch's name");
+  if (typeof q.test_file !== "string" || !RELATIVE(q.test_file)) return no("test_file must be a path inside the repository");
+  if (!Array.isArray(q.only_tests) || !q.only_tests.every((n) => typeof n === "string")) return no("only_tests must be a list of test names");
+  const at = { head: q.ref, test_file: q.test_file };
+  const source = opts.source ?? join(containmentZones(process.env).clones, q.repo);
+  const url = await git(["-C", source, "config", "--get", "remote.origin.url"], tmpdir());
+  if (url.exit_code !== 0 || url.stdout.trim() === "") return no(`${q.repo} has no origin on this node`, at);
+  const work = mkdtempSync(join(tmpdir(), "gap-check-"));
+  try {
+    // the shell user must reach the written-out tree under `work`, never list or write it
+    chmodSync(work, 0o711);
+    const repo = join(work, "repo.git");
+    const init = await trusted(["init", "--quiet", "--bare", repo], work, work);
+    if (init.exit_code !== 0) return no("a repository to run the check in could not be made", at);
+    const origin = `refs/remotes/origin/${q.branch}`;
+    const f = await trusted(["fetch", "--quiet", url.stdout.trim(), `refs/heads/${q.branch}:${origin}`], repo, work,
+      { transports: opts.transports ?? DEFAULTS.transports });
+    if (f.exit_code !== 0) return no(`fetching ${q.branch} from origin failed`, at);
+    const on = await trusted(["merge-base", "--is-ancestor", q.ref, origin], repo, work);
+    if (on.exit_code !== 0) return no(`${q.ref} is not on origin's ${q.branch}`, at);
+    const out = async (args: string[]) => { const r = await trusted(args, repo, work); return r.exit_code === 0 ? r.stdout.trim() : null; };
+    const t: Trusted = { repo, origin, head: q.ref, tree: "", out, step: async () => ({ error: "no step here" }) };
+    const dir = await writeOut(t, { repo: q.repo } as Made, work, q.ref, "gap");
+    if (typeof dir !== "string") return no(dir.why, at);
+    if (!existsSync(join(dir, q.test_file))) return no(`${q.test_file} is not in the tree at ${q.ref}`, at);
+    const r = await runCheck(dir, q.test_file);
+    const kept = { out: r.out.slice(-GAP_CHECK_OUT_MAX), truncated: r.out.length > GAP_CHECK_OUT_MAX };
+    if (r.killed) return no(`the test run did not finish within the step bound (${STEP_MS} ms)`, { ...at, out: kept.out });
+    if (r.passed === null) return no("the test run wrote no report", { ...at, out: kept.out });
+    const passed = r.passed;
+    const names = Object.fromEntries(q.only_tests.map((n): [string, NameState] => [n, passed.has(n) ? { result: "pass" }
+      : r.failed.has(n) ? { result: "fail", error: r.failed.get(n) ?? "" } : { result: "absent" }]));
+    const green = q.only_tests.length === 0 ? r.exit_code === 0 : q.only_tests.every((n) => names[n].result === "pass");
+    return { shape: "gapCheck", ran: true, passed: green && !r.signalled, repo: q.repo, ...at, names, exit_code: r.exit_code,
+      signalled: r.signalled, ...kept, uid: runningAsRoot() ? AGENT_SHELL_UID : process.getuid?.() ?? -1 };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 // How long each step of a git_diff took, said once per call on this vessel's output (step names and milliseconds only,
 // never a path, a name or a diff): a caller that gives up on the call (discovery's forward) sees only that it gave up,
 // so this is where the step that overruns is read.

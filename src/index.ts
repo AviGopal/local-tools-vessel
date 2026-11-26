@@ -29,7 +29,7 @@ import { commitInClone } from "./git-commit.js";
 import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { detect } from "./walk-failure-detect.js";
-import { diffMade, gapOf, isGapCheckFile, landClone } from "./git-land.js";
+import { diffMade, gapCheckAt, gapOf, isGapCheckFile, landClone } from "./git-land.js";
 import { readRows } from "./walk-rows.js";
 import { behind, cloneOf, editedClone, refusalOf } from "./clone-freshness.js";
 import { freshFirst, madeCurrent, refreshInPlace } from "./clone-refresh.js";
@@ -692,6 +692,14 @@ const gitLand: ResolverHandler = async (ctx) => {
   return landClone(resolvePath(DEFAULT_CWD, cwd), { find: (c) => madeCurrent(c) }).catch(refusedOrError);
 };
 
+// A gap's test file run at one commit of origin's branch by git_diff's own runner (git-land.ts gapCheckAt): what the
+// failing-test closer closes a gap on. Not offered to the walk (no declared inputs); it writes nothing.
+const gapCheck: ResolverHandler = async (ctx) => {
+  const p = ((ctx.body as { impulse?: { pointer?: Record<string, unknown> } })?.impulse?.pointer ?? ctx.body ?? {}) as Record<string, unknown>;
+  return gapCheckAt({ repo: String(p.repo ?? ""), ref: String(p.ref ?? ""), branch: String(p.branch ?? ""),
+    test_file: String(p.test_file ?? ""), only_tests: (Array.isArray(p.only_tests) ? p.only_tests : []) as string[] }).catch(refusedOrError);
+};
+
 const gitWorktree: ResolverHandler = async (ctx) => {
   const repo = str(ctx.body, "impulse", "pointer", "repo") ?? str(ctx.body, "repo");
   if (!repo) return { error: "repo is required" };
@@ -1027,7 +1035,7 @@ export const resolvers = new Map<string, ResolverHandler>([
   ["shell", shell], ["bash", shell],
   ["fs_read", fsRead], ["fs_write", fsWrite], ["fs_edit", fsEdit],
   ["bounded_shell", boundedShellResolver],
-  ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit], ["git_worktree", gitWorktree], ["git_land", gitLand],
+  ["git_status", gitStatus], ["git_diff", gitDiff], ["git_commit", gitCommit], ["git_worktree", gitWorktree], ["git_land", gitLand], ["gap_check", gapCheck],
   ["walk_trees_reclaim", walkTreesReclaim],
   ["walk_failure_detect", walkFailureDetect],
   ["code_search", codeSearch],
@@ -1109,7 +1117,7 @@ if (import.meta.main) {
     // reach. Advertising them costs nothing; they already resolve.
     "shell", "bash", "bounded_shell",
     "fs_read", "fs_write", "fs_edit",
-    "git_status", "git_diff", "git_commit", "git_worktree", "git_land", "walk_trees_reclaim", "walk_failure_detect",
+    "git_status", "git_diff", "git_commit", "git_worktree", "git_land", "walk_trees_reclaim", "walk_failure_detect", "gap_check",
     "code_search", "code_find_function", "code_find_import",
     "code_insert_after_line", "code_replace_lines", "code_read_lines",
     "code_add_import", "code_verify_typecheck", "web_search",
