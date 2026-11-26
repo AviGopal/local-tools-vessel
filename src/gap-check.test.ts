@@ -101,9 +101,10 @@ describe("gap_check", () => {
   it("[MUST-FAIL] a failing name carries the runner's own message for it, which is what a closer reads", async () => {
     const r = await gapCheckAt(ask(base), opts);
     if (!r.ran) throw new Error(r.why);
-    // the report names the failure's type only; the message is the runner's own block for that name
+    // from the report where it carries the message, else from the runner's own block for that name: either way the
+    // assertion and both values, and nothing of the next test's line
     const error = (r.names["add > adds"] as { error?: string }).error ?? "";
-    expect(error.startsWith("error: expect(received).toBe(expected)")).toBe(true);
+    expect(error).toContain("expect(received).toBe(expected)");
     expect(error).toContain("Expected: 3");
     expect(error).toContain("Received: -1");
     expect(error).not.toContain("(fail)");
