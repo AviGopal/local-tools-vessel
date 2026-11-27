@@ -214,6 +214,19 @@ describe("zone precedence and what counts as a super-repo clone", () => {
     const real = containWrite(join(superRepo, "docs", "x.md"), { env: { ...e, SUPER_REPO_DIR: superRepo } });
     expect(!real.ok && real.zone).toBe("super");
   });
+
+  // A zone is where its directory really is: one configured through a symlink still holds a write named by the real path.
+  it("[GUARD] zones configured through a symlink hold a write named by the real path: the live clone, a push clone, the runtime, a compose worktree", () => {
+    const link = join(base, "zones-link");
+    symlinkSync(base, link);
+    const via = (p: string) => join(link, p.slice(base.length + 1));
+    const e = { WORKSPACE_ROOT: via(superRepo), MITOSIS_RUNTIME_DIR: via(vessels), MITOSIS_PUSH_CLONE_DIR: via(clones), COMPOSE_WS_DIR: via(compose), METABOB_API_KEY: KEY };
+    for (const [p, zone] of [[join(superRepo, "docs", "x.md"), "super"], [join(clones, "demo", "src", "a.ts"), "clone"],
+      [join(vessels, "demo", "src", "a.ts"), "runtime"], [join(compose, "fc-1", "demo", "src", "a.ts"), "compose"]]) {
+      const v = containWrite(p, { env: e });
+      expect(`${p.slice(base.length)}: ${v.ok} ${v.zone}`).toBe(`${p.slice(base.length)}: false ${zone}`);
+    }
+  });
 });
 
 describe("what still writes", () => {

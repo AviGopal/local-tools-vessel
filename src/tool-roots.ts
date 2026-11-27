@@ -11,8 +11,8 @@
 // The rule is locality, not a path denylist: a tool touches a path only if its
 // FULLY RESOLVED location (symlinks followed) lies under one of the roots the
 // vessel already serves. Everything else is refused before any read or write.
-import { realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
+import { realLocation } from "./write-containment.js";
 
 /**
  * Locations that must never fall inside a tool root. A configured root that
@@ -26,29 +26,10 @@ function within(child: string, parent: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/**
- * Resolve a path to where it really lives: realpath when it exists; otherwise
- * realpath of the nearest existing ancestor plus the not-yet-existing tail (a
- * new file for fs_write, possibly in new directories). Returns null only if
- * nothing on the way up can be resolved.
- */
-export function realLocation(p: string): string | null {
-  let cur = resolve(p);
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      const real = realpathSync(cur);
-      return tail.length ? join(real, ...tail.reverse()) : real;
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException)?.code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return null;
-      const parent = dirname(cur);
-      if (parent === cur) return null;
-      tail.push(cur.slice(parent.length).replace(/^\/+/, ""));
-      cur = parent;
-    }
-  }
-}
+// Where a path really lives is resolved by one function, the write containment's (realLocation: symlinks followed, and
+// for a new path its nearest existing ancestor plus the new tail), so the tool roots, the write containment and the clone a
+// write is named for (clone-freshness.ts) never disagree on it. Re-exported for those that read it from here.
+export { realLocation };
 
 /**
  * The tool roots, fully resolved, from the vessel's existing root configuration.

@@ -214,3 +214,17 @@ describe("every in-process path tool confines before touching the filesystem", (
     });
   }
 });
+
+// Where a write lands is read by one resolver, the write containment's: the tool roots confine a write with it, the write
+// containment judges one with it, and a clone is named by it (clone-freshness.ts). A second copy can drift from it, and a
+// path one reads as inside and the other as outside is a write one check refuses and the other lets through. The write
+// containment's file is the package's vendored copy (zero dependencies), so the one resolver lives there.
+describe("one resolver of where a write lands", () => {
+  it("[MUST-FAIL] the tool roots resolve with the write containment's realLocation and define no resolver of their own", async () => {
+    const src = readFileSync(join(import.meta.dir, "tool-roots.ts"), "utf8");
+    expect(src).toContain('import { realLocation } from "./write-containment.js"');
+    expect(src).not.toContain("realpathSync");
+    expect(src).not.toMatch(/function realLocation\b/);
+    expect(realLocation).toBe((await import("./write-containment")).realLocation);
+  });
+});
