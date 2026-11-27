@@ -5,9 +5,8 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { behind, cloneOf, refusalOf } from "./clone-freshness";
-import { freshFirst, refreshInPlace } from "./clone-refresh";
-import { movedOnAnswer, refreshed, unreadOf } from "./git-worktree";
+import { behind, cloneOf } from "./clone-freshness";
+import { movedOnAnswer, unreadOf } from "./git-worktree";
 
 const T = mkdtempSync(join(tmpdir(), "clone-unread-test-"));
 chmodSync(T, 0o755);
@@ -58,27 +57,6 @@ describe("what git answered, apart from git not answering", () => {
   });
 });
 
-describe("refreshed(): a clone git could not read", () => {
-  it("[MUST-FAIL] is said as could not be read, with the exit and class, not as off its branch, and claims nothing it holds", async () => {
-    const dir = unreadable();
-    const r = await refreshed(dir, head(), head(), "dev", copy);
-    expect(r).toEqual({ ok: false, conflicts: [], why: "the clone could not be read", unread: { exit_code: 128, stderr_class: "not_a_repository" } });
-  });
-  it("[MUST-FAIL] a clone whose HEAD reads but whose status does not (a corrupt index) is said as could not be read", async () => {
-    const dir = fresh();
-    writeFileSync(join(dir, ".git", "index"), "junk\n");
-    const r = await refreshed(dir, head(), head(), "dev", copy);
-    expect(r).toEqual({ ok: false, conflicts: [], why: "the clone could not be read", unread: { exit_code: 128, stderr_class: "other" } });
-  });
-  it("[GUARD] a clone off its walk/ branch (a detached HEAD) keeps its words", async () => {
-    const dir = fresh();
-    g(dir, "checkout", "-q", "--detach");
-    const r = await refreshed(dir, head(), head(), "dev", copy);
-    expect(r).toMatchObject({ ok: false, why: "the clone is not on its own walk/ branch", changed: false });
-    expect("unread" in r).toBe(false);
-  });
-});
-
 describe("behind(): a clone git could not read", () => {
   it("[MUST-FAIL] is said as could not be read, with no way on, and not as a clone the copy moved past", async () => {
     const dir = unreadable();
@@ -97,19 +75,10 @@ describe("behind(): a clone git could not read", () => {
     const off = fresh();
     writeFileSync(join(copy, "b.ts"), `${n}\n`); g(copy, "add", "-A"); g(copy, "commit", "-q", "-m", "a push, installed");
     const a = await behind({ dir: lacks, repo: "demo-vessel" }, env);
-    expect(a).toContain(`moved on (to ${head().slice(0, 10)})`);
-    expect(a).toContain("for a fresh clone");
+    expect(a).toBe(`${lacks} was made before this node's copy of demo-vessel moved on (to ${head().slice(0, 10)})`);
     g(off, "fetch", "-q", copy, "dev");
     const b = await behind({ dir: off, repo: "demo-vessel" }, env);
     expect(b).toContain(`moved on (to ${head().slice(0, 10)})`);
-  });
-  it("[MUST-FAIL] after a refresh that could not read the clone, a copy that moved on is said with no way on", async () => {
-    const dir = fresh();
-    writeFileSync(join(copy, "c.ts"), `${n}\n`); g(copy, "add", "-A"); g(copy, "commit", "-q", "-m", "another push");
-    const refusal = refusalOf({ error: `${dir} could not be read`, conflicts: [], unread: { exit_code: 137, stderr_class: "timeout" } });
-    expect(refusal).toEqual({ conflicts: [], held: null, unread: true });
-    expect(await behind({ dir, repo: "demo-vessel" }, env, refusal))
-      .toBe(`${dir} was made before this node's copy of demo-vessel moved on (to ${head().slice(0, 10)})`);
   });
 });
 
@@ -119,39 +88,20 @@ describe("a tool's answer about a path in a clone git could not read", () => {
     const { wrapped } = await import("./index");
     const dir = unreadable();
     const ctx = { body: { impulse: { pointer: { path: join(dir, "a.ts") } } } } as never;
-    const out = (await wrapped("fs_read", (async () => ({ shape: "fileContent" })) as never, async () => null)(ctx)) as Record<string, unknown>;
+    const out = (await wrapped((async () => ({ shape: "fileContent" })) as never)(ctx)) as Record<string, unknown>;
     expect(Object.keys(out)[0]).toBe("clone_unread");
     expect(out.clone_unread).toEqual({ cwd: dir, exit_code: 128, stderr_class: "not_a_repository" });
     expect("clone_behind" in out).toBe(false);
     expect(JSON.stringify(out)).not.toContain("fresh clone");
   });
-});
 
-describe("refreshInPlace(): a clone its rows record that git could not read", () => {
-  const made = (dir: string) => async () => ({ cwd: dir, repo: "demo-vessel", branch: "dev", base: head(), super_base: "s", origin_url: g(copy, "config", "--get", "remote.origin.url").trim() });
-  it("[MUST-FAIL] is refused as could not be read, not as behind, and moves nothing", async () => {
-    g(copy, "remote", "add", "origin", join(T, "nowhere.git"));
+  it("[MUST-FAIL] the tool does not run in it, and its answer is a refusal carrying the exit and class", async () => {
+    Object.assign(process.env, env);
+    const { wrapped } = await import("./index");
     const dir = unreadable();
-    let tried = 0;
-    const io = { refreshed: async () => { tried++; return { ok: true as const }; }, clonePlace: async () => ({}), committedTree: async () => ({}), movedOnto: async () => false };
-    const r = await refreshInPlace({ dir, repo: "demo-vessel" }, env, made(dir) as never, io as never);
-    expect([tried, r]).toEqual([0, { error: `${dir} could not be read`, conflicts: [], unread: { exit_code: 128, stderr_class: "not_a_repository" } }]);
-    expect(cloneOf({ cwd: dir }, env)).toEqual({ dir, repo: "demo-vessel" });
-  });
-  it("[MUST-FAIL] a clone behind its copy whose refresh could not read it is refused as could not be read, with no claim of what it holds", async () => {
-    const dir = fresh();
-    writeFileSync(join(copy, "d.ts"), `${n}\n`); g(copy, "add", "-A"); g(copy, "commit", "-q", "-m", "a push the clone lacks");
-    const unread = { exit_code: 137, stderr_class: "timeout" as const };
-    const io = { refreshed: async () => ({ ok: false as const, conflicts: [] as [], why: "the clone could not be read", unread }),
-      clonePlace: async () => ({}), committedTree: async () => ({}), movedOnto: async () => false };
-    const r = await refreshInPlace({ dir, repo: "demo-vessel" }, env, made(dir) as never, io as never);
-    expect(r).toEqual({ error: `${dir} could not be read`, conflicts: [], unread });
-  });
-  it("[MUST-FAIL] the tool does not run in it, and its answer carries the exit and class", async () => {
-    const unread = { exit_code: 128, stderr_class: "lock" as const };
+    const ctx = { body: { impulse: { pointer: { path: join(dir, "a.ts") } } } } as never;
     let ran = 0;
-    const out = await freshFirst({ dir: "/x", repo: "demo-vessel" }, async () => { ran++; return {}; }, env,
-      async () => ({ error: "/x could not be read", conflicts: [], unread }));
-    expect([ran, out]).toEqual([0, { error: "/x could not be read", conflicts: [], unread }]);
+    const out = (await wrapped((async () => { ran++; return { shape: "fileContent" }; }) as never)(ctx)) as Record<string, unknown>;
+    expect([ran, out]).toEqual([0, { clone_unread: { cwd: dir, exit_code: 128, stderr_class: "not_a_repository" }, error: `${dir} could not be read` }]);
   });
 });

@@ -115,325 +115,59 @@ describe("git_worktree", () => {
       st.bytes += text.length;
       return new Response(text, { headers: { "Content-Type": "application/json" } });
     }) as typeof fetch;
+    // The selection is passed as the walk's call names it: a git_worktree that read it to choose a clone would hand one out.
     const ask = async (s?: string) => {
-      const w = await makeWorktree("demo", process.env, s);
+      const w = await (makeWorktree as (repo: string, env: NodeJS.ProcessEnv, sel?: string) => ReturnType<typeof makeWorktree>)("demo", process.env, s);
       if ("error" in w) throw new Error(w.error);
-      // the walk records the whole answer in its ended hop (refreshed_from included, when a clone was brought to a new base)
+      // the walk records the whole answer in its ended hop
       if (s) rows.push(...walkCall(String(rows.length), "git_worktree", s, { ...w }).map((h) => ({ ...h, writer: "walk-1", seq: rows.length + 1 })));
       return w;
     };
     return { rows, st, sel, ask };
   };
 
-  it("[MUST-FAIL] two open requests never share a clone; a request gets its own clone again, and a closed one's unchanged clone", async () => {
+  // Law 6: every call makes a new clone. A clone handed out again, or moved onto a newer base, is reuse coming back.
+  it("[MUST-FAIL] every call makes a new clone: the same open request asking twice, and a request after one closed, never get one handed out before", async () => {
     const trees = join(T, "trees");
     process.env.METABOB_API_KEY = "test-node-key";
     const { st, sel, ask } = stubRecords();
-    for (const [id, root] of [["sel-a", "R-A"], ["sel-a2", "R-A"], ["sel-b", "R-B"], ["sel-b2", "R-B"], ["sel-c", "R-C"], ["sel-d", "R-D"]]) sel(id, root);
-    st.open = ["R-A", "R-B", "R-C", "R-D"];
-    const cwd = async (s?: string) => (await ask(s)).cwd;
-    const a = await cwd("sel-a");
-    const b = await cwd("sel-b");
-    expect(b).not.toBe(a); // two open requests: two clones
-    expect(await cwd("sel-a2")).toBe(a); // the same request: its own clone again
-    expect(await cwd("sel-b2")).toBe(b);
-    st.open = ["R-B", "R-C", "R-D"]; // R-A closes: its unchanged clone may go to another request
-    expect(await cwd("sel-c")).toBe(a);
-    writeFileSync(join(b, "edit.txt"), "x\n"); // a change is its request's work: it goes back to that request, as recorded
-    const again = await ask("sel-b2");
-    expect(again.cwd).toBe(b);
-    expect(readFileSync(join(again.cwd, "edit.txt"), "utf8")).toBe("x\n");
-    st.open = ["R-D"]; // R-B closes: a changed clone never goes to another request
-    expect(await cwd("sel-d")).not.toBe(b);
-    // nothing read, nothing shared: no selection named, or records down, gets a fresh clone
+    for (const [id, root] of [["sel-a", "R-A"], ["sel-a2", "R-A"], ["sel-c", "R-C"]]) sel(id, root);
+    st.open = ["R-A", "R-C"];
     const before = readdirSync(trees).length;
-    await ask(undefined);
-    st.down = true;
-    await ask("sel-a");
-    st.down = false;
-    expect(readdirSync(trees).length).toBe(before + 2);
-    // without the node key records refuses every read, and nothing is shared: a fresh clone (a pin)
-    delete process.env.METABOB_API_KEY;
-    expect(await cwd("sel-a2")).not.toBe(a);
+    const a = (await ask("sel-a")).cwd;
+    const a2 = (await ask("sel-a2")).cwd;
+    st.open = ["R-C"]; // R-A closes: its clones are unchanged, and still go to no one
+    const c = (await ask("sel-c")).cwd;
+    expect(new Set([a, a2, c]).size).toBe(3);
+    expect(readdirSync(trees).length).toBe(before + 3);
     globalThis.fetch = realFetch;
   });
 
-  it("[MUST-FAIL] a handout reads only the calls: what the selections saw, of the asking request or any other, adds no bytes", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { rows, st, sel, ask } = stubRecords();
-    sel("sel-x", "R-X");
-    st.open = ["R-X"];
-    await ask("sel-x");
-    const measure = async () => { st.bytes = 0; st.reads = []; await ask("sel-x"); return st.bytes; };
-    const quiet = await measure();
-    // the open request itself works on: 100 more of its selections (40 KB each, as live ones run), and the calls they made
-    for (let i = 0; i < 100; i++) {
-      sel(`x-${i}`, "R-X");
-      rows.push(...walkCall(`x-${i}`, "fs_read", `x-${i}`, { content: "y".repeat(8_000) }).map((h) => ({ ...h, writer: "walk-1" })));
-    }
-    // and 200 requests now closed, with their selections and their reads
-    for (let i = 0; i < 200; i++) {
-      sel(`old-${i}`, `R-old-${i}`);
-      rows.push(...walkCall(`old-${i}`, "fs_read", `old-${i}`, { content: "y".repeat(8_000) }).map((h) => ({ ...h, writer: "walk-1" })));
-    }
-    const busy = await measure();
-    expect(st.reads.some((r) => JSON.parse(r).shape === "selection" && JSON.parse(r).ids === undefined)).toBe(false); // never every selection
-    expect(busy).toBeLessThan(quiet + 2_000); // flat: what the selections saw is never read
-    // the calls that hand out clones are read: each adds what its answer holds, a few hundred bytes
-    for (let i = 0; i < 50; i++) {
-      rows.push(...walkCall(`wt-${i}`, "git_worktree", `old-${i}`, { cwd: `/nowhere/${i}`, repo: "demo", branch: "dev", base: "a".repeat(40), origin_url: "https://example.invalid/demo.git" }).map((h) => ({ ...h, writer: "walk-1" })));
-    }
-    expect(await measure()).toBeLessThan(busy + 50 * 400);
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] a records that answers the episode's rows instead of calls hands no clone out again: a fresh one is made", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { rows, st, sel, ask } = stubRecords();
-    sel("sel-p", "R-P"); sel("sel-q", "R-Q");
-    st.open = ["R-P", "R-Q"];
-    const p = await ask("sel-p"); // R-P's clone, unchanged
-    const answering = globalThis.fetch;
-    globalThis.fetch = (async (u: unknown, init?: RequestInit) => {
-      const q = JSON.parse(String(init?.body)).pointer;
-      return Array.isArray(q.calls) ? Response.json(rows) : answering(u as string, init);
-    }) as typeof fetch;
-    const q = await ask("sel-q");
-    globalThis.fetch = realFetch;
-    expect(q.cwd).not.toBe(p.cwd); // never another open request's clone
-  });
-
-  it("[MUST-FAIL] a clone two open requests both hold goes back to neither, as it is or brought to a new base", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { rows, st, sel, ask } = stubRecords();
-    for (const [id, root] of [["sel-s", "R-S"], ["sel-s2", "R-S"], ["sel-t", "R-T"], ["sel-t2", "R-T"], ["sel-s3", "R-S"]]) sel(id, root);
-    st.open = ["R-S", "R-T"];
-    const shared = await ask("sel-s");
-    // a second open request is recorded as holding the same clone (as before the handout checked)
-    rows.push(...walkCall("shared-t", "git_worktree", "sel-t", { ...shared }).map((h) => ({ ...h, writer: "walk-1", seq: rows.length + 1 })));
-    expect((await ask("sel-s2")).cwd).not.toBe(shared.cwd); // not handed back as it is
-    expect((await ask("sel-t2")).cwd).not.toBe(shared.cwd);
-    const demo = join(CLONES, "demo");
-    writeFileSync(join(demo, "c.txt"), "three\n");
-    commitAll(demo, "another push"); // the copy moves on: not brought to the new base under the other request either
-    const moved = await ask("sel-s3");
-    expect(moved.cwd).not.toBe(shared.cwd);
-    expect(g(shared.cwd, "rev-parse", "HEAD")).toBe(shared.base); // the shared clone is untouched
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] once the copy has moved on, a request's own clone is brought to the new tip in place, unchanged or carrying an edit the new tip did not touch", async () => {
+  it("[MUST-FAIL] no answer of git_worktree carries refreshed_from, carried or not_carried: once the copy has moved on, a request asking again gets a new clone at the new tip, and its old one stays as it was", async () => {
     process.env.METABOB_API_KEY = "test-node-key";
     const { st, sel, ask } = stubRecords();
     const demo = join(CLONES, "demo");
     for (const [id, root] of [["sel-e", "R-E"], ["sel-e2", "R-E"], ["sel-f", "R-F"], ["sel-f2", "R-F"]]) sel(id, root);
     st.open = ["R-E", "R-F"];
-    const e = await ask("sel-e"); // R-E's clone, which it then changes
+    const e = await ask("sel-e"); // changed, then left behind
     writeFileSync(join(e.cwd, "edit.txt"), "x\n");
-    const f = await ask("sel-f"); // R-F's clone, left unchanged
+    const f = await ask("sel-f"); // unchanged, then left behind
     writeFileSync(join(demo, "b.txt"), "two\n");
-    commitAll(demo, "a push landed"); // the copy moves on
+    commitAll(demo, "a push landed");
     const tip = g(demo, "rev-parse", "HEAD");
-    // each case on its own line: the changed clone, then the unchanged one
-    const trees = join(T, "trees");
-    const before = readdirSync(trees).length;
-    const got: string[] = [];
-    const answers: Record<string, unknown>[] = [];
-    for (const [s, old, what] of [["sel-e2", e, "changed"], ["sel-f2", f, "unchanged"]] as const) {
-      const w = await ask(s);
-      answers.push(w as unknown as Record<string, unknown>);
-      got.push(`${what}: ${w.cwd !== old.cwd ? "new clone" : "same clone"}, base ${w.base === tip ? "tip" : "old"}, HEAD ${g(w.cwd, "rev-parse", "HEAD") === tip ? "tip" : "old"}`);
-    }
-    // the changed clone's edit (edit.txt) is not a path the push changed (b.txt), so it is carried in place too
-    expect(got).toEqual(["changed: same clone, base tip, HEAD tip", "unchanged: same clone, base tip, HEAD tip"]);
-    expect(answers[0]).toMatchObject({ refreshed_from: e.base, carried: "uncommitted" });
-    expect(readFileSync(join(e.cwd, "edit.txt"), "utf8")).toBe("x\n"); // the edit is still there
-    expect(answers[1].refreshed_from).toBe(f.base); // says which base it moved from
-    expect(answers[1].carried).toBeUndefined(); // nothing to carry: as before
-    expect(readdirSync(trees).length).toBe(before); // no fresh clone was made
-    // a commit in the refreshed clone reads its rows as one clone, at the new base
-    const madeThere = await madeClone(f.cwd);
-    expect("error" in madeThere ? madeThere.error : madeThere.base).toBe(tip);
+    const answers = [e, f, await ask("sel-e2"), await ask("sel-f2")] as unknown as Array<Record<string, unknown>>;
+    for (const a of answers) expect(["refreshed_from", "carried", "not_carried"].filter((k) => k in a)).toEqual([]);
+    const [e2, f2] = answers.slice(2) as unknown as Array<{ cwd: string; base: string }>;
+    expect([e2.cwd === e.cwd, f2.cwd === f.cwd, e2.base, f2.base]).toEqual([false, false, tip, tip]);
+    expect([g(e.cwd, "rev-parse", "HEAD"), g(f.cwd, "rev-parse", "HEAD")]).toEqual([e.base, f.base]);
+    expect(readFileSync(join(e.cwd, "edit.txt"), "utf8")).toBe("x\n");
     globalThis.fetch = realFetch;
   });
 
-  it("[MUST-FAIL] a change the new tip also changed is not carried: the clone is left exactly as it was, and the answer names the paths beside a fresh clone", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-k", "R-K"], ["sel-k2", "R-K"]]) sel(id, root);
-    st.open = ["R-K"];
-    const k = await ask("sel-k");
-    writeFileSync(join(k.cwd, "a.txt"), "mine\n"); // the request's uncommitted edit of a.txt
-    asOwner(k.cwd)
-    writeFileSync(join(demo, "a.txt"), "theirs\n");
-    commitAll(demo, "a push changing a.txt too");
-    const tip = g(demo, "rev-parse", "HEAD");
-    const w = await ask("sel-k2");
-    expect(w.cwd).not.toBe(k.cwd); // a fresh clone
-    expect(w.base).toBe(tip);
-    expect((w as unknown as Record<string, unknown>).not_carried).toMatchObject({ cwd: k.cwd, from: k.base, conflicts: ["a.txt"] });
-    expect(g(k.cwd, "rev-parse", "HEAD")).toBe(k.base); // the old clone did not move
-    expect(readFileSync(join(k.cwd, "a.txt"), "utf8")).toBe("mine\n"); // and its edit is untouched
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] the request's commits are replayed onto the new tip when it changed none of their paths; a conflicting replay is undone", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-m", "R-M"], ["sel-m2", "R-M"], ["sel-n", "R-N"], ["sel-n2", "R-N"]]) sel(id, root);
-    st.open = ["R-M", "R-N"];
-    const m = await ask("sel-m");
-    writeFileSync(join(m.cwd, "m.txt"), "m\n"); commitAll(m.cwd, "m's change"); // commits a path the push won't touch
-    const n = await ask("sel-n");
-    writeFileSync(join(n.cwd, "c.txt"), "n\n"); commitAll(n.cwd, "n's change"); // commits a path the push will touch
-    asOwner(m.cwd); asOwner(n.cwd)
-    const nHead = g(n.cwd, "rev-parse", "HEAD");
-    writeFileSync(join(demo, "c.txt"), "push\n");
-    commitAll(demo, "a push changing c.txt");
-    const tip = g(demo, "rev-parse", "HEAD");
-    const wm = await ask("sel-m2") as unknown as Record<string, unknown>;
-    expect(wm).toMatchObject({ cwd: m.cwd, base: tip, refreshed_from: m.base, carried: "commits" });
-    expect(wm).toMatchObject({ head: g(m.cwd, "rev-parse", "HEAD"), tree: g(m.cwd, "rev-parse", "HEAD^{tree}") }) // where it is now
-    expect(g(m.cwd, "merge-base", "--is-ancestor", tip, "HEAD")).toBe(""); // on the new tip
-    expect(g(m.cwd, "log", "-1", "--format=%s")).toBe("m's change"); // its commit, replayed
-    expect(readFileSync(join(m.cwd, "c.txt"), "utf8")).toBe("push\n"); // and the push's change under it
-    const wn = await ask("sel-n2") as unknown as Record<string, unknown>;
-    expect(wn.cwd).not.toBe(n.cwd);
-    expect(wn.not_carried).toMatchObject({ cwd: n.cwd, conflicts: ["c.txt"] });
-    expect(g(n.cwd, "rev-parse", "HEAD")).toBe(nHead); // the conflicting clone is left exactly as it was
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] a carried change is a new tree: nothing judged on the old one (its diff, typecheck, verdict) is about it", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-v", "R-V"], ["sel-v2", "R-V"]]) sel(id, root);
-    st.open = ["R-V"];
-    const v = await ask("sel-v");
-    writeFileSync(join(v.cwd, "v.txt"), "v\n"); commitAll(v.cwd, "v's change"); asOwner(v.cwd)
-    const judged = g(v.cwd, "rev-parse", "HEAD^{tree}"); // the tree a diff, typecheck and verdict were made of
-    writeFileSync(join(demo, "d.txt"), "d\n"); commitAll(demo, "a push");
-    await ask("sel-v2");
-    // git_land takes a verdict only on the tree it lands (approved(…, tree)): the carried tree is another
-    expect(g(v.cwd, "rev-parse", "HEAD^{tree}")).not.toBe(judged);
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] a replay a restart cut off (the clone left mid-rebase) is undone, and the change is carried or named, never dropped", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-r", "R-R"], ["sel-r2", "R-R"]]) sel(id, root);
-    st.open = ["R-R"];
-    const r = await ask("sel-r");
-    writeFileSync(join(r.cwd, "c.txt"), "r\n"); commitAll(r.cwd, "r's change"); asOwner(r.cwd)
-    const rHead = g(r.cwd, "rev-parse", "HEAD");
-    writeFileSync(join(demo, "c.txt"), "push2\n"); commitAll(demo, "a push changing c.txt");
-    const tip = g(demo, "rev-parse", "HEAD");
-    // the replay a restart cut off: fetched, started, stopped on its conflict, never undone
-    g(r.cwd, "fetch", "--quiet", demo, "HEAD");
-    try { g(r.cwd, "rebase", "--quiet", "--onto", tip, r.base); } catch { /* the conflict, left as it is */ }
-    asOwner(r.cwd) // made here as the test's user: handed to the clone's owner, as every walk-tree git runs as it
-    expect(existsSync(join(r.cwd, ".git", "rebase-merge")) || existsSync(join(r.cwd, ".git", "rebase-apply"))).toBe(true)
-    const w = await ask("sel-r2") as unknown as Record<string, unknown>;
-    expect(w.not_carried).toMatchObject({ cwd: r.cwd, conflicts: ["c.txt"] }); // named, beside a fresh clone
-    expect(g(r.cwd, "rev-parse", "HEAD")).toBe(rHead); // undone: back on its branch, its commit there
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] a clone left off its own branch, holding commits, is named in the answer, not dropped in silence", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-o", "R-O"], ["sel-o2", "R-O"]]) sel(id, root);
-    st.open = ["R-O"];
-    const o = await ask("sel-o");
-    writeFileSync(join(o.cwd, "o.txt"), "o\n"); commitAll(o.cwd, "o's change"); asOwner(o.cwd)
-    g(o.cwd, "checkout", "--quiet", "--detach"); // off its branch (an undo that could not run would leave it so)
-    asOwner(o.cwd)
-    writeFileSync(join(demo, "f.txt"), "f\n"); commitAll(demo, "a push");
-    const w = await ask("sel-o2") as unknown as Record<string, unknown>;
-    expect(w.cwd).not.toBe(o.cwd);
-    expect(w.not_carried).toMatchObject({ cwd: o.cwd });
-    globalThis.fetch = realFetch;
-  });
-
-  it("a clone holding both commits and uncommitted edits is not carried, and says so", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-b", "R-B"], ["sel-b2", "R-B"]]) sel(id, root);
-    st.open = ["R-B"];
-    const b = await ask("sel-b");
-    writeFileSync(join(b.cwd, "x.txt"), "x\n"); commitAll(b.cwd, "b's commit");
-    writeFileSync(join(b.cwd, "y.txt"), "y\n"); // and an uncommitted edit
-    asOwner(b.cwd)
-    writeFileSync(join(demo, "e.txt"), "e\n"); commitAll(demo, "a push");
-    const w = await ask("sel-b2") as unknown as Record<string, unknown>;
-    expect(w.cwd).not.toBe(b.cwd);
-    expect(String((w.not_carried as { why: string }).why)).toContain("both");
-    globalThis.fetch = realFetch;
-  });
-
-  // committed_tree: the tree a commit in the clone holds, said only of a clean clone, so a check made once a change is
-  // committed never takes a clone with an uncommitted edit for its commit. `tree` (what a landing reads) is not changed:
-  // still absent on a handout, and on a refresh still where it left the clone.
   it("[MUST-FAIL] a fresh clone says its committed tree, and no tree", async () => {
     const w = await makeWorktree("demo") as unknown as Record<string, unknown>;
     expect(w.committed_tree).toBe(g(String(w.cwd), "rev-parse", "HEAD^{tree}"));
     expect("tree" in w).toBe(false);
-  });
-
-  it("[MUST-FAIL] a request's own clone handed back says its committed tree when clean, and none with a changed or untracked file", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    for (const [id, root] of [["sel-ct", "R-CT"], ["sel-ct2", "R-CT"], ["sel-ct3", "R-CT"], ["sel-ct4", "R-CT"]]) sel(id, root);
-    st.open = ["R-CT"];
-    const c = await ask("sel-ct");
-    asOwner(c.cwd);
-    writeFileSync(join(c.cwd, "ct.txt"), "1\n"); commitAll(c.cwd, "a committed change"); asOwner(c.cwd);
-    const clean = await ask("sel-ct2") as unknown as Record<string, unknown>;
-    expect([clean.cwd, clean.committed_tree, "tree" in clean]).toEqual([c.cwd, g(c.cwd, "rev-parse", "HEAD^{tree}"), false]);
-    writeFileSync(join(c.cwd, "ct.txt"), "2\n"); asOwner(c.cwd); // an edit not committed
-    const edited = await ask("sel-ct3") as unknown as Record<string, unknown>;
-    expect([edited.cwd, "committed_tree" in edited, "tree" in edited]).toEqual([c.cwd, false, false]);
-    g(c.cwd, "checkout", "--", "ct.txt"); writeFileSync(join(c.cwd, "new.txt"), "n\n"); asOwner(c.cwd); // an untracked file
-    const untracked = await ask("sel-ct4") as unknown as Record<string, unknown>;
-    expect("committed_tree" in untracked).toBe(false);
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] a closed request's unchanged clone handed to another says its committed tree, and no tree", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    for (const [id, root] of [["sel-ru", "R-RU"], ["sel-rv", "R-RV"]]) sel(id, root);
-    st.open = ["R-RU", "R-RV"];
-    const u = await ask("sel-ru");
-    st.open = ["R-RV"]; // R-RU closes: its unchanged clone goes to the next request
-    const v = await ask("sel-rv") as unknown as Record<string, unknown>;
-    expect([v.cwd, v.committed_tree, "tree" in v]).toEqual([u.cwd, g(u.cwd, "rev-parse", "HEAD^{tree}"), false]);
-    globalThis.fetch = realFetch;
-  });
-
-  it("[MUST-FAIL] once the copy has moved on, a refresh carrying commits says its committed tree; one carrying an uncommitted edit says none, and both say tree as before", async () => {
-    process.env.METABOB_API_KEY = "test-node-key";
-    const { st, sel, ask } = stubRecords();
-    const demo = join(CLONES, "demo");
-    for (const [id, root] of [["sel-cc", "R-CC"], ["sel-cc2", "R-CC"], ["sel-cu", "R-CU"], ["sel-cu2", "R-CU"]]) sel(id, root);
-    st.open = ["R-CC", "R-CU"];
-    const cc = await ask("sel-cc");
-    writeFileSync(join(cc.cwd, "cc.txt"), "c\n"); commitAll(cc.cwd, "cc's change"); asOwner(cc.cwd);
-    const cu = await ask("sel-cu");
-    writeFileSync(join(cu.cwd, "cu.txt"), "u\n"); asOwner(cu.cwd);
-    writeFileSync(join(demo, "ct-push.txt"), "p\n"); commitAll(demo, "a push");
-    const a = await ask("sel-cc2") as unknown as Record<string, unknown>;
-    expect([a.carried, a.tree, a.committed_tree]).toEqual(["commits", g(cc.cwd, "rev-parse", "HEAD^{tree}"), g(cc.cwd, "rev-parse", "HEAD^{tree}")]);
-    const b = await ask("sel-cu2") as unknown as Record<string, unknown>;
-    expect([b.carried, b.tree, "committed_tree" in b]).toEqual(["uncommitted", g(cu.cwd, "rev-parse", "HEAD^{tree}"), false]);
-    globalThis.fetch = realFetch;
   });
 
   it("refuses a name that is not a repo's, and a repo this node has no copy of", async () => {
@@ -654,13 +388,10 @@ describe("git_commit", () => {
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("2 walk rows record different clones");
     answer(call("1", "git_worktree", w, { role: "person" }));
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("no walk row");
-    // the same clone handed out twice: both rows agree, and the later one's super_base holds
-    // a refresh moves one clone's base, and says from which: its rows read as one clone, at the newest base
+    // a clone's base never moves: a second base is a second clone, whatever base a row says it came from
     answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, base: "1".repeat(40), refreshed_from: w.base }, { seq: 2 })]);
-    expect((await madeClone(cwd) as { base: string }).base).toBe("1".repeat(40));
-    // a refresh claiming a base the rows never held is a collision still
-    answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, base: "1".repeat(40), refreshed_from: "2".repeat(40) }, { seq: 2 })]);
     expect(String((await madeClone(cwd) as { error: string }).error)).toContain("different clones");
+    // rows that agree (a refused landing's record beside the clone's own) read as one, the later one's super_base holding
     answer([...call("1", "git_worktree", w, { seq: 1 }), ...call("2", "git_worktree", { ...w, super_base: "f".repeat(40) }, { seq: 2 })]);
     expect(await madeClone(cwd)).toEqual({ cwd, repo: "demo", branch: "dev", base: w.base, super_base: "f".repeat(40), origin_url: w.origin_url });
     answer([...call("1", "git_worktree", w), ...call("3", "git_land", { cwd })]);

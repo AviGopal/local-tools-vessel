@@ -67,17 +67,15 @@ describe("madeClone, over rows that do not all carry every field", () => {
     expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("walk rows record different clones");
   });
 
-  it("[GUARD] two bases with no refresh between them are two clones at one place: refused", async () => {
+  it("[GUARD] two bases at one place are two clones: refused", async () => {
     rows = [...handouts(1), located(), ...handouts(1, { ...CLONE, base: "8".repeat(40) })];
     expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("walk rows record different clones");
   });
 
-  it("[MUST-FAIL] a refresh chains to the base before it across a row that carries no base", async () => {
-    // in seq order: the clone made, a row of no base, then the refresh (or a second base with none)
-    const between = () => { const first = handouts(1); const { base: _b, ...noBase } = located(); return [...first, noBase]; };
-    rows = [...between(), ...handouts(1, { ...CLONE, base: "8".repeat(40), refreshed_from: BASE })];
-    expect(await madeClone(CWD)).toMatchObject({ base: "8".repeat(40) });
-    rows = [...between(), ...handouts(1, { ...CLONE, base: "8".repeat(40) })];
+  it("[MUST-FAIL] a clone's base never moves: a row naming the base before it as refreshed_from is still a second clone, across a row that carries no base", async () => {
+    // in seq order: the clone made, a row of no base, then a row of another base that says it moved from the first
+    const { base: _b, ...noBase } = located();
+    rows = [...handouts(1), noBase, ...handouts(1, { ...CLONE, base: "8".repeat(40), refreshed_from: BASE })];
     expect(String((await madeClone(CWD) as { error?: string }).error)).toContain("walk rows record different clones");
   });
 });

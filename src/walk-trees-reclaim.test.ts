@@ -130,8 +130,7 @@ describe("walk_trees_reclaim", () => {
     ], ["R1"]);
     const r = await reclaimWalkTrees(env);
     if ("error" in r) throw new Error(r.error);
-    expect(existsSync(newer)).toBe(true); // the newest unchanged clone of its origin: handed out again
-    expect(existsSync(older)).toBe(false); // nothing in flight holds it, and no open request names it
+    expect([older, newer].map(existsSync)).toEqual([false, false]); // nothing in flight holds them, and no open request names them
   });
 
   it("removes nothing when records cannot be read, or answers no list of calls (a guard)", async () => {
@@ -163,13 +162,13 @@ describe("walk_trees_reclaim", () => {
     expect(existsSync(landedCwd)).toBe(false);
   });
 
-  it("[MUST-FAIL] keeps the newest unchanged clone of each origin: git_worktree hands it out again", async () => {
+  it("[MUST-FAIL] keeps no unchanged clone for a later call: git_worktree makes a new clone for every call", async () => {
     const [older, newest] = ["super-d1", "super-d2"].map(clone);
     world([...made(older, "R1"), ...made(newest, "R1")], ["R9"]);
     const r = await reclaimWalkTrees(env);
     if ("error" in r) throw new Error(r.error);
-    expect(r.removed).toEqual([older]);
-    expect(existsSync(newest)).toBe(true);
+    expect([...r.removed].sort()).toEqual([newest, older].sort());
+    expect([older, newest].map(existsSync)).toEqual([false, false]);
   });
 
   it("[MUST-FAIL] keeps the clones of a request with a call started and not yet ended", async () => {
@@ -236,9 +235,9 @@ describe("walk_trees_reclaim", () => {
     process.env.METABOB_API_KEY = KEY;
     expect("error" in refused).toBe(true);
     expect([c1, c2].map(existsSync)).toEqual([true, true]);
-    const r = await reclaimWalkTrees(env); // with the key: the older unchanged clone goes
+    const r = await reclaimWalkTrees(env); // with the key: both unchanged clones go
     if ("error" in r) throw new Error(r.error);
-    expect(r.removed).toEqual([c1]);
+    expect([...r.removed].sort()).toEqual([c1, c2].sort());
   });
 
   it("[MUST-FAIL] answers what it did with every clone it looked at, and why", async () => {
@@ -247,7 +246,7 @@ describe("walk_trees_reclaim", () => {
     const r = await reclaimWalkTrees(env);
     if ("error" in r) throw new Error(r.error);
     const did = Object.fromEntries(r.decisions.map((d) => [d.cwd, d.did]));
-    expect(did).toEqual({ [c3]: "kept", [c2]: "kept", [c1]: "removed" }); // c3 newest (handed out again), c2 open, c1 goes
+    expect(did).toEqual({ [c3]: "removed", [c2]: "kept", [c1]: "removed" }); // c2's request is open; R1's go
     expect(r.decisions.every((d) => d.why.length > 0)).toBe(true);
     expect(r.more).toBe(false);
   });
@@ -278,7 +277,7 @@ describe("walk_trees_reclaim", () => {
     expect(second.removed).toEqual([]);
     const r = await first;
     if ("error" in r) throw new Error(r.error);
-    expect(r.removed).toEqual([c1]);
+    expect([...r.removed].sort()).toEqual([c1, c2].sort());
   });
 
   it("never touches what is not a whole clone directly under the clones directory (a guard)", async () => {

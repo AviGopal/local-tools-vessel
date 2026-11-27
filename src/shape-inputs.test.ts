@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { resolvers } from "./index"
-import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, runsOnHeldEdits, wrapsClone } from "./shape-inputs"
+import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, wrapsClone } from "./shape-inputs"
 
 type Schema = { required: string[]; properties: Record<string, { type?: string }> }
 
@@ -192,9 +192,8 @@ describe("declared shape inputs", () => {
 })
 
 describe("how each call works in a walk clone behind its copy", () => {
-  it("[MUST-FAIL] git_commit alone runs past a refusal for commits and edits held together; the three that work in no one clone are not wrapped; every other call is", () => {
+  it("[MUST-FAIL] the three that work in no one clone are not wrapped; every other call is", () => {
     const tools = Object.keys(SHAPE_INPUTS)
-    expect(tools.filter(runsOnHeldEdits)).toEqual(["git_commit"])
     expect(tools.filter((t) => !wrapsClone(t)).sort()).toEqual(["git_worktree", "walk_failure_detect", "walk_trees_reclaim"])
   })
 })

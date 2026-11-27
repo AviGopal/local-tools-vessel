@@ -8,9 +8,7 @@
 // such a fallback: named debt). A row with role walk is trusted as far as the node key is: any vessel on the node could
 // write one, a person key or the shell user (which holds no key) cannot.
 
-// refreshed_from: the base the rows say, when the clone was moved off it by the call now running (clone-refresh.ts
-// madeCurrent); a row that records where the clone is then names it, so madeClone reads the move as one clone's.
-export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string };
+export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string };
 export type Row = { id: string; shape?: string; role?: string; pointer_type?: string; phase?: string; output?: Record<string, unknown>; [k: string]: unknown };
 
 export type Query = { shape?: string; where?: Record<string, unknown>; ids?: string[] };
@@ -61,9 +59,9 @@ export async function endedCalls(pointerType: string): Promise<Row[] | { error: 
 
 /**
  * The one change clone the walk made at `cwd` and has not landed. A walk-written git_worktree row must name it: none
- * means git_worktree did not make it, and is refused. Several may, since git_worktree hands an unchanged clone out again
- * rather than making another; they must agree on the repo, branch, base and origin (rows that disagree are a collision,
- * refused), and the latest one's super_base, the super-repo HEAD whose hooks judge, is the one that holds. A field a row
+ * means git_worktree did not make it, and is refused. Several may (git_worktree's own, and where a refused landing says
+ * the clone is); they must agree on the repo, branch, base and origin (rows that disagree are a collision, refused), and
+ * the latest one's super_base, the super-repo HEAD whose hooks judge, is the one that holds. A field a row
  * does not carry is unknown there, not different: each field is compared over the rows that carry it and taken from the
  * newest of them, and each must be carried by at least one. `where`
  * matches top-level fields only, so the rows are git_worktree's ended hops and their cwd is matched here: a bounded set,
@@ -73,9 +71,9 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   const [made, moves] = await Promise.all([endedCalls("git_worktree"), readRows({ shape: "gitWorktree", where: { cwd } })]);
   if (!Array.isArray(made)) return made;
   if (!Array.isArray(moves)) return moves;
-  // A clone a tool refreshed in place before working in it (clone-refresh.ts) is recorded by the walk as a gitWorktree
-  // row of its own (the walk writes it only for a shape the called vessel serves, and never cuts it as it cuts a long
-  // answer on the hop): read here, the walk's own rows for this cwd only.
+  // Where a refused landing says the clone is (git-land.ts) is recorded by the walk as a gitWorktree row of its own (the
+  // walk writes it only for a shape the called vessel serves, and never cuts it as it cuts a long answer on the hop):
+  // read here, the walk's own rows for this cwd only.
   const moved = moves.filter((r) => r.role === "walk" && r.cwd === cwd).map((r): Row => ({ ...r, output: r as Record<string, unknown> }))
   const mine = [...made.filter((r) => r.role === "walk" && r.output?.cwd === cwd), ...moved].sort((a, b) => Number(a.seq) - Number(b.seq))
   if (mine.length === 0) return { error: `no walk row records a clone made at ${cwd}: a commit or landing needs one` };
@@ -83,11 +81,8 @@ export async function madeClone(cwd: string): Promise<Made | { error: string }> 
   // nothing about that field: read as "" it would be a second clone here, and the clone refused for good.
   const carrying = (k: string) => mine.filter((r) => typeof r.output?.[k] === "string" && r.output[k] !== "");
   const same = (k: string) => new Set(carrying(k).map((r) => String(r.output?.[k]))).size <= 1;
-  // One clone's base moves only by a refresh, which says the base it moved from: each row keeps the one before's base or
-  // was refreshed from it. Any other difference is two clones at one place, a collision.
-  const based = carrying("base");
-  const chained = based.every((r, i) => i === 0 || r.output?.base === based[i - 1].output?.base || r.output?.refreshed_from === based[i - 1].output?.base);
-  if (!["repo", "branch", "origin_url"].every(same) || !chained) {
+  // A clone's base never moves (git-worktree.ts): rows naming two bases at one place are two clones, a collision.
+  if (!["repo", "branch", "origin_url", "base"].every(same)) {
     return { error: `${mine.length} walk rows record different clones made at ${cwd}: a commit or landing needs one` };
   }
   const landed = await endedCalls("git_land");

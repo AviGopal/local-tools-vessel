@@ -171,8 +171,7 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     // landing reads the clone from (walk-rows.ts madeClone), so this one carries every field the others do: a row lacking
     // one reads as a different clone at the same place, and every later commit or landing there is refused.
     if ("error" in verdict) return { ...verdict, tree,
-      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, super_base: made.super_base, origin_url: made.origin_url, head, tree,
-        ...(made.refreshed_from ? { refreshed_from: made.refreshed_from } : {}) } };
+      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, super_base: made.super_base, origin_url: made.origin_url, head, tree } };
 
     // No hooks run beside the credential: an empty directory this vessel owns.
     const hooksDir = mkdtempSync(join(work, "hooks-"));
@@ -1120,14 +1119,14 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     // The change is what the clone's commits do: diffed from where they leave origin's branch. When origin has moved on
     // since the clone was made, a diff from origin's tip would show every later commit on it undone, as if the change
     // made it (a gate's own tightening shown as loosened). Such a change cannot land as it is (git_land takes a
-    // fast-forward only), so it is shown as it is, said not to fast-forward, and checked as not passing: what makes it
-    // land is a fresh clone with the edits made again.
+    // fast-forward only), so it is shown as it is, said not to fast-forward, and checked as not passing, with the fact
+    // as why: the base it was made at, and where origin's branch is now.
     const from = await t.out(["merge-base", t.origin, "refs/land/head"]);
     if (base === null || from === null) return { error: "the change's diff could not be read" };
     const ff = from === base;
     const diff = await timed(steps, "diff", () => t.out(["diff", "--no-renames", from, "refs/land/head"]));
     if (diff === null) return { error: "the change's diff could not be read" };
-    const behind = "the clone's base is behind origin's branch: this change cannot land as it is; ask for a fresh clone and make the edits again";
+    const behind = `the clone was made at ${made.base.slice(0, 10)}; origin's branch is now at ${base.slice(0, 10)}`;
     const dir = ff ? await timed(steps, "write_out", () => writeOut(t, made, work)) : { why: behind };
     const typecheck: Typecheck = ff
       ? await timed(steps, "typecheck", () => typecheckTree(t, made, dir, () => writeOut(t, made, work, t.origin, "base-typecheck")))

@@ -78,13 +78,12 @@ describe("clone freshness", () => {
     expect(cloneOf({ path: join(T, "trees-demo-vessel-1", "a.ts") }, env)).toBeNull();
   });
 
-  it("[MUST-FAIL] a clone at the copy's head is not behind; once the copy moves on, it is, and is told to take a fresh clone", async () => {
+  it("[MUST-FAIL] a clone at the copy's head is not behind; once the copy moves on, it is, said as that fact alone", async () => {
     const c = cloneOf({ path: join(clone, "a.ts") }, env)!;
     expect(await behind(c, env)).toBeNull();
     writeFileSync(join(copy, "b.ts"), "2\n"); g(copy, "add", "-A"); g(copy, "commit", "-q", "-m", "a push, installed");
     const why = await behind(c, env);
-    expect(why).toContain("ask for git_worktree of demo-vessel for a fresh clone");
-    expect(why).toContain(g(copy, "rev-parse", "HEAD").slice(0, 10));
+    expect(why).toBe(`${clone} was made before this node's copy of demo-vessel moved on (to ${g(copy, "rev-parse", "HEAD").slice(0, 10)})`);
   });
 
   it("[MUST-FAIL] every tool's answer about a path in a clone that is behind carries why, and only then", async () => {
@@ -93,7 +92,7 @@ describe("clone freshness", () => {
     const read = resolvers.get("fs_read")!;
     const ctx = (path: string) => ({ body: { impulse: { pointer: { path } } } }) as never;
     const inside = (await read(ctx(join(clone, "a.ts")))) as Record<string, unknown>;
-    expect(String(inside.clone_behind)).toContain("for a fresh clone");
+    expect(String(inside.clone_behind)).toContain("moved on (to ");
     const outside = (await read(ctx(join(copy, "a.ts")))) as Record<string, unknown>;
     expect("clone_behind" in outside).toBe(false);
     expect(resolvers.get("git_worktree")).toBeDefined();
@@ -102,7 +101,7 @@ describe("clone freshness", () => {
     const big = (await read(ctx(join(clone, "big.ts")))) as Record<string, unknown>;
     expect(Object.keys(big)[0]).toBe("clone_behind");
     expect(JSON.stringify(big).length).toBeGreaterThan(16 * 1024);
-    expect(JSON.stringify(big).slice(0, 1000)).toContain("for a fresh clone");
+    expect(JSON.stringify(big).slice(0, 1000)).toContain("moved on (to ");
   });
 
   it("[MUST-FAIL] an edit through `..` out of a clone, done outside every clone, names no clone: no cwd, no note on that clone", async () => {
@@ -116,29 +115,16 @@ describe("clone freshness", () => {
     expect("clone_behind" in out).toBe(false);
   });
 
-  it("[MUST-FAIL] only a call declared to run on held edits runs past a refusal for commits and edits held together", async () => {
-    Object.assign(process.env, env);
-    const { wrapped } = await import("./index");
-    const refused = async () => ({ error: "commit or drop the edits first", conflicts: [], changed: true, held: "commits_and_edits" as const });
-    const ctx = { body: { impulse: { pointer: { cwd: clone, message: "m" } } } } as never;
-    let ran = 0;
-    const h = async () => { ran++; return { shape: "gitCommitResult" } };
-    const commit = (await wrapped("git_commit", h as never, refused)(ctx)) as Record<string, unknown>;
-    expect([ran, commit.refresh_refused]).toEqual([1, "commits_and_edits"]);
-    const edit = (await wrapped("fs_edit", h as never, refused)(ctx)) as Record<string, unknown>;
-    expect([ran, edit.held]).toEqual([1, "commits_and_edits"]);
-  });
-
-  it("[GUARD] the wrapper's note on a clone behind its copy names the way on from the refusal it was given", async () => {
+  it("[MUST-FAIL] a tool runs in a clone behind its copy as it is, never moving it, and its answer says the copy moved on, and nothing of what to do", async () => {
     Object.assign(process.env, env);
     const { wrapped } = await import("./index");
     const ctx = { body: { impulse: { pointer: { path: join(clone, "a.ts") } } } } as never;
-    const h = async () => ({ shape: "fileContent" });
-    const held = async () => ({ error: "commit or drop the edits first", conflicts: [], changed: true, held: "commits_and_edits" as const });
-    const onHeld = (await wrapped("fs_read", h as never, held)(ctx)) as Record<string, unknown>;
-    expect(String(onHeld.clone_behind)).toContain(`git_commit in ${clone} commits the edits`);
-    const conflict = async () => ({ error: "could not be brought onto it", conflicts: ["a.ts"], changed: true });
-    const onConflict = (await wrapped("fs_read", h as never, conflict)(ctx)) as Record<string, unknown>;
-    expect(String(onConflict.clone_behind)).toContain(`also changed a.ts, which the change in ${clone} changes`);
+    const at = g(clone, "rev-parse", "HEAD");
+    let ran = 0;
+    const out = (await wrapped((async () => { ran++; return { shape: "fileContent" }; }) as never)(ctx)) as Record<string, unknown>;
+    expect([ran, g(clone, "rev-parse", "HEAD")]).toEqual([1, at]);
+    expect(Object.keys(out)[0]).toBe("clone_behind");
+    expect(String(out.clone_behind)).toEndWith(`moved on (to ${g(copy, "rev-parse", "HEAD").slice(0, 10)})`);
+    expect(String(out.clone_behind)).not.toMatch(/git_worktree|fresh clone|again/);
   });
 });

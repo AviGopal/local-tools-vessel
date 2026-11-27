@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: MIT
-// Every answer that says where a clone is (its `clone`) becomes a gitWorktree row the walk records, and a later commit or
-// landing reads the clone from those rows (walk-rows.ts madeClone): one whose base moved without naming the base it moved
-// from reads as a second clone at the same place, and every commit or landing there is refused for good. So each tool that
-// runs after the clone is brought onto its copy (clone-refresh.ts freshFirst) is run here for real, in a clone behind its
-// copy, its answer's clone recorded as the walk records it, and madeClone must still read one clone, on the new base.
+// A refused landing answers where its clone is (its `clone`), which the walk records as a gitWorktree row, and a later
+// commit or landing reads the clone from those rows (walk-rows.ts madeClone): a record that disagreed with the clone's
+// own rows would read as a second clone at the same place, and every commit or landing there would be refused for good.
+// So git_land is run here for real in a clone git_worktree made, its answer's clone recorded as the walk records it, and
+// madeClone must still read one clone, at the base it was made at.
 // Throwaway repositories; records is a stub over the rows the walk would hold.
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { freshFirst, madeCurrent } from "./clone-refresh";
-import { commitInClone } from "./git-commit";
 import { landClone } from "./git-land";
 import { makeWorktree } from "./git-worktree";
-import { runsOnHeldEdits } from "./shape-inputs";
 import { madeClone, type Query, type Row } from "./walk-rows";
 import { recordRead, walkCall } from "./walk-call-rows.test-helper";
 
@@ -41,7 +38,7 @@ const COPY = join(T, "clones", "demo");
 const SEED = join(T, "seed");
 const realFetch = globalThis.fetch;
 
-// the walk's rows, as records holds them; madeClone and madeCurrent read them through the stub
+// the walk's rows, as records holds them; madeClone reads them through the stub
 let walkRows: Array<Record<string, unknown>> = [];
 let seq = 0;
 // the owner's repository row: demo takes landings on dev
@@ -78,23 +75,16 @@ afterAll(() => {
   rmSync(T, { recursive: true, force: true });
 });
 
-/** Origin moves (a push lands) and the node's copy follows: the copy's new HEAD. */
-const moveOrigin = (file: string) => {
-  g(SEED, "pull", "-q", "origin", "dev"); writeFileSync(join(SEED, file), `${file}\n`); commitAll(SEED, `move ${file}`); g(SEED, "push", "-q", "origin", "HEAD:dev");
-  g(COPY, "pull", "-q", "origin", "dev");
-  return g(COPY, "rev-parse", "HEAD");
-};
-/** A clone git_worktree made, as the walk's rows record it (its call's hops), holding a change of its own, then left behind
- *  its copy: committed, or (held) as uncommitted edits. */
-const behindClone = async (name: string, held: "committed" | "uncommitted") => {
+/** A clone git_worktree made, as the walk's rows record it (its call's hops), holding a committed change of its own. */
+const changedClone = async (name: string) => {
   const w = await makeWorktree("demo");
   if ("error" in w) throw new Error(w.error);
   walkRows = walkCall(`wt-${name}`, "git_worktree", `sel-${name}`, { ...w }).map((h) => ({ ...h, seq: ++seq }));
   writeFileSync(join(w.cwd, `${name}.txt`), `${name}\n`);
-  if (held === "committed") commitAll(w.cwd, `own ${name}`);
+  commitAll(w.cwd, `own ${name}`);
   // the clone's own change is the last write made here as root, so everything in it belongs to the user the tools run as
   asOwner(w.cwd);
-  return { cwd: w.cwd, from: w.base, to: moveOrigin(`origin-${name}.txt`) };
+  return { cwd: w.cwd, base: w.base };
 };
 /** The answer's clone recorded as the walk records it (walk calls.ts recordRefreshed), then the clone read as a commit reads it. */
 const recordedThenRead = async (cwd: string, answer: unknown) => {
@@ -103,27 +93,16 @@ const recordedThenRead = async (cwd: string, answer: unknown) => {
   walkRows = [...walkRows, { ...clone, id: `gw-${++seq}`, role: "walk", seq, call_id: `call-${seq}` }];
   return madeClone(cwd);
 };
-
-// The tools that run after the refresh and answer where the clone is: one that builds its own clone record (git_land, on a
-// refusal), and ones whose answer carries the refresh's (git_commit; a read, which says nothing of the clone itself).
-const TOOLS: Array<{ name: string; tag: "MUST-FAIL" | "GUARD"; held: "committed" | "uncommitted"; heldEdits: boolean; run: (cwd: string) => Promise<unknown>; said?: string }> = [
-  { name: "git_land", tag: "MUST-FAIL", held: "committed", heldEdits: runsOnHeldEdits("git_land"), run: (cwd) => landClone(cwd, { find: (c) => madeCurrent(c), rows: ownerRows, transports: ["file"] }),
-    said: "no verdict approves this tree" },
-  { name: "git_commit", tag: "GUARD", held: "uncommitted", heldEdits: runsOnHeldEdits("git_commit"), run: (cwd) => commitInClone(cwd, "the edits", undefined, (c) => madeCurrent(c)) },
-  { name: "fs_read", tag: "GUARD", held: "committed", heldEdits: runsOnHeldEdits("fs_read"), run: async () => ({ shape: "fileContent" }) },
-];
 const SCANNER = Bun.which("gitleaks", { PATH: process.env.PATH ?? "" });
 
-describe("a clone moved by the call that answers: the answer's record of it leaves one clone", () => {
-  for (const t of TOOLS) {
-    it(`[${t.tag}] ${t.name}: its answer's clone, recorded after the clone's earlier rows, reads as one clone on the base it was moved to`, async () => {
-      const c = await behindClone(t.name.replace("_", "-"), t.held);
-      const answer = await freshFirst({ dir: c.cwd, repo: "demo" }, () => t.run(c.cwd), process.env, undefined, t.heldEdits) as Record<string, unknown>;
-      // the tool ran past the refresh (git_land refuses on its verdict, past its secrets scan, where a scanner is here)
-      if (t.said && SCANNER) expect(String(answer.error)).toContain(t.said);
-      expect((answer.clone as { base?: string } | undefined)?.base).toBe(c.to);
-      const read = await recordedThenRead(c.cwd, answer);
-      expect("error" in read ? read.error : read).toMatchObject({ cwd: c.cwd, base: c.to });
-    });
-  }
+describe("a refused landing's record of where its clone is leaves one clone", () => {
+  it("[GUARD] git_land: its answer's clone, recorded after the clone's earlier rows, reads as one clone on the base it was made at", async () => {
+    const c = await changedClone("git-land");
+    const answer = await landClone(c.cwd, { find: (x) => madeClone(x), rows: ownerRows, transports: ["file"] }) as Record<string, unknown>;
+    // refused on its verdict, past its secrets scan, where a scanner is here
+    if (SCANNER) expect(String(answer.error)).toContain("no verdict approves this tree");
+    expect((answer.clone as { base?: string } | undefined)?.base).toBe(c.base);
+    const read = await recordedThenRead(c.cwd, answer);
+    expect("error" in read ? read.error : read).toMatchObject({ cwd: c.cwd, base: c.base });
+  });
 });

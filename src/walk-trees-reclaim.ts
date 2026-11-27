@@ -6,7 +6,7 @@
 //     is still open (records' episode read lists it): kept;
 //   - landed: a git_land call that ended names it: removed;
 //   - unchanged (nothing modified or untracked, no commit beyond what its origin's copy has): removed once no open root
-//     names it, except the newest unchanged clone of each origin, which git_worktree hands out again;
+//     names it (git_worktree makes a new clone for every call, so none is kept for a later one);
 //   - changed and not landed: kept and reported. What the walk tried there is evidence; deciding to drop it is a later
 //     rule, not this one.
 // Anything this cannot read fails closed: a records read that errors, or answers no list, removes nothing. Only a directory directly under the clones directory (realpath, no symlink) that is
@@ -39,7 +39,7 @@ export const reclaimWalkTrees = async (env: Env = process.env, remove: (p: strin
   try { return await withClones(() => reclaim(env, remove, budgetMs)); } finally { running = false; }
 };
 
-// Under the clones lock, from reading the rows to the last removal, so no clone is handed out in between.
+// Under the clones lock, from reading the rows to the last removal, so no clone is made in between.
 async function reclaim(env: Env, remove: (p: string) => unknown, budgetMs: number): Promise<Reclaimed> {
   const started = Date.now();
   const dir = walkTreesDir(env);
@@ -73,13 +73,9 @@ async function reclaim(env: Env, remove: (p: string) => unknown, budgetMs: numbe
     const r = await git(["-C", cwd, ...args], tmpdir());
     return r.exit_code === 0 ? r.stdout.trim() : null;
   };
-  // Newest first (names sort by when they were made): the first unchanged clone of an origin is the one git_worktree hands
-  // out again and is kept; an older unchanged one may go only after it. So stopping at the budget leaves only unexamined
-  // older clones, never a removal made without the newer one seen.
   const removed: string[] = [];
   const reported: Array<{ cwd: string; why: string }> = [];
   const decisions: Decision[] = [];
-  const target = new Map<string, string>();
   let kept = 0;
   let more = false;
   const decide = (cwd: string, did: Decision["did"], why: string) => {
@@ -97,10 +93,8 @@ async function reclaim(env: Env, remove: (p: string) => unknown, budgetMs: numbe
     } catch { continue; }
     const status = await out(cwd, ["status", "--porcelain", "--untracked-files=all"]);
     const ahead = await out(cwd, ["rev-list", "HEAD", "--not", "--remotes"]);
-    const origin = (await out(cwd, ["config", "--get", "remote.origin.url"])) ?? "";
     if (status === null || ahead === null) { decide(cwd, "reported", "its state could not be read"); continue; }
     const unchanged = status === "" && ahead === "";
-    if (unchanged && !target.has(origin)) { target.set(origin, cwd); decide(cwd, "kept", "the newest unchanged clone of its origin: handed out again"); continue; }
     const roots = named.get(cwd) ?? new Set<string>();
     const inUse = [...roots].some((r) => open.has(r) || busy.has(r)) || (roots.size > 0 && busy.has("?")) || (roots.size === 0 && making);
     if (inUse) { decide(cwd, "kept", "a request that is open or has a call in flight holds it"); continue; }

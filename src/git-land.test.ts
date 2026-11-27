@@ -187,16 +187,14 @@ describe("git_land", () => {
     expect(tree).toBe(String(refused.clone?.tree));
   });
 
-  scanned("[MUST-FAIL] a refused land in a clone this call moved names the base it moved from; [GUARD] one in a clone no call moved names none", async () => {
+  scanned("[MUST-FAIL] a refused land's record of its clone names no refreshed_from, whatever its rows were read as", async () => {
     const { cwd } = await change("refused-moved.txt", "m\n");
     table = [];
     const w = made.get(cwd)!;
-    const moved = await landClone(cwd, { ...deps, find: async () => ({ ...w, refreshed_from: "f".repeat(40) }) }) as { error: string; clone?: Record<string, unknown> };
+    const moved = await landClone(cwd, { ...deps, find: async () => ({ ...w, refreshed_from: "f".repeat(40) }) as never }) as { error: string; clone?: Record<string, unknown> };
     expect(String(moved.error)).toContain("no verdict approves this tree");
-    expect(moved.clone).toMatchObject({ base: w.base, refreshed_from: "f".repeat(40) });
-    const still = await landClone(cwd, deps) as { error: string; clone?: Record<string, unknown> };
-    expect(String(still.error)).toContain("no verdict approves this tree");
-    expect(still.clone && "refreshed_from" in still.clone).toBe(false);
+    expect(moved.clone).toMatchObject({ base: w.base });
+    expect(moved.clone && "refreshed_from" in moved.clone).toBe(false);
   });
 
   scanned("[MUST-FAIL] lands nothing without a verdict on its tree, nor with a verdict on another tree", async () => {
@@ -1464,7 +1462,7 @@ describe("git_land", () => {
       expect(await gapOf(rowsOf([sel("gr"), { ...gapRow, meta: { evidence_resolve } } as Row]), "s1")).toMatchObject({ error: expect.stringContaining("no test file") });
   });
 
-  it("[MUST-FAIL] a clone origin has moved past shows its own change, says it cannot fast-forward, and does not pass", async () => {
+  it("[MUST-FAIL] a clone origin has moved past shows its own change, says it cannot fast-forward, and does not pass, saying its base and origin's tip alone", async () => {
     const { cwd } = await changeOf({ "own.txt": "mine\n" });
     const seed = join(T, "seed");
     g(seed, "pull", "-q", "origin", "dev");
@@ -1475,9 +1473,11 @@ describe("git_land", () => {
     expect(r.fast_forward).toBe(false);
     expect(r.diff).toContain("+mine");
     expect(r.diff).not.toContain("later.txt"); // origin's later commit is not shown undone
-    expect(r.typecheck).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
-    expect(r.check).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
-    expect(r.suite).toMatchObject({ passed: false, why: expect.stringContaining("ask for a fresh clone") });
+    const why = `the clone was made at ${made.get(cwd)!.base.slice(0, 10)}; origin's branch is now at ${g(seed, "rev-parse", "HEAD").slice(0, 10)}`;
+    expect(r.typecheck).toMatchObject({ passed: false, why });
+    expect(r.check).toMatchObject({ passed: false, why });
+    expect(r.suite).toMatchObject({ passed: false, why });
+    expect(JSON.stringify(r)).not.toMatch(/git_worktree|fresh clone|again/);
     const fresh = await changeOf({ "own2.txt": "mine\n" });
     const ok = await diffClone(fresh.cwd, made.get(fresh.cwd)!, ["file"]);
     expect("tree" in ok && ok.fast_forward).toBe(true);

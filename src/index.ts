@@ -17,7 +17,7 @@ import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
-import { SHAPE_ANSWERS, SHAPE_CONSUMES, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, WRITE_IN_CLONE, runsOnHeldEdits, wrapsClone } from "./shape-inputs.js";
+import { SHAPE_ANSWERS, SHAPE_CONSUMES, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, WRITE_IN_CLONE, wrapsClone } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
@@ -30,9 +30,8 @@ import { makeWorktree } from "./git-worktree.js";
 import { reclaimWalkTrees } from "./walk-trees-reclaim.js";
 import { detect } from "./walk-failure-detect.js";
 import { diffMade, gapCheckAt, gapOf, isGapCheckFile, landClone } from "./git-land.js";
-import { readRows } from "./walk-rows.js";
-import { behind, cloneOf, editedClone, refusalOf } from "./clone-freshness.js";
-import { freshFirst, madeCurrent, refreshInPlace } from "./clone-refresh.js";
+import { madeClone, readRows } from "./walk-rows.js";
+import { behind, cloneOf, editedClone } from "./clone-freshness.js";
 import { cmdRef, openShProbe } from "./sh-instrument.js";
 import { errorsAgainstBase } from "./typecheck-base.js";
 import { runBounded } from "./bounded-run.js";
@@ -638,9 +637,8 @@ const gitDiff: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   // A clone git_worktree made answers its committed change, with the tree it would land as: what a grader judges.
   if (cwd) {
-    // Its base as the rows say, unless the clone moved onto a newer base no row records: then that fact is the answer.
-    const made = await madeCurrent(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
-    if (made && "moved_unrecorded" in made) return made;
+    // Its base as the rows say.
+    const made = await madeClone(resolvePath(DEFAULT_CWD, cwd)).catch(() => null);
     if (made && !("error" in made)) {
       // the walk names its selection on every call: the gap the clone is for, if its root is one, is checked on the tree
       const gap = await gapOf(readRows, str(ctx.body, "impulse", "pointer", "selection_ref")).catch((e) => ({ error: String(e) }));
@@ -677,7 +675,7 @@ const gitCommit: ResolverHandler = async (ctx) => {
     return { error: reason, cwd: cwd ?? DEFAULT_CWD };
   }
   const id = str(ctx.body, "impulse", "pointer", "execution_id") ?? str(ctx.body, "execution_id");
-  return commitInClone(resolvePath(DEFAULT_CWD, cwd ?? "."), message, id ? { SUBSTRATE_EXECUTION_ID: id } : undefined, (c) => madeCurrent(c))
+  return commitInClone(resolvePath(DEFAULT_CWD, cwd ?? "."), message, id ? { SUBSTRATE_EXECUTION_ID: id } : undefined, (c) => madeClone(c))
     .catch(refusedOrError);
 };
 
@@ -689,7 +687,7 @@ const gitLand: ResolverHandler = async (ctx) => {
   const cwd = str(ctx.body, "impulse", "pointer", "cwd") ?? str(ctx.body, "cwd");
   if (!cwd) return { error: "cwd is required" };
   runDir(cwd); // a directory that does not exist: 422 by name
-  return landClone(resolvePath(DEFAULT_CWD, cwd), { find: (c) => madeCurrent(c) }).catch(refusedOrError);
+  return landClone(resolvePath(DEFAULT_CWD, cwd), { find: (c) => madeClone(c) }).catch(refusedOrError);
 };
 
 // A gap's test file run at one commit of origin's branch by git_diff's own runner (git-land.ts gapCheckAt): what the
@@ -705,9 +703,7 @@ const gapCheck = gapCheckVia();
 const gitWorktree: ResolverHandler = async (ctx) => {
   const repo = str(ctx.body, "impulse", "pointer", "repo") ?? str(ctx.body, "repo");
   if (!repo) return { error: "repo is required" };
-  // The walk names the selection it calls for; the clone it gets is that request's own (git-worktree.ts handouts).
-  const selectionRef = str(ctx.body, "impulse", "pointer", "selection_ref") ?? str(ctx.body, "selection_ref");
-  return makeWorktree(repo, process.env, selectionRef).catch(refusedOrError);
+  return makeWorktree(repo, process.env).catch(refusedOrError);
 };
 
 // ── code-tool primitives (2026-06-10) ─────────────────────────────────────────
@@ -933,7 +929,7 @@ const codeVerifyTypecheck: ResolverHandler = async (ctx) => {
     const errorLines = tail.split("\n").filter((l) => /error TS\d+:/.test(l)).slice(0, 20);
     // On a clone the walk made, the same script on its base: which errors the base already had and which the edits added,
     // so a clone broken by its own edits is told apart from a base that was broken before them.
-    const made = await madeCurrent(resolvePath(DEFAULT_CWD, cwd)).catch((e) => ({ error: String(e) }));
+    const made = await madeClone(resolvePath(DEFAULT_CWD, cwd)).catch((e) => ({ error: String(e) }));
     const against = await errorsAgainstBase(combined, made, bunCmd, script, (c, d) => sh(c, d));
     return {
       shape: "codeTypecheckResult",
@@ -1065,23 +1061,25 @@ export const resolvers = new Map<string, ResolverHandler>([
 // Every answer about a path in a walk clone says when that clone can no longer land (clone-freshness.ts), so the walk
 // learns it the moment it touches the clone, not only at the diff before landing. Not for the calls declared to work in
 // no one clone (SHAPE_IN_CLONE).
-export const wrapped = (name: string, handler: ResolverHandler, refresh: typeof refreshInPlace = refreshInPlace): ResolverHandler =>
+export const wrapped = (handler: ResolverHandler): ResolverHandler =>
   async (ctx) => {
     const body = ctx.body as Record<string, unknown> | undefined;
     const clone = cloneOf((body?.impulse as { pointer?: unknown } | undefined)?.pointer ?? body, process.env);
-    // A clone behind the copy is brought onto it first (clone-refresh.ts), so the call works in a clone that can land; one
-    // that cannot be carried is said, and the tool does not run in it.
-    const done = await freshFirst(clone, () => handler(ctx), process.env, refresh, runsOnHeldEdits(name));
+    const why = clone === null ? null : await behind(clone, process.env).catch(() => null);
+    // A clone git could not read is not worked in: what the call did there could not be said, nor judged.
+    // First: the walk keeps the start of a long answer (a cut hop) and of a refusal (its failure row), so a note at the
+    // end would be lost on exactly the long reads and refusals a stale clone draws.
+    if (why !== null && typeof why === "object") return { ...why, error: `${why.clone_unread.cwd} could not be read` };
+    // A clone is never moved onto a newer base (git-worktree.ts): the call runs in it as it is, and a clone behind its
+    // copy is said with the answer.
+    const done = await handler(ctx);
     // An edit that changed a file in a walk clone says which clone (cwd), whatever the call's pointer named.
     const edited = editedClone(done, process.env);
     const out = edited === null ? done : { ...(done as Record<string, unknown>), cwd: edited };
-    if (clone === null || typeof out !== "object" || out === null) return out;
-    const why = await behind(clone, process.env, refusalOf(out)).catch(() => null);
-    // First: the walk keeps the start of a long answer (a cut hop) and of a refusal (its failure row), so a note at the
-    // end would be lost on exactly the long reads and refusals a stale clone draws.
-    return why === null ? out : typeof why === "string" ? { clone_behind: why, ...out } : { ...why, ...out };
+    if (why === null || typeof out !== "object" || out === null) return out;
+    return { clone_behind: why, ...out };
   };
-for (const [name, handler] of resolvers) if (wrapsClone(name)) resolvers.set(name, wrapped(name, handler));
+for (const [name, handler] of resolvers) if (wrapsClone(name)) resolvers.set(name, wrapped(handler));
 
 const runtime = new ExecutionRuntime({
   attachedVessels: [{ id: VESSEL_ID, kind: "local-tools" as never, resolverIds: Array.from(resolvers.keys()) }],
