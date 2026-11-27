@@ -24,7 +24,7 @@ const sample = (field: string): unknown => {
   const values: Record<string, unknown> = {
     path: file, content: "x", old_string: "line1", new_string: "LINE1", start_line: 1, end_line: 2, text: "t",
     after_line: 0, pattern: "line", cwd: dir, command: "true", message: "m", repo: "no-such-repo",
-    name: "nothing", module: "./nothing",
+    name: "nothing", module: "./nothing", specifier: "{ nothing }",
   }
   if (!(field in values)) throw new Error(`no sample for required field ${field}: add one`)
   return values[field]
@@ -61,7 +61,7 @@ describe("declared shape inputs", () => {
   // (scripts/substrate/walk-owner-seed.ts: CHANGE_TOOLS needs a wanted change or an open gap; walk_trees_reclaim its
   // gap), read-only, or ungated with the reason written down. Declaring a tool that is in none (a file-writing tool
   // whose inputs were just declared, say) fails here until someone decides its gate (deployment's tripwire).
-  const GATED = ["git_worktree", "fs_edit", "fs_write", "code_replace_lines", "code_insert_after_line", "git_commit", "git_land", "walk_trees_reclaim"];
+  const GATED = ["git_worktree", "fs_edit", "fs_write", "code_replace_lines", "code_insert_after_line", "code_add_import", "git_commit", "git_land", "walk_trees_reclaim"];
   const READ_ONLY = ["fs_read", "code_read_lines", "code_search", "code_find_function", "code_find_import", "git_status", "git_diff"];
   const UNGATED: Record<string, string> = {
     bounded_shell: "runs as an unprivileged user with a time limit (shell containment); not gated by a wanted change",
@@ -87,7 +87,7 @@ describe("declared shape inputs", () => {
 
   it("[MUST-FAIL] a writer's declared path names the clone git_worktree made, never the workspace; a reader's says to read a changed file there", () => {
     const pathOf = (t: string) => String((SHAPE_INPUTS[t] as unknown as { properties: { path: { description?: string } } }).properties.path.description)
-    for (const t of ["fs_write", "fs_edit", "code_replace_lines", "code_insert_after_line"]) {
+    for (const t of ["fs_write", "fs_edit", "code_replace_lines", "code_insert_after_line", "code_add_import"]) {
       expect(`${t}: ${pathOf(t)}`).toContain("in the clone git_worktree made")
       expect(`${t}: ${pathOf(t)}`).not.toContain("or relative to the workspace")
     }

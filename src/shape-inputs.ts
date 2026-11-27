@@ -11,6 +11,9 @@
 // offered. Not declared at all: web_search (held until the USER rules: its answers are untrusted web text that would reach
 // producers as context, and each call is paid; it needs an untrusted mark and a spend bound on an owner row first), shell and bash (bounded_shell covers them), and code_verify_typecheck's bun_cmd and script: the handler splices both into `<bun_cmd> run <script>`
 // and runs it without the shell containment check, so either field would run any command (agf_m40aao3ttwpx).
+import type { ShapeConsume } from "@avigopal/ias-executor-ts"
+import { WRITE_TOOLS } from "./write-containment.js"
+
 type Schema = Record<string, unknown>
 
 const PATH = { type: "string", minLength: 1, description: "A file: absolute, repos/<vessel>/…, or relative to the workspace. To " +
@@ -41,6 +44,11 @@ export const SHAPE_INPUTS: Record<string, Schema> = {
   }),
   code_insert_after_line: object(["path", "after_line", "text"], {
     path: WRITE_PATH, after_line: { type: "integer", minimum: 0, description: "0 inserts at the top." }, text: { type: "string" },
+  }),
+  code_add_import: object(["path", "module", "specifier"], {
+    path: WRITE_PATH,
+    module: { type: "string", minLength: 1, description: "The module to import from, as written in the statement, e.g. \"./calls\"." },
+    specifier: { type: "string", minLength: 1, description: "What to import, e.g. \"{ call }\"; merged into an existing { … } import of the module." },
   }),
   code_search: object(["path", "pattern"], {
     path: PATH, pattern: { type: "string", minLength: 1, description: "A regular expression." }, flags: { type: "string" },
@@ -78,6 +86,8 @@ export const SHAPE_DESCRIPTIONS: Record<string, string> = {
   code_read_lines: "Returns lines start_line..end_line of a file, numbered.",
   code_replace_lines: "Replaces lines start_line..end_line of a file with text.",
   code_insert_after_line: "Inserts text after a line of a file.",
+  code_add_import: "Adds an import of a module to a file, after its last import, or merges the specifier into an import " +
+    "of that module already there; answers action (added, merged_specifier or already_present) and the line.",
   code_search: "Finds the lines of a file that match a regular expression.",
   code_verify_typecheck: "Runs the typecheck script of the package in cwd and reports the exit code and the first type errors; " +
     "on a clone the walk made, also how many errors its base already had (base_error_count) and how many the clone's edits added " +
@@ -146,9 +156,28 @@ export const SHAPE_ANSWERS: Record<string, string> = {
   code_search: "codeSearchResult",
   code_insert_after_line: "codeInsertResult",
   code_replace_lines: "codeReplaceResult",
+  code_add_import: "codeAddImportResult",
   code_read_lines: "codeReadResult",
   code_verify_typecheck: "codeTypecheckResult",
   bounded_shell: "boundedShellResult",
   code_find_function: "codeFindFunctionResult",
   code_find_import: "codeFindImportResult",
+}
+
+// The answers of the calls that change a file (WRITE_TOOLS): one list, read by the wrapper to tell which answers name an
+// edited clone (clone-freshness.ts editedClone) and by git_commit's consumes below, so a write call added once is both.
+export const CHANGES: ReadonlySet<string> = new Set(WRITE_TOOLS.map((tool) => SHAPE_ANSWERS[tool]!))
+
+// The rows each call takes, and the pointer fields each fills (pointer field to row field). Discovery serves them
+// (shape_consumes), so a reader holding a row can find the calls that take it and fill them from it, instead of copying a
+// path or a cwd out of one answer into the next call by reading prose. Each binds a field the call declares
+// (SHAPE_INPUTS) from one the row carries as its producer answers it, through the wrapper (shape-consumes.test.ts).
+export const SHAPE_CONSUMES: Record<string, ShapeConsume[]> = {
+  fs_edit: [{ shape: "fileContent", binds: { path: "path" } }],
+  code_replace_lines: [{ shape: "codeReadResult", binds: { path: "path" } }],
+  code_insert_after_line: [{ shape: "codeReadResult", binds: { path: "path" } }],
+  // A clone is committed in once git_worktree made it, or once a change there names it (the wrapper's cwd).
+  git_commit: ["gitWorktree", ...CHANGES].map((shape) => ({ shape, binds: { cwd: "cwd" } })),
+  git_diff: [{ shape: "gitCommitResult", binds: { cwd: "cwd" } }],
+  git_land: [{ shape: "gitDiff", binds: { cwd: "cwd" } }],
 }

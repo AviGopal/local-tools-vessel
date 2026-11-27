@@ -17,7 +17,7 @@ import type { ResolverHandler } from "@avigopal/ias-executor-ts";
 import { acquireTestSlotOrWait, isTestClassCommand } from "./test-exec-slots.js";
 import { agentShellEnv } from "./agent-shell-env.js";
 import { agentShellSpawn, agentWritableDir } from "./shell-privilege.js";
-import { SHAPE_ANSWERS, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, WRITE_IN_CLONE, runsOnHeldEdits, wrapsClone } from "./shape-inputs.js";
+import { SHAPE_ANSWERS, SHAPE_CONSUMES, SHAPE_DESCRIPTIONS, SHAPE_INPUTS, WRITE_IN_CLONE, runsOnHeldEdits, wrapsClone } from "./shape-inputs.js";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
@@ -1131,10 +1131,12 @@ if (import.meta.main) {
   version: "0.1.0",
   enforceCompositionChain: false,
   systemVessel: true,
-  // What a caller can fill: each shape's description and the pointer fields its handler reads (shape-inputs.ts).
+  // What a caller can fill: each shape's description, the pointer fields its handler reads, and the rows that fill them
+  // (shape-inputs.ts).
   shapeDescriptions: SHAPE_DESCRIPTIONS,
   shapeInputs: SHAPE_INPUTS,
   shapeAnswers: SHAPE_ANSWERS,
+  shapeConsumes: SHAPE_CONSUMES,
   }).start();
 
   console.log(`[local-tools-vessel] listening on http://127.0.0.1:${PORT}`);

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, normalize } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { movedOnAnswer, type Unread, unreadOf } from "./git-worktree.js";
+import { CHANGES } from "./shape-inputs.js";
 import { realLocation, walkTreesDir } from "./tool-roots.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
@@ -31,16 +32,13 @@ export function cloneOf(pointer: unknown, env: Env): { dir: string; repo: string
   return null;
 }
 
-// The answers of the tools that change a file.
-const EDITS = new Set(["fileWriteResult", "fileEditResult", "codeInsertResult", "codeReplaceResult", "codeAddImportResult"]);
-
 /** The walk clone an edit changed a file in, when it changed one: an edit answer with no error, not one that found the
  *  change already made (applied: false, already_present), whose path is in a walk clone. A reader can then tell an edit
  *  of this clone from one of another, and an edit newer than the clone's last commit from one older. */
 export function editedClone(answer: unknown, env: Env): string | null {
   if (typeof answer !== "object" || answer === null) return null;
   const a = answer as Record<string, unknown>;
-  if (!EDITS.has(String(a.shape)) || "error" in a || a.applied === false || a.action === "already_present") return null;
+  if (!CHANGES.has(String(a.shape)) || "error" in a || a.applied === false || a.action === "already_present") return null;
   return typeof a.path === "string" ? cloneOf({ path: a.path }, env)?.dir ?? null : null;
 }
 
