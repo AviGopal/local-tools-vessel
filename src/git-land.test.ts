@@ -11,6 +11,7 @@ import { diffClone, diffMade, gapCheckAt, gapOf, landClone, passedIn, suiteCheck
 import type { Trusted, Typecheck } from "./git-land";
 import { makeWorktree } from "./git-worktree";
 import { madeClone, type Made, type Query, type Row } from "./walk-rows";
+import { classesOf, type Row as FailureRow } from "./walk-failure-classes";
 import { recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 // Run as root, git in the code under test drops to the shell user (shell-privilege.ts), which must read these
@@ -153,6 +154,36 @@ describe("git_land's branch", () => {
     } finally {
       repoRows = saved;
     }
+  });
+
+  // One refusal, under two callers: one sent a pointer naming the repository, one only the clone. Recorded as the walk
+  // records a direct call's failure (its body the tool's words, its class lifted from the answer), both are one class.
+  scanned("[MUST-FAIL] a landing refused for want of a working branch is one failure class whatever the call was sent", async () => {
+    const { cwd, tree } = await change("class.txt", "c\n");
+    table = personOn(tree, "vc");
+    const saved = repoRows;
+    let refused: { error: string; class?: string; unserved?: string }
+    try {
+      repoRows = [];
+      refused = await landClone(cwd, deps) as { error: string; class?: string; unserved?: string };
+    } finally {
+      repoRows = saved;
+    }
+    expect([refused.class, refused.unserved]).toEqual(["no_working_branch", "repository"]);
+    let n = 0;
+    const failed = (root: string, pointer: Record<string, unknown>, answer: { error: string; class?: string }): FailureRow[] => {
+      const req = { id: `rq${++n}`, seq: n, shape: "request", role: "described", pointer: { type: "git_land", ...pointer } };
+      const s = { id: `s${++n}`, seq: n, shape: "selection", role: "walk", root, a: "call/git_land", from: req.id };
+      const h = { id: `h${++n}`, seq: n, shape: "hop", role: "walk", phase: "started", selection_ref: s.id, call_id: `c${n}`, pointer_type: "git_land" };
+      const f = { id: `f${++n}`, seq: n, shape: "failure", role: "walk", selection_ref: s.id, call_id: h.call_id, status: 422, blames: "request",
+        body: answer.error, ...(answer.class !== undefined ? { class: answer.class } : {}) };
+      return [req, s, h, f];
+    };
+    const k = classesOf([...failed("r1", { cwd, repo: "demo" }, refused), ...failed("r2", { cwd }, refused)]);
+    expect(k.map((c) => [c.class, c.failures.length])).toEqual([["no_working_branch", 2]]);
+    // read from its words alone, the same refusal is two classes: the repository is masked under one caller only
+    const { class: _c, ...words } = refused;
+    expect(classesOf([...failed("r1", { cwd, repo: "demo" }, words), ...failed("r2", { cwd }, words)])).toHaveLength(2);
   });
 });
 
