@@ -257,13 +257,13 @@ describe("walk_failure_detect and output nobody took", () => {
     return s;
   };
   const EDIT = "call/fs_edit";
-  it("[MUST-FAIL] an edit whose answer nobody took, on two roots, is ONE gap: kind unused, its move, its roots, shown and not worked", async () => {
+  it("[MUST-FAIL] an edit whose answer nobody took, on two roots, is ONE gap: kind unused, its move, its roots, walkable true", async () => {
     rule({ min_count: 2, min_roots: 2 });
     const a = sel("r1", EDIT, 0), b = sel("r2", EDIT, 0);
     const r = await report();
-    expect(r.classes.map((c) => [c.tool, c.count, c.roots, c.walkable, c.action])).toEqual([[EDIT, 2, 2, false, "opened"]]);
+    expect(r.classes.map((c) => [c.tool, c.count, c.roots, c.walkable, c.action])).toEqual([[EDIT, 2, 2, true, "opened"]]);
     expect(gapRows()).toHaveLength(1);
-    expect(gapRows()[0]).toMatchObject({ kind: "unused", tool: EDIT, walkable: false, roots: ["r1", "r2"], evidence: [a.id, b.id] });
+    expect(gapRows()[0]).toMatchObject({ kind: "unused", tool: EDIT, walkable: true, roots: ["r1", "r2"], evidence: [a.id, b.id] });
   });
   it("edits the commit took within the window (use r 1), or not yet judged, are no class (a guard)", async () => {
     rule({ min_count: 2, min_roots: 2 });
@@ -344,5 +344,48 @@ describe("a filed class's name", () => {
     const [g] = gapRows();
     expect("class" in g).toBe(false);
     expect(g.signature).toBe("no such directory: <cwd>");
+  });
+});
+
+describe("Wave 9C — D2.1 walkable 200 unserved & D2.2 quiet_rows deferral during active wanted:true repair", () => {
+  it("[MUST-FAIL] HTTP 200 unserved class is filed walkable: true while 502 outage stays walkable: false", async () => {
+    rule({ min_count: 2, min_roots: 2 });
+    fail("r1", "git_worktree", "/trees/a", { status: 200, blames: "callee", unserved: "git_worktree", body: "unserved git_worktree" });
+    fail("r2", "git_worktree", "/trees/b", { status: 200, blames: "callee", unserved: "git_worktree", body: "unserved git_worktree" });
+    fail("r3", "fs_read", "/trees/c", { status: 502, blames: "callee", body: "gateway timeout" });
+    fail("r4", "fs_read", "/trees/d", { status: 502, blames: "callee", body: "gateway timeout" });
+    const r = await report();
+    const uns = gapRows().find((g) => g.tool === "git_worktree");
+    const out = gapRows().find((g) => g.tool === "fs_read");
+    expect(uns?.walkable).toBe(true);
+    expect(out?.walkable).toBe(false);
+    expect(r.classes.find((c) => c.tool === "git_worktree")?.walkable).toBe(true);
+    expect(r.classes.find((c) => c.tool === "fs_read")?.walkable).toBe(false);
+  });
+
+  it("[MUST-FAIL] active wanted:true repair attempt defers quiet_rows close until stalled or quiet", async () => {
+    rule({ min_count: 2, min_roots: 2, window_rows: 100, quiet_rows: 20 });
+    missing("r1", "/trees/a");
+    missing("r2", "/trees/b");
+    await report();
+    const gOpen = gapRows()[0];
+    // Mark wanted: true on the open gap episode and advance past quiet_rows with an active selection on the gap
+    rows.push({ id: `cw-${++head}`, seq: head, shape: "change_wanted", role: "described", wanted: true, input_refs: [gOpen.id] });
+    filler(10);
+    const activeSel = { id: `sel-rep-${++head}`, seq: head, shape: "selection", role: "walk", root: gOpen.id, a: "call/fs_edit" };
+    rows.push(activeSel);
+    filler(15); // at - lastFail >= 25 >= quiet_rows(20), BUT at - activeSel < 20!
+    ok("r3", "git_diff");
+    const deferred = await report();
+    expect(deferred.classes.find((c) => c.gap_id === gOpen.gap_id)?.action).not.toBe("closed");
+    expect(gapRows().at(-1)?.status).toBe("open");
+
+    // Once the repair attempt stalls on that episode, quiet_rows closes normally
+    rows.push({ id: `st-${++head}`, seq: head, shape: "failure", role: "walk", kind: "stall", root: gOpen.id, input_refs: [gOpen.id] });
+    filler(2);
+    ok("r4", "git_diff");
+    const closed = await report();
+    expect(closed.classes.find((c) => c.gap_id === gOpen.gap_id)?.action).toBe("closed");
+    expect(gapRows().at(-1)?.status).toBe("closed");
   });
 });

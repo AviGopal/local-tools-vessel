@@ -97,8 +97,9 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     // A failure whose selection names no root is counted under its move (the template or call it ran), never dropped.
     const root = typeof sel?.root === "string" && sel.root !== "" ? sel.root : `move:${String(sel?.a ?? tool)}`
     if (ownRoots.get(key)?.has(root) === true) continue
+    const unserved200 = f.status === 200 && f.waits_for === undefined && typeof f.unserved === "string" && f.unserved !== ""
     const k = out.get(key) ?? { key, tool, ...(named !== undefined ? { class: named } : {}), kind: s("kind"), refused: s("refused"), blames: s("blames"), waits_for: s("waits_for"), status_band: band(f.status),
-      signature, example, failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamesOf(f) === "callee" }
+      signature, example, failures: [], roots: [], first_seq: f.seq, last_seq: f.seq, infra: blamesOf(f) === "callee" && !unserved200 }
     k.failures.push(f.id)
     if (root !== "" && !k.roots.includes(root)) k.roots.push(root)
     k.last_seq = f.seq
@@ -106,15 +107,15 @@ export const classesOf = (pool: Row[], ownRoots: Map<ClassKey, ReadonlySet<strin
     out.set(key, k)
   }
   // A selection whose output nobody took (records' stamp, use r 0) is a class of its own: tool its move, kind unused,
-  // keyed by the move alone, its root the selection's. Never work for the walk: the walk is what offered nothing to take
-  // it, so the gap is the fact, for whoever reads gaps.
+  // keyed by the move alone, its root the selection's. Code-fixable outer-horizon gap (walkable: true) so the walk
+  // can investigate and fix missing offer/consumer wiring.
   for (const s of pool.filter((r) => r.shape === "selection" && r.seq > unusedAfter && useOf(r) === 0).sort((a, b) => a.seq - b.seq)) {
     const tool = String(s.a ?? "unknown")
     const key = new Bun.CryptoHasher("sha256").update(JSON.stringify([UNUSED, tool])).digest("hex").slice(0, 24)
     const root = typeof s.root === "string" && s.root !== "" ? s.root : `move:${tool}`
     if (ownRoots.get(key)?.has(root) === true) continue
     const k = out.get(key) ?? { key, tool, kind: UNUSED, status_band: "none", signature: "", example: "",
-      failures: [], roots: [], first_seq: s.seq, last_seq: s.seq, infra: true }
+      failures: [], roots: [], first_seq: s.seq, last_seq: s.seq, infra: false }
     k.failures.push(s.id)
     if (!k.roots.includes(root)) k.roots.push(root)
     k.last_seq = s.seq

@@ -107,14 +107,46 @@ export const detect = async (): Promise<Report> => {
   if (!Array.isArray(asked)) return asked;
   const gaps = await read({ shape: "gap" });
   if (!Array.isArray(gaps)) return gaps;
+  const cwRows = await read({ shape: "change_wanted" });
+  if (!Array.isArray(cwRows)) return cwRows;
   const mine = gaps.filter((g) => g.writer === WRITER && g.role === ROLE && String(g.gap_id ?? "").startsWith(GAP_PREFIX)).sort((a, b) => a.seq - b.seq);
   const latest = new Map<string, Row>();
   const rootsOf = new Map<string, Set<string>>();
+  const episodeIdsOf = new Map<string, Set<string>>();
   for (const g of mine) {
     const id = String(g.gap_id);
     latest.set(id, g);
     rootsOf.set(id.slice(GAP_PREFIX.length), (rootsOf.get(id.slice(GAP_PREFIX.length)) ?? new Set()).add(g.id));
+    if (g.status === "open") {
+      const ep = episodeIdsOf.get(id) ?? new Set<string>();
+      ep.add(g.id);
+      episodeIdsOf.set(id, ep);
+    } else {
+      episodeIdsOf.delete(id);
+    }
   }
+  const selsById = new Map(asRead.filter((r) => r.shape === "selection").map((r) => [r.id, r]));
+  const citesAny = (r: Row, ep: ReadonlySet<string>): boolean =>
+    (typeof r.root === "string" && ep.has(r.root)) || [r.input_refs].flat().map(String).some((id) => ep.has(id));
+  const activeRepair = (gap_id: string): boolean => {
+    const ep = episodeIdsOf.get(gap_id);
+    if (ep === undefined || ep.size === 0) return false;
+    const latestCw = cwRows.filter((r) => citesAny(r, ep)).sort((a, b) => a.seq - b.seq).at(-1);
+    if (latestCw === undefined || latestCw.wanted !== true) return false;
+    const cwSeq = Number(latestCw.seq);
+    const epSelIds = new Set(asRead.filter((r) => r.shape === "selection" && citesAny(r, ep)).map((r) => r.id));
+    const stalledAfter = asRead.some((r) => r.shape === "failure" && r.role === "walk" && (r.kind === STALL || r.ends === STALL) && r.seq > cwSeq &&
+      (citesAny(r, ep) || epSelIds.has(String(r.selection_ref ?? "")) || ep.has(String(selsById.get(String(r.selection_ref ?? ""))?.root ?? ""))));
+    if (stalledAfter) return false;
+    let lastActivitySeq = cwSeq;
+    for (const r of asRead) {
+      if ((r.shape === "selection" && epSelIds.has(r.id)) ||
+          (r.shape === "hop" && (epSelIds.has(String(r.selection_ref ?? "")) || citesAny(r, ep)))) {
+        if (r.seq > lastActivitySeq) lastActivitySeq = r.seq;
+      }
+    }
+    return at - lastActivitySeq < rule.quiet_rows;
+  };
   const windowFrom = Math.max(0, at - rule.window_rows);
   const recent = classesOf([...pool, ...asked].filter((r) => r.shape !== "failure" || r.seq > windowFrom), rootsOf, windowFrom);
   const all = new Map(classesOf([...pool, ...asked], rootsOf).map((k) => [k.key, k]));
@@ -125,8 +157,8 @@ export const detect = async (): Promise<Report> => {
   for (const k of recent) {
     const gap_id = GAP_PREFIX + k.key;
     // Quiet for quiet_rows though still inside the window (a rule whose quiet is shorter than its window): a close
-    // candidate, decided below as any quiet class is.
-    if (at - k.last_seq >= rule.quiet_rows && latest.get(gap_id)?.status === "open") continue;
+    // candidate, decided below as any quiet class is (unless an active wanted:true repair attempt is in flight).
+    if (at - k.last_seq >= rule.quiet_rows && latest.get(gap_id)?.status === "open" && !activeRepair(gap_id)) continue;
     seen.add(gap_id);
     const prev = latest.get(gap_id);
     const filed: Filed = { gap_id, class: k.key, tool: k.tool, count: k.failures.length, roots: k.roots.length, walkable: !k.infra, action: "below" };
@@ -145,14 +177,15 @@ export const detect = async (): Promise<Report> => {
     if (!same) await put(row);
     out.push(filed);
   }
-  // A filed class with no failure in the window: closed once quiet for quiet_rows and called since without failing so.
+  // A filed class with no failure in the window: closed once quiet for quiet_rows and called since without failing so,
+  // deferred while an un-ended wanted:true repair attempt is actively working the gap.
   for (const [gap_id, g] of latest) {
     if (seen.has(gap_id) || g.status !== "open") continue;
     const key = gap_id.slice(GAP_PREFIX.length);
     const k = all.get(key);
     const last = Number(k?.last_seq ?? g.last_seq ?? 0);
     const filed: Filed = { gap_id, class: key, tool: String(g.tool), count: Number(g.count ?? 0), roots: Number(g.root_count ?? 0), walkable: g.walkable !== false, action: "unchanged" };
-    if (at - last >= rule.quiet_rows) {
+    if (at - last >= rule.quiet_rows && !activeRepair(gap_id)) {
       const tool = { kind: g.kind, ...(k ?? {}), tool: String(g.tool) } as Klass;
       if (exercised(asRead, tool, last)) {
         filed.action = "closed";

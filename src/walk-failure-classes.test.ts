@@ -174,4 +174,21 @@ describe("walk failure classes", () => {
     expect(k).toHaveLength(1)
     expect(k[0].class).toBeUndefined()
   })
+
+  test("[MUST-FAIL] D2.1: unused selections and HTTP 200 unserved callee failures are walkable (infra: false), while 502/0/waits_for:person stay infra: true", () => {
+    const sUnused = { id: "su1", seq: ++n, shape: "selection", role: "walk", root: "r1", a: "call/fs_edit", use: { r: 0, key: "u1" } }
+    const rows: Row[] = [
+      sUnused,
+      ...call("w1", "git_worktree", { repo: "foo" }, { status: 200, blames: "callee", unserved: "git_worktree", body: "unserved" }),
+      ...call("w2", "git_worktree", { repo: "foo" }, { status: 502, blames: "callee", body: "bad gateway" }),
+      ...call("w3", "git_worktree", { repo: "foo" }, { status: 0, blames: "callee", body: "fetch failed" }),
+      ...call("w4", "git_land", {}, { status: 200, blames: "callee", waits_for: "person", unserved: "git_land", body: "waiting" }),
+    ]
+    const ks = classesOf(rows)
+    expect(ks.find((k) => k.kind === "unused")?.infra).toBe(false)
+    expect(ks.find((k) => k.status_band === "200" && k.waits_for === undefined)?.infra).toBe(false)
+    expect(ks.find((k) => k.status_band === "5xx")?.infra).toBe(true)
+    expect(ks.find((k) => k.status_band === "0")?.infra).toBe(true)
+    expect(ks.find((k) => k.waits_for === "person")?.infra).toBe(true)
+  })
 })
