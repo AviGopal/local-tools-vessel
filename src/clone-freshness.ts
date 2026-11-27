@@ -4,22 +4,29 @@
 // and a walk that never got there (its stale tree failing to typecheck) kept working in a clone that could not land.
 // So every answer about a path in a walk clone says so, the moment the clone is touched (index.ts).
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { git, vesselGit } from "./git-commit.js";
 import { movedOnAnswer, type Unread, unreadOf } from "./git-worktree.js";
-import { walkTreesDir } from "./tool-roots.js";
+import { realLocation, walkTreesDir } from "./tool-roots.js";
 import { containmentZones, type Env } from "./write-containment.js";
 
 /** The walk clone a call's pointer names a path in, if any: <trees>/<repo>-<made>-<id>, and the repository it is of. */
+// Where the path really lands, symlinks followed, by the resolver the tool roots confine a write with (realLocation; a
+// path not yet made resolves through its nearest existing ancestor): one that leaves a clone through `..` or a symlink
+// is in no clone it passes through, so neither the edit's answer nor the refresh before it names a clone the write does
+// not land in. The clone is named under the trees directory as configured, the form git_worktree records it in.
 export function cloneOf(pointer: unknown, env: Env): { dir: string; repo: string } | null {
-  const trees = walkTreesDir(env);
-  if (typeof pointer !== "object" || pointer === null) return null;
-  for (const v of Object.values(pointer as Record<string, unknown>)) {
-    if (typeof v !== "string" || !v.startsWith(`${trees}/`)) continue;
+  const configured = normalize(walkTreesDir(env));
+  const trees = realLocation(configured);
+  if (trees === null || typeof pointer !== "object" || pointer === null) return null;
+  for (const raw of Object.values(pointer as Record<string, unknown>)) {
+    if (typeof raw !== "string" || !isAbsolute(raw)) continue;
+    const v = realLocation(raw);
+    if (v === null || !v.startsWith(`${trees}/`)) continue;
     const name = v.slice(trees.length + 1).split("/")[0];
     const parts = name.split("-");
     if (parts.length < 3 || name === "") continue;
-    return { dir: join(trees, name), repo: parts.slice(0, -2).join("-") };
+    return { dir: join(configured, name), repo: parts.slice(0, -2).join("-") };
   }
   return null;
 }
