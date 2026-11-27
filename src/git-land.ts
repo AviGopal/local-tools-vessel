@@ -17,7 +17,7 @@
 // carries the push credential (the node's system credential helper reads it from this vessel's env).
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { currentProtectedList, git, protectedHits, protectedListAt, vesselGit } from "./git-commit.js";
 import { AGENT_SHELL_UID, agentShellSpawn, agentWritableDir, runningAsRoot } from "./shell-privilege.js";
 import { runBounded } from "./bounded-run.js";
@@ -389,9 +389,10 @@ function silenced(patch: string, added: string[]): string[] {
   return [...out].sort();
 }
 
-/** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). With no test_file
- * the check is the repository's whole suite (a gap the suite found, its named tests anywhere in it). */
-export type GapRef = { gap_id: string; test_file?: string; vessel?: string; only_tests: string[]; lever?: string };
+/** The gap a clone was made to fix: its id and the check that says it is fixed (the detector's own). With no test_file,
+ * either operational (checked by a [MUST-FAIL] test added with the source fix) or the repository's whole suite (a gap
+ * the suite found, its named tests anywhere in it). */
+export type GapRef = { gap_id: string; test_file?: string; vessel?: string; operational?: true; only_tests: string[]; lever?: string };
 
 /** Whether that gap's check passes on the tree: the named tests pass when the test file runs alone, as the detector's
  * closer runs it, and no test of the file that passed on the base fails on the tree (regressed names them). passed is
@@ -493,10 +494,12 @@ const TEST_SUPPORT = /(^|\/)(tests?|__tests__|fixtures?|__fixtures__|__mocks__)\
 
 /**
  * Whether a path (relative to the repository) is part of a gap's check: its test file, what tests lean on
- * (TEST_SUPPORT) or what chooses how code is checked (CHECK_CONFIG). The one rule for it: git_diff's gap check refuses
- * a change that touches one, and fs_edit refuses the edit itself on a clone made for that gap.
+ * (TEST_SUPPORT) or what chooses how code is checked (CHECK_CONFIG). For an operational gap, only CHECK_CONFIG is
+ * refused so the fix can author a [MUST-FAIL] test alongside its source change. The one rule for it: git_diff's gap
+ * check refuses a change that touches one, and fs_edit refuses the edit itself on a clone made for that gap.
  */
-export function isGapCheckFile(path: string, gap: Pick<GapRef, "test_file">): boolean {
+export function isGapCheckFile(path: string, gap: Pick<GapRef, "test_file" | "operational">): boolean {
+  if (gap.operational === true) return CHECK_CONFIG.test(path);
   return (gap.test_file !== undefined && path === gap.test_file) || TEST_SUPPORT.test(path) || CHECK_CONFIG.test(path);
 }
 
@@ -504,8 +507,10 @@ export function isGapCheckFile(path: string, gap: Pick<GapRef, "test_file">): bo
  * The gap the call was made for, when its selection's root is a detector's gap: read from records by the selection the
  * walk names on every call (its root is the request the clone is for). No selection: not the walk's call, no gap. The gap
  * row says what checks it (meta.evidence_resolve): a test file, or a test_suite of its vessel naming no file, whose check
- * is then the whole suite of that vessel (named as a repository is: any "repos/" prefix removed). A row that cannot be read, or a gap row naming neither, is an error: the check then does not
- * pass.
+ * is then the whole suite of that vessel (named as a repository is: any "repos/" prefix removed). An operational detector
+ * gap (no evidence_resolve, no meta.regression, and a category other than failing_test or typecheck_error) returns an
+ * operational gap reference. A row that cannot be read, or a gap row naming none of these, is an error: the check then
+ * does not pass.
  */
 export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined): Promise<GapRef | null | { error: string }> {
   if (!selectionRef) return null;
@@ -517,14 +522,20 @@ export async function gapOf(rows: Deps["rows"], selectionRef: string | undefined
   if (!Array.isArray(r)) return r;
   const g = r[0];
   if (!g || g.shape !== "gap" || g.role !== "detector") return null;
-  const evidence = (g.meta as { evidence_resolve?: { shape?: unknown; input?: Record<string, unknown> } } | undefined)?.evidence_resolve;
+  const meta = g.meta as { evidence_resolve?: { shape?: unknown; input?: Record<string, unknown> }; regression?: unknown; sources?: unknown } | undefined;
+  const evidence = meta?.evidence_resolve;
   const input = evidence?.input ?? {};
   const suite = evidence?.shape === "test_suite" && typeof input.vessel === "string" && input.vessel !== "" && input.test_file === undefined;
-  if (!suite && (typeof input.test_file !== "string" || input.test_file === "")) return { error: `gap ${String(g.gap_id)} names no test file` };
   // Where the fix belongs, as the gap row says it (meta.sources: what the check imports, which the detector writes):
   // named when an edit of the check itself is refused, so the refusal says where to edit instead.
-  const sources = ((g.meta ?? {}) as { sources?: unknown }).sources;
+  const sources = meta?.sources;
   const lever = Array.isArray(sources) && sources.length > 0 ? sources.map(String).join(", ") : undefined;
+  if (!suite && (typeof input.test_file !== "string" || input.test_file === "")) {
+    if (evidence === undefined && meta?.regression === undefined && typeof g.category === "string" && g.category !== "" && !["failing_test", "typecheck_error"].includes(g.category)) {
+      return { gap_id: String(g.gap_id), operational: true, only_tests: [], ...(lever ? { lever } : {}) };
+    }
+    return { error: `gap ${String(g.gap_id)} names no test file` };
+  }
   return { gap_id: String(g.gap_id), ...(suite ? { vessel: String(input.vessel).replace(/^repos\//, "") } : { test_file: String(input.test_file) }), only_tests: [input.only_tests ?? []].flat().map(String),
     ...(lever ? { lever } : {}) };
 }
@@ -821,6 +832,93 @@ const matches = (x: string, n: string): boolean => x === n || x.endsWith(` > ${n
 const greenIn = (run: { passed: Set<string> | null; failed: Map<string, string> }, n: string): boolean =>
   [...(run.passed ?? [])].some((x) => matches(x, n)) && ![...run.failed.keys()].some((x) => matches(x, n));
 
+const OP_TEST_FILE = /\.(test|spec)\.(ts|tsx|js|jsx|mts|cts)$/;
+
+/**
+ * Operational gap check: requires both non-test source changes and at least one [MUST-FAIL] *.test.* file that fails
+ * on a fresh base tree with the new/edited TEST_SUPPORT files overlaid and passes on the change tree with zero
+ * regressions to previously passing tests in any modified test file.
+ */
+async function operationalGapCheck(dir: string, gap: GapRef, changed: string,
+  opBaseOut: () => Promise<string | { why: string }>): Promise<GapCheck> {
+  const paths = changed.split("\n").filter(Boolean);
+  const testFiles = paths.filter((p) => OP_TEST_FILE.test(p) && existsSync(join(dir, p)));
+  const sourceFiles = paths.filter((p) => !TEST_SUPPORT.test(p) && !CHECK_CONFIG.test(p));
+  if (sourceFiles.length === 0) return { gap_id: gap.gap_id, ran: false, passed: false, why: "an operational gap fix must change non-test source files, not only tests" };
+  if (testFiles.length === 0) return { gap_id: gap.gap_id, ran: false, passed: false, why: "an operational gap fix must include a [MUST-FAIL] *.test.* file that fails on the base and passes on the change" };
+
+  const opBase = await opBaseOut();
+  if (typeof opBase !== "string") return { gap_id: gap.gap_id, ran: false, passed: false, why: opBase.why };
+
+  const testLabel = testFiles.join(", ");
+  const beforeClean = new Map<string, Set<string>>();
+  for (const tf of testFiles) {
+    if (!existsSync(join(opBase, tf))) continue;
+    const b = await runCheck(opBase, tf, "op-clean");
+    if (b.passed === null) return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the test run on the base wrote no report for ${tf}` };
+    beforeClean.set(tf, b.passed);
+  }
+
+  for (const p of paths.filter((x) => TEST_SUPPORT.test(x))) {
+    const src = join(dir, p);
+    const dst = join(opBase, p);
+    if (existsSync(src)) {
+      const parent = dirname(dst);
+      mkdirSync(parent, { recursive: true, mode: 0o755 });
+      for (let cur = parent; cur !== opBase && cur.startsWith(`${opBase}/`); cur = dirname(cur)) chmodSync(cur, 0o755);
+      writeFileSync(dst, readFileSync(src), { mode: 0o644 });
+      chmodSync(dst, 0o644);
+    } else {
+      rmSync(dst, { force: true });
+    }
+  }
+
+  let redOnBase = false;
+  for (const tf of testFiles) {
+    const b = await runCheck(opBase, tf, "op-base");
+    if (b.exit_code !== 0 || b.passed === null || b.signalled) { redOnBase = true; break; }
+  }
+  if (!redOnBase) {
+    return {
+      gap_id: gap.gap_id,
+      test_file: testLabel,
+      ran: true,
+      passed: false,
+      exit_code: 0,
+      out: "the added test already passes on the base: an operational gap fix needs a [MUST-FAIL] test that fails without the source change",
+      truncated: false,
+      regressed: [],
+    };
+  }
+
+  const regressed: string[] = [];
+  const outs: string[] = [];
+  let passed = true;
+  let exit_code = 0;
+  for (const tf of testFiles) {
+    const r = await runCheck(dir, tf, "op-tree");
+    const tfReg = r.passed === null ? [] : [...(beforeClean.get(tf) ?? [])].filter((n) => !r.passed!.has(n));
+    regressed.push(...tfReg);
+    const ok = r.passed !== null && r.passed.size > 0 && r.exit_code === 0 && !r.signalled && tfReg.length === 0;
+    if (!ok) {
+      if (passed) exit_code = r.exit_code;
+      passed = false;
+    }
+    outs.push(r.passed === null ? `the test run wrote no report for ${tf}\n${r.out}` : r.out);
+  }
+  const combined = outs.join("\n");
+  return {
+    gap_id: gap.gap_id,
+    test_file: testLabel,
+    ran: true,
+    passed,
+    exit_code,
+    out: keptCheckOut(combined, CHECK_OUT_MAX),
+    truncated: combined.length > CHECK_OUT_MAX,
+    regressed: [...new Set(regressed)].sort(),
+  };
+}
+
 /**
  * Whether the gap's own check passes on exactly this tree, in the same call: its test file run alone, as the detector's
  * closer runs it, every named test passing and no test of the file that passed on the base failing (a fix that turns a
@@ -832,7 +930,7 @@ const greenIn = (run: { passed: Set<string> | null; failed: Map<string, string> 
  * the check. It runs as the shell user, in the tree written out with the installed node_modules.
  */
 async function gapCheck(t: Trusted, repo: string, dir: string | { why: string }, gap: GapRef | { error: string }, base: string | { why: string },
-  runs?: SuiteRuns): Promise<GapCheck> {
+  runs?: SuiteRuns, opBaseOut?: () => Promise<string | { why: string }>): Promise<GapCheck> {
   if ("error" in gap) return { ran: false, passed: false, why: gap.error };
   const id = { gap_id: gap.gap_id, ...(gap.test_file === undefined ? {} : { test_file: gap.test_file }) };
   if (typeof dir !== "string") return { ...id, ran: false, passed: false, why: dir.why };
@@ -846,6 +944,10 @@ async function gapCheck(t: Trusted, repo: string, dir: string | { why: string },
   if (patch === null) return { ...id, ran: false, passed: false, why: "the change's lines could not be read" };
   const forged = patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++") && FORGES.test(l));
   if (forged.length > 0) return { ...id, ran: false, passed: false, why: `the change writes what the check reads: ${forged[0].slice(1, 200)}` };
+  if (gap.operational === true) {
+    if (!opBaseOut) return { ...id, ran: false, passed: false, why: "an operational gap check needs a clean base tree" };
+    return operationalGapCheck(dir, gap, changed, opBaseOut);
+  }
   if (gap.test_file === undefined) {
     // a suite is its vessel's: another repository's suite says nothing of the gap, whatever names the two share
     if (gap.vessel !== repo) return { ...id, ran: false, passed: false, why: `the gap's suite is ${gap.vessel}'s, and this clone is of ${repo}` };
@@ -1041,8 +1143,8 @@ export async function diffClone(cwd: string, made: Made, transports: string[] = 
     // a gap whose check is the whole suite runs it once, in its check, and the suite's own verdict reads the same runs
     let runs: SuiteRuns | undefined;
     const check = gap === null ? {} : { check: await timed(steps, "gap_check", async () => {
-      if (!("error" in gap) && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs, key, treeKey);
-      return gapCheck(t, made.repo, dir, gap, baseDir, runs);
+      if (!("error" in gap) && gap.operational !== true && gap.test_file === undefined) runs = await suiteRuns(suiteDir, baseDir, suiteMs, key, treeKey);
+      return gapCheck(t, made.repo, dir, gap, baseDir, runs, () => writeOut(t, made, work, t.origin, "op-base"));
     }) };
     const suite = await timed(steps, "suite", async () => suiteOf(runs ?? await suiteRuns(suiteDir, baseDir, suiteMs, key, treeKey)));
     // what judged the tree before the diff itself: a reader that keeps a row's start (the walk cuts a long answer) keeps
