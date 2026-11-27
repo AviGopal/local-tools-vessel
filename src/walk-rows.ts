@@ -8,7 +8,9 @@
 // such a fallback: named debt). A row with role walk is trusted as far as the node key is: any vessel on the node could
 // write one, a person key or the shell user (which holds no key) cannot.
 
-export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string };
+// refreshed_from: the base the rows say, when the clone was moved off it by the call now running (clone-refresh.ts
+// madeCurrent); a row that records where the clone is then names it, so madeClone reads the move as one clone's.
+export type Made = { cwd: string; repo: string; branch: string; base: string; super_base: string; origin_url: string; refreshed_from?: string };
 export type Row = { id: string; shape?: string; role?: string; pointer_type?: string; phase?: string; output?: Record<string, unknown>; [k: string]: unknown };
 
 export type Query = { shape?: string; where?: Record<string, unknown>; ids?: string[] };

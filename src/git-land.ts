@@ -171,7 +171,8 @@ export async function landClone(cwd: string, deps: Partial<Deps> = {}): Promise<
     // landing reads the clone from (walk-rows.ts madeClone), so this one carries every field the others do: a row lacking
     // one reads as a different clone at the same place, and every later commit or landing there is refused.
     if ("error" in verdict) return { ...verdict, tree,
-      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, super_base: made.super_base, origin_url: made.origin_url, head, tree } };
+      clone: { shape: "gitWorktree", cwd, repo: made.repo, branch: made.branch, base: made.base, super_base: made.super_base, origin_url: made.origin_url, head, tree,
+        ...(made.refreshed_from ? { refreshed_from: made.refreshed_from } : {}) } };
 
     // No hooks run beside the credential: an empty directory this vessel owns.
     const hooksDir = mkdtempSync(join(work, "hooks-"));

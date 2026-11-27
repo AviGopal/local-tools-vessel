@@ -222,6 +222,19 @@ describe("a clone moved onto a newer base that no row records is a fact, read fr
     expect(await madeCurrent(c.cwd, at(c.made))).toMatchObject({ moved_unrecorded: to, error: expect.stringContaining("git_worktree for demo") });
   });
 
+  it("[MUST-FAIL] the call that refreshes the clone reads the base it moved from: a record of where the clone is can name it", async () => {
+    const c = await clone();
+    const to = moveOrigin("b.txt", "b14\n");
+    const out = await freshFirst({ dir: c.cwd, repo: "demo" }, async () => madeCurrent(c.cwd, at(c.made)), process.env,
+      (cl, env) => refreshInPlace(cl, env, at(c.made))) as Record<string, unknown>;
+    expect(out).toMatchObject({ base: to, refreshed_from: c.made.base });
+    // [GUARD] read where no call moved it: the rows' base, naming no move
+    const d = await clone();
+    expect("refreshed_from" in (await madeCurrent(d.cwd, at(d.made)) as Record<string, unknown>)).toBe(false);
+    // [GUARD] nor where the node holds no copy to read it against (a super clone on a node with no super checkout)
+    expect("refreshed_from" in (await madeCurrent(d.cwd, at({ ...d.made, repo: "super" }), {}) as Record<string, unknown>)).toBe(false);
+  });
+
   it("[MUST-FAIL] the stuck fact's exit: git_worktree's refresh from the recorded base onto the copy succeeds on a clone already moved, keeping its change", async () => {
     const c = await clone();
     writeFileSync(join(c.cwd, "a.txt"), "1\n2\n3z\n4\n5\n"); commitAll(c.cwd, "own change"); asOwner(c.cwd);

@@ -187,6 +187,18 @@ describe("git_land", () => {
     expect(tree).toBe(String(refused.clone?.tree));
   });
 
+  scanned("[MUST-FAIL] a refused land in a clone this call moved names the base it moved from; [GUARD] one in a clone no call moved names none", async () => {
+    const { cwd } = await change("refused-moved.txt", "m\n");
+    table = [];
+    const w = made.get(cwd)!;
+    const moved = await landClone(cwd, { ...deps, find: async () => ({ ...w, refreshed_from: "f".repeat(40) }) }) as { error: string; clone?: Record<string, unknown> };
+    expect(String(moved.error)).toContain("no verdict approves this tree");
+    expect(moved.clone).toMatchObject({ base: w.base, refreshed_from: "f".repeat(40) });
+    const still = await landClone(cwd, deps) as { error: string; clone?: Record<string, unknown> };
+    expect(String(still.error)).toContain("no verdict approves this tree");
+    expect(still.clone && "refreshed_from" in still.clone).toBe(false);
+  });
+
   scanned("[MUST-FAIL] lands nothing without a verdict on its tree, nor with a verdict on another tree", async () => {
     const before = originHead();
     const { cwd, tree } = await change("a.txt", "two\n");

@@ -109,9 +109,10 @@ const thisCall = new AsyncLocalStorage<Refreshed>();
 export async function madeCurrent(cwd: string, made = madeClone, env: Env = process.env): Promise<Awaited<ReturnType<typeof madeClone>> | { error: string; moved_unrecorded: string }> {
   const m = await made(cwd);
   if ("error" in m) return m;
-  // This call's own refresh: the clone's base is where this call moved it, from the base the rows say.
+  // This call's own refresh: the clone's base is where this call moved it, from the base the rows say, which it names (a
+  // tool's answer that records where the clone is carries it, or that record reads as a second clone at this cwd).
   const own = thisCall.getStore();
-  if (own !== undefined && own.cwd === cwd && own.refreshed_from === m.base) return { ...m, base: own.base, super_base: own.super_base };
+  if (own !== undefined && own.cwd === cwd && own.refreshed_from === m.base) return { ...m, base: own.base, super_base: own.super_base, refreshed_from: m.base };
   const zones = containmentZones(env);
   const source = m.repo === "super" ? zones.supers[0] : join(zones.clones, m.repo);
   if (!source) return m;
