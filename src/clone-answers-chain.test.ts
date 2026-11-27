@@ -6,7 +6,7 @@
 // copy, its answer's clone recorded as the walk records it, and madeClone must still read one clone, on the new base.
 // Throwaway repositories; records is a stub over the rows the walk would hold.
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { freshFirst, madeCurrent } from "./clone-refresh";
@@ -19,6 +19,8 @@ import { recordRead, walkCall } from "./walk-call-rows.test-helper";
 
 setDefaultTimeout(120_000);
 const T = mkdtempSync(join(tmpdir(), "clone-answers-chain-test-"));
+// run as root, the tools' git runs as an unprivileged user, which must be able to enter the test directory
+chmodSync(T, 0o755);
 const ENV_KEYS = ["DISCOVERY_ENDPOINT", "METABOB_API_KEY", "SUPER_REPO_DIR", "PULLSYNC_GATE_PUBLIC_DIR", "MITOSIS_PUSH_CLONE_DIR", "MITOSIS_RUNTIME_DIR", "WALK_TREES_DIR",
   "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -88,9 +90,10 @@ const behindClone = async (name: string, held: "committed" | "uncommitted") => {
   const w = await makeWorktree("demo");
   if ("error" in w) throw new Error(w.error);
   walkRows = walkCall(`wt-${name}`, "git_worktree", `sel-${name}`, { ...w }).map((h) => ({ ...h, seq: ++seq }));
-  asOwner(w.cwd);
   writeFileSync(join(w.cwd, `${name}.txt`), `${name}\n`);
   if (held === "committed") commitAll(w.cwd, `own ${name}`);
+  // the clone's own change is the last write made here as root, so everything in it belongs to the user the tools run as
+  asOwner(w.cwd);
   return { cwd: w.cwd, from: w.base, to: moveOrigin(`origin-${name}.txt`) };
 };
 /** The answer's clone recorded as the walk records it (walk calls.ts recordRefreshed), then the clone read as a commit reads it. */
