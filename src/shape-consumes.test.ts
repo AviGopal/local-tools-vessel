@@ -57,6 +57,16 @@ describe("the rows each call takes", () => {
     ])
   })
 
+  // A row a call takes but fills nothing from is still a row it takes: a landing takes the verdict on the diff it lands,
+  // which names no clone. Without it, a walk at a verdict finds no call taking it, and the verdict's producer is never
+  // graded by the landing that followed.
+  it("[MUST-FAIL] git_land takes the land verdict and fills nothing from it; it is the only row taken without a field filled", () => {
+    const unbound = Object.entries(SHAPE_CONSUMES).flatMap(([name, rows]) =>
+      rows.filter((r) => Object.keys(r.binds ?? {}).length === 0).map((r) => `${name} ← ${r.shape}`))
+    expect(unbound).toEqual(["git_land ← land_verdict"])
+    expect(SHAPE_CONSUMES.git_land!.find((r) => r.shape === "land_verdict")).toEqual({ shape: "land_verdict", binds: {} })
+  })
+
   // A change any write call makes is committed by git_commit: each write call declares its answer, that answer is one of
   // the changes the wrapper names a clone for, and git_commit takes it. A write call added without all three is caught here.
   it("[MUST-FAIL] every write call's answer is a declared change, and git_commit takes each change's cwd", () => {

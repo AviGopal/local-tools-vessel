@@ -172,5 +172,8 @@ export const SHAPE_CONSUMES: Record<string, ShapeConsume[]> = {
   // A clone is committed in once git_worktree made it, or once a change there names it (the wrapper's cwd).
   git_commit: ["gitWorktree", ...CHANGES].map((shape) => ({ shape, binds: { cwd: "cwd" } })),
   git_diff: [{ shape: "gitCommitResult", binds: { cwd: "cwd" } }],
-  git_land: [{ shape: "gitDiff", binds: { cwd: "cwd" } }],
+  // A landing takes the verdict judging the diff, as its precondition already says, and fills nothing from it: the verdict
+  // names no clone. Declared, a step whose frontier is a verdict names the landing as the call that takes it, so the
+  // verdict's producer is graded by whether a landing followed.
+  git_land: [{ shape: "gitDiff", binds: { cwd: "cwd" } }, { shape: "land_verdict", binds: {} }],
 }
