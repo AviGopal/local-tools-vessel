@@ -132,11 +132,18 @@ export const SUPER_REPO_FALLBACKS: readonly string[] = ["/workspace/git/super-re
 
 export function containmentZones(env: Env, fallbacks: readonly string[] = SUPER_REPO_FALLBACKS): Zones {
   const supers: string[] = [];
-  for (const s of [env.SUPER_REPO_DIR, env.MITOSIS_SUPER_REPO_DIR, ...fallbacks]) {
+  const ws = env.WORKSPACE_ROOT;
+  const configured = [
+    env.SUPER_REPO_DIR,
+    env.MITOSIS_SUPER_REPO_DIR,
+    abs(ws) && looksLikeSuperRepo(ws.trim()) ? ws.trim() : undefined,
+  ];
+  for (const s of configured) {
     if (abs(s)) { const r = real(s.trim()); if (isGitCheckout(r) && !supers.includes(r)) supers.push(r); }
   }
-  const ws = env.WORKSPACE_ROOT;
-  if (abs(ws) && looksLikeSuperRepo(ws.trim())) { const r = real(ws.trim()); if (isGitCheckout(r) && !supers.includes(r)) supers.push(r); }
+  for (const s of fallbacks) {
+    if (abs(s)) { const r = real(s.trim()); if (isGitCheckout(r) && !supers.includes(r)) supers.push(r); }
+  }
   return {
     supers,
     clones: real(abs(env.MITOSIS_PUSH_CLONE_DIR) ? env.MITOSIS_PUSH_CLONE_DIR.trim() : "/workspace/git/vessels"),
