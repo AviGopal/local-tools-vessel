@@ -306,6 +306,68 @@ describe("operational gap check", () => {
     expect(isGapCheckFile("package.json", { operational: true })).toBe(true);
     expect(isGapCheckFile("src/calc.test.ts", { test_file: "src/calc.test.ts" })).toBe(true);
   });
+
+  it("[MUST-FAIL] refuses base missing-import/syntax faults rather than counting them as red-on-base (agf_24g4bvlpznip)", async () => {
+    const gap = { gap_id: "OP-LOAD", operational: true as const, only_tests: [] };
+    const { cwd } = await changeOf({
+      "src/calc.ts": "export const add = (a: number, b: number): number => a + b;\nexport const mul = (a: number, b: number): number => a * b;\n",
+      "src/missing-mod.test.ts": 'import { expect, test } from "bun:test";\nimport { nope } from "./does-not-exist";\n' +
+        'test("fails on import", () => { expect(nope()).toBe(1); });\n',
+    });
+    const diff = await diffClone(cwd, made.get(cwd)!, ["file"], gap);
+    if (!("tree" in diff)) throw new Error(JSON.stringify(diff));
+    expect(diff.check).toMatchObject({
+      gap_id: "OP-LOAD",
+      ran: false,
+      passed: false,
+    });
+    expect(String((diff.check as { why?: unknown })?.why ?? "")).toMatch(/wrote no report|failed to load or compile/);
+  });
+
+  it("[MUST-FAIL] refuses weakening an existing test assertion even when test title stays identical and a new test fails on base (agf_atm7hg8alhq6)", async () => {
+    const gap = { gap_id: "OP-CONTRACT", operational: true as const, only_tests: [] };
+    const { cwd } = await changeOf({
+      "src/calc.ts": "export const add = (a: number, b: number): number => (a === 0 && b === 0 ? 1 : a + b);\n",
+      "src/existing.test.ts":
+        'import { describe, expect, test } from "bun:test";\nimport { add } from "./calc";\n' +
+        'describe("existing", () => {\n' +
+        '  test("keeps zero", () => { expect(add(0, 0)).toBe(1); });\n' +
+        '  test("adds positives", () => { expect(add(2, 3)).toBe(5); });\n' +
+        '});\n',
+    });
+    const diff = await diffClone(cwd, made.get(cwd)!, ["file"], gap);
+    if (!("tree" in diff)) throw new Error(JSON.stringify(diff));
+    expect(diff.check).toMatchObject({
+      gap_id: "OP-CONTRACT",
+      test_file: "src/existing.test.ts",
+      ran: true,
+      passed: false,
+      regressed: ["existing > keeps zero"],
+    });
+    expect(String((diff.check as { out?: unknown })?.out ?? "")).toContain("unmodified base test contracts failed");
+  });
+
+  it("[GUARD] appending a genuine [MUST-FAIL] test to an existing test file without weakening existing assertions passes", async () => {
+    const gap = { gap_id: "OP-APPEND", operational: true as const, only_tests: [] };
+    const { cwd } = await changeOf({
+      "src/calc.ts": "export const add = (a: number, b: number): number => a + b;\n",
+      "src/existing.test.ts":
+        'import { describe, expect, test } from "bun:test";\nimport { add } from "./calc";\n' +
+        'describe("existing", () => {\n' +
+        '  test("keeps zero", () => { expect(add(0, 0)).toBe(0); });\n' +
+        '  test("adds positives", () => { expect(add(2, 3)).toBe(5); });\n' +
+        '});\n',
+    });
+    const diff = await diffClone(cwd, made.get(cwd)!, ["file"], gap);
+    if (!("tree" in diff)) throw new Error(JSON.stringify(diff));
+    expect(diff.check).toMatchObject({
+      gap_id: "OP-APPEND",
+      test_file: "src/existing.test.ts",
+      ran: true,
+      passed: true,
+      regressed: [],
+    });
+  });
 });
 
 // Verify fs_edit integration on an operational gap selection vs failing_test gap selection.

@@ -835,11 +835,29 @@ const greenIn = (run: { passed: Set<string> | null; failed: Map<string, string> 
   [...(run.passed ?? [])].some((x) => matches(x, n)) && ![...run.failed.keys()].some((x) => matches(x, n));
 
 const OP_TEST_FILE = /\.(test|spec)\.(ts|tsx|js|jsx|mts|cts)$/;
+const LOAD_OR_SYNTAX_FAULT = /\b(SyntaxError|Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND)\b|Export named .* not found/;
+const isLoadOrSyntaxFault = (name: string, detail: string): boolean =>
+  name.includes("Unhandled error") || LOAD_OR_SYNTAX_FAULT.test(detail);
+
+const copyOrRemove = (srcDir: string, dstDir: string, rel: string): void => {
+  const src = join(srcDir, rel);
+  const dst = join(dstDir, rel);
+  if (existsSync(src)) {
+    const parent = dirname(dst);
+    mkdirSync(parent, { recursive: true, mode: 0o755 });
+    for (let cur = parent; cur !== dstDir && cur.startsWith(`${dstDir}/`); cur = dirname(cur)) chmodSync(cur, 0o755);
+    writeFileSync(dst, readFileSync(src), { mode: 0o644 });
+    chmodSync(dst, 0o644);
+  } else {
+    rmSync(dst, { force: true });
+  }
+};
 
 /**
  * Operational gap check: requires both non-test source changes and at least one [MUST-FAIL] *.test.* file that fails
- * on a fresh base tree with the new/edited TEST_SUPPORT files overlaid and passes on the change tree with zero
- * regressions to previously passing tests in any modified test file.
+ * on a fresh base tree with the new/edited TEST_SUPPORT files overlaid (by an identified test-case failure in a valid
+ * report, never a load/syntax fault, timeout, signal, or missing report) and passes on the change tree with zero
+ * regressions to previously passing tests or unmodified base test contracts.
  */
 async function operationalGapCheck(dir: string, gap: GapRef, changed: string,
   opBaseOut: () => Promise<string | { why: string }>): Promise<GapCheck> {
@@ -857,28 +875,40 @@ async function operationalGapCheck(dir: string, gap: GapRef, changed: string,
   for (const tf of testFiles) {
     if (!existsSync(join(opBase, tf))) continue;
     const b = await runCheck(opBase, tf, "op-clean");
-    if (b.passed === null) return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the test run on the base wrote no report for ${tf}` };
+    if (b.killed || b.signalled || b.passed === null) {
+      return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the clean base test run was inconclusive for ${tf}` };
+    }
     beforeClean.set(tf, b.passed);
   }
 
-  for (const p of paths.filter((x) => TEST_SUPPORT.test(x))) {
-    const src = join(dir, p);
+  const supportPaths = paths.filter((x) => TEST_SUPPORT.test(x));
+  const savedSupport = new Map<string, Buffer | null>();
+  for (const p of supportPaths) {
     const dst = join(opBase, p);
-    if (existsSync(src)) {
-      const parent = dirname(dst);
-      mkdirSync(parent, { recursive: true, mode: 0o755 });
-      for (let cur = parent; cur !== opBase && cur.startsWith(`${opBase}/`); cur = dirname(cur)) chmodSync(cur, 0o755);
-      writeFileSync(dst, readFileSync(src), { mode: 0o644 });
-      chmodSync(dst, 0o644);
-    } else {
-      rmSync(dst, { force: true });
-    }
+    savedSupport.set(p, existsSync(dst) ? readFileSync(dst) : null);
+    copyOrRemove(dir, opBase, p);
   }
 
   let redOnBase = false;
   for (const tf of testFiles) {
     const b = await runCheck(opBase, tf, "op-base");
-    if (b.exit_code !== 0 || b.passed === null || b.signalled) { redOnBase = true; break; }
+    if (b.killed) {
+      return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the test run on the base timed out before reporting for ${tf}` };
+    }
+    if (b.signalled) {
+      return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the test run on the base was signalled for ${tf}` };
+    }
+    if (b.passed === null) {
+      return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the test run on the base wrote no report for ${tf}` };
+    }
+    if (b.exit_code !== 0 && b.failed.size > 0) {
+      const hasAssertionFailure = [...b.failed.entries()].some(([name, msg]) => !isLoadOrSyntaxFault(name, msg || failMessageOf(b.out, name)));
+      if (!hasAssertionFailure) {
+        return { gap_id: gap.gap_id, test_file: testLabel, ran: false, passed: false, why: `the test run on the base failed to load or compile ${tf} rather than failing a test assertion` };
+      }
+      redOnBase = true;
+      break;
+    }
   }
   if (!redOnBase) {
     return {
@@ -901,13 +931,40 @@ async function operationalGapCheck(dir: string, gap: GapRef, changed: string,
     const r = await runCheck(dir, tf, "op-tree");
     const tfReg = r.passed === null ? [] : [...(beforeClean.get(tf) ?? [])].filter((n) => !r.passed!.has(n));
     regressed.push(...tfReg);
-    const ok = r.passed !== null && r.passed.size > 0 && r.exit_code === 0 && !r.signalled && tfReg.length === 0;
+    const ok = !r.killed && r.passed !== null && r.passed.size > 0 && r.exit_code === 0 && !r.signalled && tfReg.length === 0;
     if (!ok) {
-      if (passed) exit_code = r.exit_code;
+      if (passed) exit_code = r.exit_code || 1;
       passed = false;
     }
     outs.push(r.passed === null ? `the test run wrote no report for ${tf}\n${r.out}` : r.out);
   }
+
+  // Verify unmodified base test files still pass against candidate source changes so existing assertions cannot be weakened.
+  if (passed && beforeClean.size > 0) {
+    for (const [p, buf] of savedSupport) {
+      const dst = join(opBase, p);
+      if (buf !== null) {
+        const parent = dirname(dst);
+        mkdirSync(parent, { recursive: true, mode: 0o755 });
+        writeFileSync(dst, buf, { mode: 0o644 });
+        chmodSync(dst, 0o644);
+      } else {
+        rmSync(dst, { force: true });
+      }
+    }
+    for (const p of sourceFiles) copyOrRemove(dir, opBase, p);
+    for (const [tf, cleanPassed] of beforeClean) {
+      const bc = await runCheck(opBase, tf, "op-base-contracts");
+      const bcReg = bc.passed === null ? [...cleanPassed] : [...cleanPassed].filter((n) => !bc.passed!.has(n));
+      if (bc.killed || bc.signalled || bc.passed === null || bcReg.length > 0 || (cleanPassed.size > 0 && bc.exit_code !== 0)) {
+        regressed.push(...bcReg);
+        if (passed) exit_code = bc.exit_code || 1;
+        passed = false;
+        outs.push(`unmodified base test contracts failed on candidate code for ${tf}\n${bc.out}`);
+      }
+    }
+  }
+
   const combined = outs.join("\n");
   return {
     gap_id: gap.gap_id,
